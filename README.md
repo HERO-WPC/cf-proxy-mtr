@@ -38,7 +38,7 @@ Phase 5  ✅ 全量扫描 + Resume（scheduler 包：测量会话、断点续测
 Phase 6  ✅ 本机地区 / 运营商信息（detect 包：可解释的检测源、手动优先）
 Phase 7  ✅ NextTrace 集成（trace 包：外部进程、真实 JSON 解析、trace 命令）
 Phase 8  ✅ TCP Probe + NextTrace 两级测量（只跟踪探测成功的目标，可续测）
-Phase 9  ⏳ 结果导出
+Phase 9  ✅ 结果导出（export 包 + privacy 包：JSONL / gzip、公开 Schema、隐私过滤）
 Phase 10 ⏳ GitHub 上传（按用户要求暂缓，等确定方案后再做）
 Phase 11 ⏳ GitHub 数据聚合
 Phase 12 ⏳ 查询与统计
@@ -58,13 +58,15 @@ cf-route-tester scan           # 全量扫描：测量 + 会话记录，写入�
 cf-route-tester scan --resume  # 继续上次未完成的扫描，只测没测过的目标
 cf-route-tester scan --trace   # 扫描后对**探测成功**的目标做线路跟踪
 cf-route-tester trace --target 1.1.1.1:443   # 单独跟踪一个目标
+cf-route-tester export --list-sessions       # 查看可导出的会话
+cf-route-tester export --session <id>        # 导出为公开 JSONL（自动隐私过滤）
 cf-route-tester db stats       # 查看本地数据库状态
 cf-route-tester db migrate     # 应用数据库迁移
 cf-route-tester db vacuum      # 整理数据库文件
 ```
 
 尚未实现（执行时明确报 `not implemented yet`，退出码 2）：
-`export`、`upload`、`aggregate`、`query`。
+`upload`、`aggregate`、`query`。
 
 ---
 
@@ -727,6 +729,165 @@ trace   默认 10 并发，上限 64（每个 worker 会启动一个 nexttrace �
 两者共用同一个有界 worker pool（`internal/worker`），
 因此并发与取消语义只有一份实现；区别只在"每个 job 做什么"。
 
+### export：导出可公开的 JSONL
+
+```bash
+cf-route-tester export --list-sessions              # 先看有哪些会话
+cf-route-tester export --session <id> --dry-run     # 看会导出多少行、过滤掉多少
+cf-route-tester export --session <id>               # 导出（默认 gzip）
+cf-route-tester export --format jsonl --out -       # 纯 JSONL 到标准输出
+cf-route-tester export --kind measurements          # 只导出测量
+cf-route-tester export --since 2026-10-03 --until 2026-10-03
+```
+
+真实运行结果（15 个目标 / 14 条跟踪）：
+
+```text
+session:     (all sessions of this collector)
+kind:        all
+output:      dist/exp/all.jsonl.gz
+format:      jsonl.gz
+
+rows in scope:
+  measurements: 15 read, 15 exported
+  traces:       14 read, 14 exported
+  total exported: 29
+  output size:    5.95 KiB
+
+privacy filtering:
+  28 private hop address(es) replaced with private-v4/private-v6
+  1 error message(s) had IPs/paths/usernames replaced
+```
+
+#### 这一层是唯一的"对外闸门"
+
+`export` 是整个项目里**唯一**允许产生可公开数据的路径。它承担三件事：
+
+1. **定型公开 Schema**：字段名一旦确定，聚合、网站、第三方分析都依赖它；
+2. **应用隐私过滤**：本地库保留内网地址供用户诊断，导出时必须过滤；
+3. **流式输出**：库可能有几十万行，不能先读进内存。
+
+#### 隐私过滤的规则
+
+| 对象 | 处理 | 理由 |
+| --- | --- | --- |
+| 目标是内网 / 保留地址的行 | **整行丢弃** | 那是用户自己的测试数据（例如用本机监听验证），既无普遍价值又会暴露内网地址规划 |
+| 路径上的内网地址 | 替换成 `private-v4` / `private-v6` | 跳的位置与顺序本身是线路信息（"第 3 跳还在内网"说明流量尚未出局域网） |
+| 错误信息里的 IP / 路径 / 用户名 | 替换成 `[addr]` / `[path]` / `Users\[user]` | 错误信息可能来自本机侧，而这些内容对分析没有价值 |
+| 采集者 `collector_id` | **保留** | 随机生成的匿名标识，不含可定位到个人的信息；没有它就无法回答"不同节点看到的线路是否不同" |
+| 目标 IP / 端口 | **保留** | 来自公开的 all.json，本身就是公开数据 |
+| `raw_json`（引擎原始输出） | **不导出** | 体积大（实测单条 24 KB）且含未经脱敏的中间信息 |
+
+过滤结果**必须被明确报出**。静默丢弃数据的导出是不可信的：
+用户无法判断产物是否完整，也就无法信任它。
+
+#### 判定内网地址的范围比 RFC1918 更宽
+
+```
+127.0.0.0/8, ::1          环回
+10/8, 172.16/12, 192.168/16   RFC1918
+169.254/16, fe80::/10      链路本地（暴露本地拓扑）
+100.64/10                  运营商级 NAT（能定位运营商内网）
+192.0.2/24, 198.51.100/24, 203.0.113/24, 2001:db8::/32  文档用途
+198.18/15                  基准测试
+240/4, 224/4, ff00::/8     保留与组播
+fc00::/7                   IPv6 唯一本地
+```
+
+边界由单元测试逐条钉住（含 `172.15` / `172.32` / `100.63` / `100.128`
+这些"紧邻但不属于"的地址，最容易写错一位）。
+
+#### 压缩：gzip 可用，zstd 暂不可用
+
+```text
+$ cf-route-tester export --format zstd
+Error: usage error: zstd is not available in this build: Go 1.26's standard
+library does not expose a zstd encoder, and adding a third-party one is
+deferred. Use --format jsonl.gz instead.
+```
+
+Go 1.26 的 `compress` 包只有 gzip（`internal/zstd` 不可导入），
+而引入第三方实现会明显增加二进制体积。因此先用 gzip——它已经能满足
+实际需求（实测 53.6 KiB → 5.95 KiB，约 **9 倍**）。
+
+不支持时给出**原因**与**替代方案**，而不是一句 "not supported"。
+
+#### 导出是确定性的
+
+同一个数据库导出两次，gzip 产物**字节完全相同**：
+
+```text
+a: A36F04FAD963807AFB3EDB38FB5B2F2D564805B6F9534CA86006810845F61D70
+b: A36F04FAD963807AFB3EDB38FB5B2F2D564805B6F9534CA86006810845F61D70
+IDENTICAL — export is reproducible
+```
+
+默认情况下 `compress/gzip` 会把**当前时间**写进头部，导致两次导出字节不同，
+"重新导出并比对哈希"这种校验方式就失效了。这里把 `ModTime` 置零。
+
+#### 每个导出行的字段
+
+```json
+{
+  "schema_version": 1,
+  "kind": "measurement",
+  "client_version": "0.1.0",
+  "target_id": "159.60.146.81:443",
+  "ip": "159.60.146.81",
+  "port": 443,
+  "timestamp_utc": "2026-10-03T13:17:30.295Z",
+  "session_id": "20260101T000000Z-00000000",
+  "collector_id": "c-00000000000000000000000000000000",
+  "collector": { "country": "CN", "province": "Zhejiang", "city": "Hangzhou",
+                 "isp": "China Mobile", "asn": "AS9808", "ip_version": "ipv4" },
+  "target_meta": {
+    "country": "US", "cca2": "US", "region": "Illinois", "city": "Chicago",
+    "country_en": "United States",
+    "latitude": 41.85003, "longitude": -87.65005,
+    "colo": { "iata": "ORD", "cca2": "US", "city": "Chicago",
+              "latitude": 41.9786, "longitude": -87.9048 }
+  },
+  "measurement": { "success": true, "latency_ms": 279.042 }
+}
+```
+
+几个刻意的决定：
+
+- **`schema_version` 写在每一行上**，而不是只在文件头：文件会被拆分、
+  抽样、打乱，行级版本号是唯一可靠的自描述方式。
+- **`client_version` 必须保留**：测量逻辑会演进，分析时要能把样本
+  按版本区分，否则不同口径的数据会被混在一起比较。
+- **失败样本仍保留 `latency_ms`**，但语义是"失败发生前等了多久"。
+  用 `error_type` 区分：`timeout` / `connection_refused` /
+  `network_unreachable` 是不同的线路现象，合并成一个"失败"会让数据失去价值。
+- **`latitude` / `longitude` 缺失时字段不出现**（不是 0）。
+  0,0 是几内亚湾的合法坐标，用它表示"未知"会把一批目标误判到同一个点上。
+- **跟踪行保留全部 RTT 样本**（`rtt_ms` 是数组），
+  而不是只留最小值：抖动是线路质量的重要维度。
+- **`hop_count` 与 `responded_hops` 分开**：前者是路径总跳数，
+  后者是有回复的跳数。前者大而后者小，说明路径上有大量不回 ICMP
+  的路由器，而不是路径很长。
+- **`local_filtered` 显式标记**：分析者需要知道 `private-v4`
+  是我们替换的，而不是真的有个主机叫这个名字。
+
+#### 不静默覆盖已有文件
+
+```text
+$ cf-route-tester export --out all.jsonl.gz
+Error: output file "all.jsonl.gz" already exists; remove it or choose
+another path with --out
+```
+
+导出物是用户可能已经上传过的东西，悄悄覆盖会让人分不清"哪一份被上传了"。
+
+#### `--out -` 时汇总走 stderr
+
+数据必须保持干净，否则管道里的 `jq` 之类会解析失败：
+
+```bash
+cf-route-tester export --format jsonl --out - | jq -c 'select(.kind=="trace")' | head
+```
+
 ### db：本地 SQLite 数据库
 
 ```bash
@@ -1074,8 +1235,13 @@ cf-route-tester/
 │   │   ├── model.go              Measurement / Trace / 目标与采集者 UPSERT
 │   │   ├── writer.go             只追加写入（整批一个事务 + 幂等去重）
 │   │   └── query.go              按目标 / 采集者 / 会话 / 时间窗口查询
-│   ├── export/                   JSONL / gzip / zstd 导出（Phase 9）
-│   ├── privacy/                  隐私过滤（本地地址等）（Phase 10）
+│   │                             + 导出专用流式读取（export_query.go）
+│   ├── privacy/                  隐私过滤（已实现）
+│   │   └── privacy.go            内网/保留地址判定、坐标与目标分类
+│   ├── export/                   公开 JSONL 导出（已实现）
+│   │   ├── schema.go             公开 Schema（Row / Measurement / Trace）
+│   │   ├── convert.go            storage -> Row 转换 + 隐私过滤 + 错误信息清洗
+│   │   └── output.go             JSONL / gzip 编码（确定性 gzip 头）
 │   ├── upload/                   GitHub 上传（Phase 10）
 │   └── aggregate/                数据聚合（Phase 11）
 ├── configs/config.example.yaml   配置示例（含详细注释，Phase 13 起真正被读取）
