@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cf-route-tester/cf-route-tester/internal/asnmap"
@@ -36,6 +37,16 @@ const (
 	// DefaultTimeout 是单次 HTTP 请求的超时。
 	DefaultTimeout = 20 * time.Second
 
+	// DefaultConcurrency 是并发抓取的 ASN 数。
+	//
+	// 抓取必须并发：30 个 ASN 各有 v4/v6 两个请求，共 60 次。
+	// 串行实测要 57 秒——而那段时间里跟踪阶段完全没开始，
+	// 使用者看到的是"TCP 秒完，然后卡住一分钟"。
+	//
+	// 取 8 而不是 30：每个 ASN 内部还有两个顺序请求，
+	// 因此实际并发约 16 个连接，既够快又不会把对端当压测。
+	DefaultConcurrency = 8
+
 	// maxResponseBytes 限制单个响应体大小，防止异常响应打爆内存。
 	maxResponseBytes = 8 << 20 // 8 MiB；实测最大约 200 KB
 )
@@ -53,6 +64,9 @@ type Options struct {
 
 	// Timeout 是单次请求超时（<=0 表示用 DefaultTimeout）。
 	Timeout time.Duration
+
+	// Concurrency 是并发抓取的 ASN 数（<=0 表示用 DefaultConcurrency）。
+	Concurrency int
 
 	// ASNs 是要抓取的 ASN 列表（空表示用 asnmap.Known()）。
 	//
@@ -112,36 +126,85 @@ func Load(ctx context.Context, opts Options) *Resolver {
 	}
 
 	var (
-		fetched   int
-		fromCache int
-		failed    int
+		fetched   atomic.Int64
+		fromCache atomic.Int64
+		failed    atomic.Int64
 	)
 
+	// **并发**加载：串行实测要 57 秒，而这段时间里跟踪完全没开始，
+	// 使用者看到的是"TCP 秒完，然后卡住一分钟"。
+	//
+	// 每个 ASN 一个任务，由固定数量的 worker 消费。
+	// 结果写进 byASN，因此必须加锁——Match 等读路径也用它。
+	workers := opts.Concurrency
+	if workers <= 0 {
+		workers = DefaultConcurrency
+	}
+	if workers > len(asns) {
+		workers = len(asns)
+	}
+
+	tasks := make(chan string)
+	var wg sync.WaitGroup
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for asn := range tasks {
+				set, src, err := resolver.loadOne(ctx, asn)
+				if err != nil {
+					failed.Add(1)
+					continue
+				}
+				if set == nil {
+					continue
+				}
+
+				resolver.mu.Lock()
+				resolver.byASN[asn] = set
+				resolver.mu.Unlock()
+
+				switch src {
+				case sourceNetwork:
+					fetched.Add(1)
+				case sourceCache:
+					fromCache.Add(1)
+				}
+			}
+		}()
+	}
+
+	canceled := false
 	for _, asn := range asns {
-		set, source, err := resolver.loadOne(ctx, asn)
-		if err != nil {
-			failed++
-			continue
+		select {
+		case tasks <- asn:
+		case <-ctx.Done():
+			canceled = true
 		}
-		if set == nil {
-			continue
-		}
-		resolver.byASN[asn] = set
-
-		switch source {
-		case sourceNetwork:
-			fetched++
-		case sourceCache:
-			fromCache++
+		if canceled {
+			break
 		}
 	}
+	close(tasks)
+	wg.Wait()
 
-	if failed > 0 {
-		opts.Logf("%d/%d ASN 的前缀不可用（线路名会少认一些）", failed, len(asns))
+	failedCount := int(failed.Load())
+	if failedCount > 0 {
+		opts.Logf("%d/%d ASN 的前缀不可用（线路名会少认一些）", failedCount, len(asns))
 	}
-	opts.Logf("就绪 %d/%d 个 ASN（缓存 %d，新抓 %d）",
-		len(resolver.byASN), len(asns), fromCache, fetched)
-	if len(resolver.byASN) == 0 {
+
+	resolver.mu.RLock()
+	ready := len(resolver.byASN)
+	resolver.mu.RUnlock()
+
+	if canceled {
+		opts.Logf("抓取被取消：就绪 %d/%d 个 ASN", ready, len(asns))
+	} else {
+		opts.Logf("就绪 %d/%d 个 ASN（缓存 %d，新抓 %d）",
+			ready, len(asns), fromCache.Load(), fetched.Load())
+	}
+	if ready == 0 {
 		opts.Logf("没有任何前缀数据，线路名将无法识别")
 	}
 

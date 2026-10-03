@@ -218,6 +218,18 @@ func (s *Service) RunCSVScan(ctx context.Context, opts CSVScanOptions) (*CSVScan
 		}
 	}()
 
+	// ---- 3.5) 提前开始抓线路前缀，与探测**并行** ----
+	//
+	// 放在这里而不是跟踪阶段开始时：抓取本身已经并发，但如果在
+	// 跟踪前才启动，TCP 扫完之后仍要干等几秒——使用者看到的就是
+	// "TCP 秒完，然后卡住"。实测串行抓取要 57 秒，那段等待非常明显。
+	//
+	// 真跑一轮上万个目标时 TCP 阶段要几分钟，而抓取只要几秒，
+	// 并行之后感知上的停顿是零。
+	//
+	// 只在确实要跟踪时才预热：不跟踪却去联网是白费。
+	warmer := startPrefixWarmup(ctx, opts, s.log)
+
 	// ---- 4) 探测 ----
 	result := &CSVScanResult{
 		OutputPath:      store.Path(),
@@ -330,7 +342,9 @@ func (s *Service) RunCSVScan(ctx context.Context, opts CSVScanOptions) (*CSVScan
 			s.log("scan: trace engine unavailable: %v", engineErr)
 			result.TraceUnavailable = engineErr.Error()
 		} else {
-			prefixes := resolveASNPrefix(ctx, opts, s.log)
+			// 取预热结果。通常此时已经就绪（探测阶段用掉了更多时间），
+			// 因此这里不会阻塞；只有极小规模的扫描才可能真等一会儿。
+			prefixes := awaitPrefixWarmup(warmer, opts, s.log)
 			s.runTracePhase(ctx, store, engine, prefixes, targets, successful, opts, result)
 		}
 	}
@@ -495,25 +509,44 @@ func (s *Service) resolveTraceEngine(ctx context.Context, opts CSVScanOptions) (
 	return s.buildTraceEngine(ctx, opts.TraceConfig)
 }
 
-// resolveASNPrefix 按需取得前缀解析器。
+// startPrefixWarmup 在后台开始抓线路前缀，立即返回。
 //
-// 返回 nil 表示不做前缀匹配（调用方会退回用引擎给的 ASN）。
-//
-// 它**不返回错误**：前缀数据是"让线路名更准"的增强，
-// 拿不到时退化成引擎的 ASN 即可，不该让跟踪失败。
-func resolveASNPrefix(ctx context.Context, opts CSVScanOptions, logf func(string, ...any)) *asnprefix.Resolver {
-	if opts.NoASNPrefix {
+// 返回 nil 表示不需要（没开跟踪、明确关掉、或调用方已注入了解析器）。
+func startPrefixWarmup(ctx context.Context, opts CSVScanOptions, logf func(string, ...any)) *asnprefix.Warmer {
+	if opts.NoASNPrefix || opts.ASNPrefix != nil {
 		return nil
 	}
-	if opts.ASNPrefix != nil {
-		return opts.ASNPrefix
+	if !opts.Trace {
+		// 不跟踪就不需要线路名，别白联网。
+		return nil
 	}
 
 	prefixOpts := opts.ASNPrefixOptions
 	if prefixOpts.Logf == nil {
 		prefixOpts.Logf = logf
 	}
-	return asnprefix.Load(ctx, prefixOpts)
+	return asnprefix.Warm(ctx, prefixOpts)
+}
+
+// awaitPrefixWarmup 取预热好的前缀解析器。
+//
+// 会等待抓取完成——但因为在探测之前就启动了，正常情况下
+// 这里已经就绪，等待时间为零。
+func awaitPrefixWarmup(warmer *asnprefix.Warmer, opts CSVScanOptions, logf func(string, ...any)) *asnprefix.Resolver {
+	// 调用方自己注入的解析器优先（测试用）。
+	if opts.ASNPrefix != nil {
+		return opts.ASNPrefix
+	}
+	if opts.NoASNPrefix || warmer == nil {
+		return nil
+	}
+
+	if !warmer.Ready() {
+		// 只有在"探测阶段比抓取还快"时才会走到这里（例如只测两个目标）。
+		// 如实说明，免得使用者以为卡住了。
+		logf("scan: 等待线路前缀抓取完成…")
+	}
+	return warmer.Get()
 }
 
 // traceOutcome 是跟踪阶段的"结果类型"。
