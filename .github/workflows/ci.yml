@@ -69,3 +69,70 @@ jobs:
           /tmp/cf-route-tester version
           /tmp/cf-route-tester db migrate --db /tmp/ci-results.db
           /tmp/cf-route-tester db stats --db /tmp/ci-results.db
+
+      - name: Full local pipeline smoke test
+        run: |
+          # 从 scan 到 export 到 aggregate/query 的完整链路。
+          #
+          # 设计原则：**不依赖外网可达性**。CI 的失败原因必须是代码
+          # 问题，而不是"某个公网 IP 今天不通"或"上游数据源挂了"。
+          #
+          # 做法：用一份本地缓存走离线路径（--fallback-url "" 让缓存
+          # 未命中直接失败，而不是偷偷联网）。
+          #
+          # 目标地址必须是**公网**地址：1.1.1.1 / 8.8.8.8 通不通都
+          # 无所谓（超时样本同样入库、同样导出），但如果用内网地址，
+          # 导出时会被隐私过滤器正确丢弃，导入出为空、后面的断言
+          # 全部失去意义——这一点实测踩过。
+          set -e
+
+          work="$(mktemp -d)"
+          db="$work/results.db"
+          identity="$work/collector.json"
+          out="$work/batch.jsonl.gz"
+
+          # 缓存文件用本工具自己的写缓存函数生成。
+          #
+          # 不能把上游的原始 JSON 直接交给 --cache：--cache 读的是
+          # 工具自己的缓存格式（source.WriteCache 的产物，含
+          # schema_version / source / stats / targets），
+          # 手工拼那个格式必然与实现漂移。
+          go run ./tools/write-cache \
+            -out "$work/all.json" \
+            -target 1.1.1.1:80 \
+            -target 8.8.8.8:53
+
+          /tmp/cf-route-tester scan \
+            --url https://zip.cm.edu.kg/all.json \
+            --fallback-url "" \
+            --cache "$work/all.json" \
+            --source-retries 0 \
+            --db "$db" --identity "$identity" \
+            --workers 2 --timeout 1s --quiet
+          /tmp/cf-route-tester db stats --db "$db"
+
+          # export：公开 JSONL。目标都是公网地址，因此必然有内容。
+          /tmp/cf-route-tester export --db "$db" --identity "$identity" \
+            --out "$out" --quiet
+
+          test -s "$out"
+          gzip -t "$out"
+
+          # 隐私回归：导出物里绝不能出现内网 / 环回 / 保留地址。
+          if gzip -dc "$out" | grep -Eq '(10|127|169\.254|172\.(1[6-9]|2[0-9]|3[01])|192\.168|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7]))\.'; then
+            echo "private address leaked into the export:"
+            gzip -dc "$out"
+            exit 1
+          fi
+
+          # aggregate 与 query 消费同一份产物。
+          /tmp/cf-route-tester aggregate --input "$out" --quiet >/dev/null
+          /tmp/cf-route-tester query 1.1.1.1:80 --input "$out" --quiet >/dev/null
+          /tmp/cf-route-tester query --stats --input "$out" --quiet >/dev/null
+
+      - name: Release tool self-check
+        run: |
+          # 发布工具的命名规则与校验和格式属于发布产物的一部分，
+          # 写错了用户就没法校验。这里只跑它的单元测试，
+          # 不真的交叉编译（那会拖慢 CI，且已由上面的步骤覆盖）。
+          go test ./tools/release/ -count=1

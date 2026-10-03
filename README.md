@@ -42,7 +42,7 @@ Phase 9  ✅ 结果导出（export 包 + privacy 包：JSONL / gzip、公开 Sch
 Phase 10 ⏸️ GitHub 上传（按用户要求暂缓：先把全部流程在本地跑通）
 Phase 11 ✅ 数据聚合（aggregate 包：按目标 × 地区 × 运营商分组、跨节点对比）
 Phase 12 ✅ 查询与统计（query 包 + query 命令：单目标跨地区画像）
-Phase 13 ⏳ 跨平台打包与发布
+Phase 13 ✅ 跨平台打包与发布（tools/release：6 平台交叉编译 + 校验和 + 清单）
 ```
 
 已实现的功能（可运行）：
@@ -77,7 +77,17 @@ cf-route-tester db vacuum      # 整理数据库文件
 
 ## 安装与构建
 
-需要 Go 1.21 或更高版本（`go.mod` 中的最低版本）。
+**推荐直接用预编译二进制**：从发布页下载对应平台的文件即可，
+不需要 Go，也不需要任何运行时（Python / Node / Java 全都不需要）。
+
+完整的安装说明（校验下载、macOS Gatekeeper、NextTrace 安装、
+权限要求、最短上手路径）见 **[docs/INSTALL.md](docs/INSTALL.md)**。
+
+### 从源码构建
+
+需要 **Go 1.26 或更高版本**。这个下限不是随便定的：
+纯 Go 的 SQLite 驱动 `modernc.org/sqlite` 自身声明了 `go 1.26`，
+低于它无法构建。
 
 ```bash
 git clone <this-repo>
@@ -94,16 +104,48 @@ go build -o bin\cf-route-tester.exe .\cmd\cf-route-tester
 bin\cf-route-tester.exe version
 ```
 
-发布构建可以注入版本信息（可选，未注入时显示 `unknown`）：
+### 生成完整发布包
+
+`tools/release` 是一个 Go 程序（任何平台都能跑，只需要 Go 工具链），
+它会先跑 gofmt / vet / test，再交叉编译 6 个平台，
+最后生成校验和与发布清单：
 
 ```bash
-go build -ldflags "\
+go run ./tools/release              # 版本号从源码读取
+go run ./tools/release -version 0.2.0
+```
+
+```text
+cf-route-tester-0.1.0-windows-amd64.exe    11.26 MiB
+cf-route-tester-0.1.0-windows-arm64.exe    10.48 MiB
+cf-route-tester-0.1.0-linux-amd64          11.16 MiB
+cf-route-tester-0.1.0-linux-arm64          10.56 MiB
+cf-route-tester-0.1.0-darwin-amd64         11.16 MiB
+cf-route-tester-0.1.0-darwin-arm64         10.62 MiB
+SHA256SUMS      # 与 sha256sum -c 兼容
+release.json    # 版本 / commit / 每个产物的哈希与大小
+```
+
+为什么构建工具用 Go 而不是 shell 脚本：一个 `.ps1` Linux 用户跑不了，
+一个 `.sh` Windows 用户跑不了，两套脚本必然漂移（命名规则、校验和格式、
+清单字段）。用 Go 写就只有一份实现，而且命名规则与校验和格式
+能被单元测试覆盖——那两样属于发布产物的一部分，写错了用户就没法校验。
+
+发布构建会注入版本信息（`--version --verbose` 可确认）：
+
+```bash
+go build -trimpath -ldflags "\
+  -s -w \
   -X github.com/cf-route-tester/cf-route-tester/internal/version.Commit=$(git rev-parse --short HEAD) \
   -X github.com/cf-route-tester/cf-route-tester/internal/version.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   -o bin/cf-route-tester ./cmd/cf-route-tester
 ```
 
-最终产物是**单个可执行文件**，不需要 Python / Node.js / Java。
+`-trimpath` 去掉构建机器的绝对路径（既是隐私问题，
+也让同一份源码在不同机器上构建出的二进制一致）。
+
+最终产物是**单个可执行文件**，`CGO_ENABLED=0` 下即可构建，
+不需要 Python / Node.js / Java。
 
 ---
 
