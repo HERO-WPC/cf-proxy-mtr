@@ -225,16 +225,36 @@ func runExport(env *Env, args []string) error {
 		return err
 	}
 
-	encoder, err := export.NewEncoder(format, writer)
-	if err != nil {
-		_ = closeOutput()
-		return err
+	// 按格式选择写出器，但**共用同一套转换与隐私过滤**。
+	//
+	// 这是刻意的：如果 CSV 走另一条转换路径，两道过滤
+	// （私有目标整行丢弃、内网跳替换）迟早会在某种格式上漏掉一道。
+	var (
+		sink      rowSink
+		finishOut func() error
+	)
+	if format.IsCSV() {
+		csvOut, err := export.NewCSVOutput(format, writer)
+		if err != nil {
+			_ = closeOutput()
+			return err
+		}
+		sink = csvRowSink{csvOut.Writer}
+		finishOut = csvOut.Close
+	} else {
+		encoder, err := export.NewEncoder(format, writer)
+		if err != nil {
+			_ = closeOutput()
+			return err
+		}
+		sink = jsonRowSink{encoder}
+		finishOut = encoder.Close
 	}
 
-	stats, writeErr := writeExport(ctx, encoder, store, filter, kind, env, p)
+	stats, writeErr := writeExport(ctx, sink, store, filter, kind, env, p)
 
 	// 收尾顺序：先关编码器（刷出 gzip 尾部与缓冲），再关文件。
-	encodeErr := encoder.Close()
+	encodeErr := finishOut()
 	closeErr := closeOutput()
 
 	if writeErr != nil {
@@ -361,9 +381,39 @@ func openExportOutput(env *Env, format export.Format, out, sessionID, kind strin
 }
 
 // writeExport 执行导出，返回过滤统计。
+// rowSink 是"能写一行导出数据"的能力。
+//
+// 存在的意义：JSONL 与 CSV 的写出器结构完全不同
+// （一个是嵌套 JSON，一个是固定列 + 表头），
+// 但**转换与隐私过滤逻辑必须完全共用**——
+// 两份实现迟早会让某种格式漏掉某个字段或某道过滤。
+//
+// 因此上层只依赖这一个方法，具体格式由适配器决定。
+type rowSink interface {
+	WriteRow(row *export.Row) error
+}
+
+// jsonRowSink 把 JSONL 编码器适配成 rowSink。
+type jsonRowSink struct {
+	encoder *export.Encoder
+}
+
+func (s jsonRowSink) WriteRow(row *export.Row) error {
+	return s.encoder.Writer.Write(row)
+}
+
+// csvRowSink 把 CSV 写出器适配成 rowSink。
+type csvRowSink struct {
+	writer *export.CSVWriter
+}
+
+func (s csvRowSink) WriteRow(row *export.Row) error {
+	return s.writer.WriteRow(row)
+}
+
 func writeExport(
 	ctx context.Context,
-	encoder *export.Encoder,
+	sink rowSink,
 	store *storage.Store,
 	filter storage.ExportFilter,
 	kind string,
@@ -376,7 +426,7 @@ func writeExport(
 	progress := newExportProgress(env.Stderr, p.quiet)
 
 	if kind == kindMeasurements || kind == kindAll {
-		written, err := streamMeasurementRows(ctx, encoder, store, filter, &stats)
+		written, err := streamMeasurementRows(ctx, sink, store, filter, &stats)
 		if err != nil {
 			return stats, err
 		}
@@ -384,7 +434,7 @@ func writeExport(
 	}
 
 	if kind == kindTraces || kind == kindAll {
-		written, err := streamTraceRows(ctx, encoder, store, filter, &stats)
+		written, err := streamTraceRows(ctx, sink, store, filter, &stats)
 		if err != nil {
 			return stats, err
 		}
@@ -423,7 +473,7 @@ func (p *exportProgress) step(label string, written, skipped int) {
 // streamMeasurementRows 流式转换并写出测量。
 func streamMeasurementRows(
 	ctx context.Context,
-	encoder *export.Encoder,
+	sink rowSink,
 	store *storage.Store,
 	filter storage.ExportFilter,
 	stats *export.FilterStats,
@@ -435,7 +485,7 @@ func streamMeasurementRows(
 		if !ok {
 			return nil
 		}
-		if err := encoder.Writer.Write(row); err != nil {
+		if err := sink.WriteRow(row); err != nil {
 			return err
 		}
 		written++
@@ -450,7 +500,7 @@ func streamMeasurementRows(
 // streamTraceRows 流式转换并写出跟踪。
 func streamTraceRows(
 	ctx context.Context,
-	encoder *export.Encoder,
+	sink rowSink,
 	store *storage.Store,
 	filter storage.ExportFilter,
 	stats *export.FilterStats,
@@ -462,7 +512,7 @@ func streamTraceRows(
 		if !ok {
 			return nil
 		}
-		if err := encoder.Writer.Write(row); err != nil {
+		if err := sink.WriteRow(row); err != nil {
 			return err
 		}
 		written++
@@ -486,13 +536,14 @@ func collectExportStats(ctx context.Context, store *storage.Store, filter storag
 	if err != nil {
 		return stats, err
 	}
+	rows := jsonRowSink{encoder}
 	if kind == kindMeasurements || kind == kindAll {
-		if _, err := streamMeasurementRows(ctx, encoder, store, filter, &stats); err != nil {
+		if _, err := streamMeasurementRows(ctx, rows, store, filter, &stats); err != nil {
 			return stats, err
 		}
 	}
 	if kind == kindTraces || kind == kindAll {
-		if _, err := streamTraceRows(ctx, encoder, store, filter, &stats); err != nil {
+		if _, err := streamTraceRows(ctx, rows, store, filter, &stats); err != nil {
 			return stats, err
 		}
 	}

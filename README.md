@@ -930,7 +930,30 @@ privacy filtering:
   1 error message(s) had IPs/paths/usernames replaced
 ```
 
-#### 这一层是唯一的"对外闸门"
+#### 输出格式：JSONL 与 CSV
+
+```bash
+cf-route-tester export --format csv.gz --out batch.csv.gz   # 给人看/进表格
+cf-route-tester export --format jsonl.gz --out batch.jsonl.gz  # 给程序处理
+```
+
+**CSV 是扁平的一行一条**（29 列，带表头），可以直接拖进 Excel /
+Numbers / pandas。JSONL 保留嵌套结构，适合程序与后续聚合。
+
+CSV 里有两列专门回答"这条线路走的是什么"：
+
+| 列 | 内容 |
+| --- | --- |
+| `trace_as_path` | 路径上的线路名，如 `163(AS4134) > CN2(AS4809) > Cloudflare(AS13335)` |
+| `trace_hops` | 逐跳，如 `1:10.0.0.1;2:203.0.113.4:163;4:*` |
+
+逐跳压进**一个单元格**（用 `;` 分隔）而不是每跳一行，是刻意的：
+一条记录有 10~30 跳，每跳一行会让 CSV 膨胀成"同一目标重复几十次"，
+反而没法做透视表。需要逐跳细看时用 JSONL。
+
+> CSV 的列名是契约：一旦被人拿去做了透视表，改列名就等于破坏他们的表。
+> 因此新增列一律**追加在末尾**，不重排、不改名。
+
 
 `export` 是整个项目里**唯一**允许产生可公开数据的路径。它承担三件事：
 
@@ -1452,6 +1475,47 @@ Go 工具链   modernc.org/sqlite 自身要求 go 1.26，因此 go.mod 的
 
 ## 设计要点
 
+### ASN 会翻译成线路名称
+
+`AS4134`、`AS4809`、`AS4837` 这些数字对多数人没有意义，而它们代表的
+恰恰是"这条线路好不好"的关键信息。因此逐跳输出与 CSV 都会把 ASN
+翻成运营商内部的线路名：
+
+```text
+ 4  203.0.113.4   2.84 ms  AS4134 (163)   China Telecom
+ 5  203.0.113.5   3.85 ms  AS4809 (CN2)   China Telecom
+
+route:      CN2(AS4809) > Cloudflare(AS13335)
+```
+
+内置的映射（`internal/asnmap`）：
+
+| ASN | 线路 | 运营商 |
+| --- | --- | --- |
+| AS4134 | 163 | 中国电信（普通出口） |
+| AS4809 | CN2 | 中国电信（优质出口） |
+| AS4837 | 169 | 中国联通（普通出口） |
+| AS9929 | 9929/CUII | 中国联通（工业互联网骨干） |
+| AS9808 | CMNET | 中国移动（普通出口） |
+| AS58453 | CMI | 中国移动国际 |
+| AS58807 | CMIN2 | 中国移动（优质出口） |
+| AS10099 | CUG | 中国联通国际 |
+
+另外收录了 Cloudflare、AWS、Google、NTT、PCCW、Vultr 等广为人知的
+网络与云厂商。
+
+三条维护原则：
+
+1. **只做名称翻译，不给好坏评分。** 163 在空闲时段可能比 CN2 还快，
+   评价取决于用途与时段，程序不替使用者下结论。
+2. **未知 ASN 只显示编号，绝不猜名字。** 猜错的名字比没有名字更糟——
+   使用者会据此判断线路质量。`AS65001` 就是 `AS65001`。
+3. **相邻重复合并，不相邻的重复保留。** `163 > CN2 > 163` 表示流量
+   出去又绕回普通出口，这是重要的路径异常，合并掉就等于隐瞒。
+
+要补充映射，改 `internal/asnmap/asnmap.go` 里的 `routes` 表即可；
+`asnmap_test.go` 会检查新增项自洽（名称非空、编号规范、排序正确）。
+
 ### 每个用户测全部目标
 
 不是把目标拆给不同用户，而是每个用户都完整测量一次全部 `IP:Port`：
@@ -1593,7 +1657,7 @@ cf-route-tester/
 ├── cmd/
 │   ├── cf-route-tester/          命令行入口（web 是它的一个子命令）
 │   └── cf-route-tester-gui/      无控制台的图形入口（Windows 双击用）
-├── internal/                     全部业务逻辑（19 个包）
+├── internal/                     全部业务逻辑（20 个包）
 │   ├── cli/                      命令分发、帮助、退出码、各子命令
 │   ├── service/                  **与界面无关**的编排（CLI 与图形界面共用）
 │   ├── webui/                    图形界面：HTTP 服务 + 嵌入式页面
@@ -1609,9 +1673,10 @@ cf-route-tester/
 │   ├── scheduler/                扫描编排、断点续测、两级测量
 │   ├── storage/                  本地 SQLite（迁移 / 只追加写入 / 查询）
 │   ├── privacy/                  隐私过滤（内网地址判定与替换）
-│   ├── export/                   公开 JSONL 导出
+│   ├── export/                   公开导出（JSONL / CSV，隐私过滤的唯一出口）
 │   ├── aggregate/                数据聚合
-│   └── query/                    单目标线路画像查询
+│   ├── query/                    单目标线路画像查询
+│   └── asnmap/                   ASN -> 线路名称（163 / CN2 / CMIN2 ...）
 ├── tools/                        构建与测试辅助工具（独立可执行）
 │   ├── release/                  跨平台发布构建
 │   └── write-cache/              生成确定性缓存夹具（CI 用）
@@ -1685,6 +1750,9 @@ cf-route-tester/
 | `browser_darwin.go` | 用 `open` 打开。 |
 | `browser_unix.go` | 依次尝试 `xdg-open` / `gio open` / `x-www-browser` / `sensible-browser`；全失败时返回错误，由调用方降级为"打印地址让用户自己点"（服务器上这是常态）。 |
 | `server_test.go` | 令牌缺失/错误/正确/查询参数、**非回环 Host 被拒**、**跨站 POST 被拒**、同源与无 Origin 放行、页面与安全响应头、扫描启动到结果、并发扫描被拒、用法错误映射、SSE 端到端送达进度、`Done()` 的两个方向。 |
+| `events.go` | 界面日志事件的广播器：保留历史（刷新页面不空）、自增序号（重连去重）、`Emit` **永不阻塞**（慢页面丢自己的事件，不拖住测量）。 |
+| `log.go` | 把扫描过程翻译成给**使用者看**的日志行：开始/参数、正在测哪个目标、每条线路的走法（163 / CN2 / …）、阶段完成、最终汇总。 |
+| `events_test.go` | 历史与序号、历史上限、并发发布安全、慢订阅者不阻塞、`Emit` 不阻塞、日志接口要 token、一次扫描产生完整日志序列（含被测 IP）、状态接口报告当前目标且结束后清空、失败也写日志。 |
 
 ### `internal/version/` — 版本信息
 
@@ -1820,6 +1888,20 @@ cf-route-tester/
 | `load.go` | 两个数据源适配：**SQLite**（本地历史）与 **JSONL**（公开数据）。两条路径共用同一套统计逻辑，因此数字一致。 |
 | `query_test.go` | 分组、裸 IP 有歧义时报错不瞎猜、IPv6 规范化、AS 路径去重、逐跳超时不计入延迟、时间序列保留最近点。 |
 
+### `internal/asnmap/` — ASN 到线路名称
+
+| 文件 | 作用 |
+| --- | --- |
+| `asnmap.go` | `routes` 表（163 / CN2 / 169 / 9929 / CMNET / CMI / CMIN2 / CUG 等）、`Normalize`、`Lookup`、`Label`、`ShortPath` / `FullPath`。**只翻名字，不给评分**；未知 ASN 返回空名称而不是猜一个。 |
+| `asnmap_test.go` | 用户给出的八条映射逐条固定、各种 ASN 写法归一化、拒绝路径串等非 ASN、未知不编名、短路径略去未知项、相邻去重但**保留不相邻重复**、CMI 与 CMIN2 必须能区分。 |
+
+### `internal/export/` 的 CSV
+
+| 文件 | 作用 |
+| --- | --- |
+| `csv.go` | 29 列扁平 CSV（含表头）：`CSVWriter`、列定义、逐跳压进单元格、`trace_as_path` 用线路名、`CSVOutput`（缓冲 + 可选 gzip，且 gzip 头时间置零保证可复现）。列名是契约，新增列只追加在末尾。 |
+| `csv_test.go` | 表头与列数一致、特殊字符（逗号/引号/换行）正确转义、超时跳标成 `*`、未测到的延迟留空而不是 0、gzip 往返与确定性、无数据时不写表头。 |
+
 ### `internal/cli/` — 命令行
 
 入口与分发：
@@ -1845,6 +1927,7 @@ cf-route-tester/
 | `cmd_query.go` | `query` | 单目标画像；位置参数与选项可任意交错。 |
 | `cmd_web.go` | `web` | 启动图形界面；同时提供 `RunDefault`（无子命令时的入口）与 `Env.Detached` 的处理。 |
 | `cmd_source.go` | — | 各命令共用的数据源 flag，以及 `sourceParams.toConfig()`（避免每个命令各写一套转换规则而漂移）。 |
+| `asnpath.go` | — | 把逐跳 ASN 转成线路串（`163(AS4134) > CN2(AS4809)`）并抽 `hopASNs`。规则本身在 `internal/asnmap`，与 web 界面共用同一份实现。 |
 
 测试（全部在包内，用真实本机监听与真实 SQLite）：
 
@@ -1905,7 +1988,7 @@ cf-route-tester/
 | `data/*.db` | 视使用而定 | 本地测量数据库（个人数据），绝不提交。 |
 | `data/collector.json` | 约 235 B | 本地匿名标识。虽然不含隐私信息，但它是**这台机器**的身份，提交它会让不同人的数据混在同一个 ID 下。 |
 
-因此别人 `git clone` 下来只有 **120 个文件 / 约 1.5 MB**（源码 + 测试 + 文档），
+因此别人 `git clone` 下来只有 **128 个文件 / 约 1.57 MB**（源码 + 测试 + 文档），
 不含任何数据与二进制。这一点已实测：把仓库克隆到临时目录后，
 `go build ./...`、`go vet ./...`、`go test ./...` 全部通过
 （16 个包全绿），说明**没有遗漏任何构建所需的文件**。

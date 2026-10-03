@@ -129,6 +129,11 @@ type ScanOptions struct {
 	//
 	// 它会被多个 worker **并发**调用，实现必须线程安全且尽快返回。
 	OnTarget func(target model.Target)
+
+	// OnTrace 在每个目标的线路跟踪完成时调用（nil 表示不关心）。
+	//
+	// 与 OnTarget 配对，让界面能显示"这条线路长什么样"。
+	OnTrace func(target model.Target, result *trace.TraceResult)
 }
 
 // TraceOptions 是线路跟踪的配置。
@@ -256,6 +261,7 @@ func (s *Service) RunScan(ctx context.Context, opts ScanOptions) (*ScanResult, e
 		Resume:      resume,
 		Trace:       opts.Trace,
 		OnTarget:    opts.OnTarget,
+		OnTrace:     opts.OnTrace,
 	}
 	if opts.Workers > 0 {
 		cfg.Probe.Workers = opts.Workers

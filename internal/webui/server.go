@@ -528,6 +528,8 @@ func (s *Server) runScan(ctx context.Context, req scanRequest, cancel context.Ca
 		Progress: s.emitProgressEvent,
 		// OnTarget 让日志面板显示"正在测哪个 IP"。
 		OnTarget: s.emitTarget,
+		// OnTrace 让日志面板显示这条线路走的是什么（163 / CN2 / ...）。
+		OnTrace: s.emitTrace,
 	}
 
 	started := time.Now().UTC()

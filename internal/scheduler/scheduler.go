@@ -130,6 +130,15 @@ type Config struct {
 	// 它会被多个 worker **并发**调用，实现必须线程安全且尽快返回。
 	OnTarget func(target model.Target)
 
+	// OnTrace 在每个目标的线路跟踪**完成**时调用（可为 nil）。
+	//
+	// 与 OnTarget 配对：一个报告"开始测什么"，一个报告
+	// "这条线路测出来是什么样"。界面需要后者才能显示
+	// "1.1.1.1:443 走 AS4134(163) > AS13335"。
+	//
+	// 它会在跟踪阶段被顺序调用（跟踪是串行的），实现应尽快返回。
+	OnTrace func(target model.Target, result *trace.TraceResult)
+
 	// Now 允许注入当前时间（测试用）。
 	Now func() time.Time
 }
@@ -570,6 +579,12 @@ func (s *Scheduler) tracePhase(ctx context.Context, pending []model.Target, sess
 		}
 		result.Trace.Add(traceResult)
 		result.TraceAttempted++
+
+		// 通知"这条线路测完了"。放在落库之前：界面关心的是
+		// 测量结果本身，而不是它有没有写进数据库。
+		if s.cfg.OnTrace != nil {
+			s.cfg.OnTrace(target, traceResult)
+		}
 
 		batch = append(batch, storage.NewTrace(s.cfg.CollectorPK, sessionID, traceResult))
 

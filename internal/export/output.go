@@ -30,6 +30,16 @@ const (
 	// 用户写 --format zstd 时应当得到"为什么不行、该用什么"，
 	// 而不是一个看不懂的解析错误。
 	FormatJSONLZst Format = "jsonl.zst"
+
+	// FormatCSV 是扁平 CSV（一行一条记录，带表头）。
+	//
+	// 存在的意义是"能直接用"：JSONL 适合程序处理，
+	// 而大多数人拿到数据第一件事是拖进 Excel 看一眼——
+	// 那需要真正的一行一条，而不是嵌着 JSON 的单元格。
+	FormatCSV Format = "csv"
+
+	// FormatCSVGz 是 gzip 压缩的 CSV。
+	FormatCSVGz Format = "csv.gz"
 )
 
 // zeroTime 是 gzip 头部里使用的固定时间。
@@ -41,12 +51,12 @@ var zeroTime = time.Unix(0, 0).UTC()
 
 // AllFormats 返回所有已知格式（含暂不支持的，便于生成帮助文本）。
 func AllFormats() []Format {
-	return []Format{FormatJSONL, FormatJSONLGz, FormatJSONLZst}
+	return []Format{FormatJSONL, FormatJSONLGz, FormatCSV, FormatCSVGz, FormatJSONLZst}
 }
 
 // SupportedFormats 返回当前**真正可用**的格式。
 func SupportedFormats() []Format {
-	return []Format{FormatJSONL, FormatJSONLGz}
+	return []Format{FormatJSONL, FormatJSONLGz, FormatCSV, FormatCSVGz}
 }
 
 // NormalizeFormat 归一化用户输入的格式名。
@@ -58,6 +68,10 @@ func NormalizeFormat(raw string) (Format, error) {
 		return FormatJSONL, nil
 	case "gz", "gzip", "jsonl.gz", ".gz":
 		return FormatJSONLGz, nil
+	case "csv":
+		return FormatCSV, nil
+	case "csv.gz", "csv-gz":
+		return FormatCSVGz, nil
 	case "zst", "zstd", "jsonl.zst", ".zst":
 		return FormatJSONLZst, nil
 	default:
@@ -68,7 +82,22 @@ func NormalizeFormat(raw string) (Format, error) {
 
 // Available 报告该格式当前是否可用。
 func (f Format) Available() bool {
-	return f == FormatJSONL || f == FormatJSONLGz
+	switch f {
+	case FormatJSONL, FormatJSONLGz, FormatCSV, FormatCSVGz:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsCSV 报告该格式是不是 CSV 系（决定用哪个写出器）。
+func (f Format) IsCSV() bool {
+	return f == FormatCSV || f == FormatCSVGz
+}
+
+// IsCompressed 报告该格式是否压缩。
+func (f Format) IsCompressed() bool {
+	return f == FormatJSONLGz || f == FormatCSVGz
 }
 
 // UnavailableReason 返回格式不可用时的原因（可用时返回空字符串）。

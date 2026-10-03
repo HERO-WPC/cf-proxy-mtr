@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cf-route-tester/cf-route-tester/internal/asnmap"
 	"github.com/cf-route-tester/cf-route-tester/internal/model"
 	"github.com/cf-route-tester/cf-route-tester/internal/probe"
 	"github.com/cf-route-tester/cf-route-tester/internal/trace"
@@ -379,13 +380,22 @@ func printTracePath(w io.Writer, result *trace.TraceResult) {
 			continue
 		}
 		line := fmt.Sprintf("  %2d  %-39s %8.2f ms", hop.TTL, hop.IP, hop.MinRTT())
+
+		// ASN 后面跟上线路名称：`AS4134` 对多数人没有意义，
+		// 而 `AS4134 (163)` 一眼就知道走的是电信普通出口还是 CN2。
+		// 未知 ASN 只显示编号，不编造名称。
 		if hop.ASN != "" {
-			line += "  " + hop.ASN
+			line += "  " + asnmap.Label(hop.ASN)
 		}
 		if hop.ASOrganization != "" {
 			line += "  " + truncateForDisplay(hop.ASOrganization, 32)
 		}
 		fmt.Fprintln(w, line)
+	}
+
+	// 路径汇总：哪几家、按什么顺序，比逐跳列表更容易看出问题。
+	if path := formatASPathSummary(result.Hops); path != "" {
+		fmt.Fprintf(w, "\nroute:      %s\n", path)
 	}
 }
 

@@ -676,10 +676,42 @@ func TestZstdIsHonestlyUnavailable(t *testing.T) {
 		t.Error("NewEncoder succeeded for zstd, which is not supported")
 	}
 
-	// 支持的格式必须在列表里。
+	// 支持的格式必须**都真的可用**，而且 zstd 不在其中。
+	//
+	// 早先这里断言"恰好 2 个格式"，那是在测一个会随功能增长而变化的
+	// 数字，而不是在测"honestly unavailable"这件事本身——
+	// 加入 CSV 后它就误报了。断言应当描述性质，不是计数。
 	supported := SupportedFormats()
-	if len(supported) != 2 {
-		t.Errorf("SupportedFormats() = %v, want 2 formats", supported)
+	if len(supported) == 0 {
+		t.Fatal("SupportedFormats() is empty")
+	}
+	for _, format := range supported {
+		if !format.Available() {
+			t.Errorf("format %q is listed as supported but Available() is false", format)
+		}
+	}
+	for _, format := range supported {
+		if format == FormatJSONLZst {
+			t.Error("zstd is listed as supported but it is not available")
+		}
+	}
+
+	// 反向：所有"可用"的格式都必须在 SupportedFormats 里，
+	// 否则帮助文本会漏掉一种可用格式。
+	for _, format := range AllFormats() {
+		if !format.Available() {
+			continue
+		}
+		found := false
+		for _, listed := range supported {
+			if listed == format {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("format %q is available but missing from SupportedFormats()", format)
+		}
 	}
 }
 
