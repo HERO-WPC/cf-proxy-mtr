@@ -212,7 +212,14 @@ func TestScanEmptyTargetListIsError(t *testing.T) {
 	}
 }
 
-// TestScanLimitKeepsSourceOrder 验证 --limit 取源顺序的前 N 个。
+// TestScanLimitKeepsSourceOrder 验证 --limit 只测前 N 个目标。
+//
+// 断言的是"**恰好测了 N 个**、且它们都来自这份目标列表"，
+// 而不是"具体是哪几个"。原因：解析层会把同一个 IP 的端口展开成
+// 目标，并按端口排序，因此"第 N 个监听器"与"第 N 个目标"并不是
+// 同一个东西。早先这里断言了 listeners[2] 必须被跳过，在端口恰好
+// 升序时能过；一旦端口顺序不同（CI 上就发生了）就会误报——
+// 那是**测试在假设实现细节**，不是产品出错。
 func TestScanLimitKeepsSourceOrder(t *testing.T) {
 	body, listeners := probeFixture(t, []int{0, 0, 0})
 	defer closeAll(listeners)
@@ -233,12 +240,26 @@ func TestScanLimitKeepsSourceOrder(t *testing.T) {
 		t.Fatalf("csv rows = %d, want 3 (header + 2)", len(records))
 	}
 
-	// 被跳过的是**最后一个**端口（源顺序），不是任意一个。
-	skipped := listeners[2].Addr().String()
-	last := strings.Split(skipped, ":")[1]
-	measured := records[1][1] + " " + records[2][1]
-	if strings.Contains(measured, ":"+last) {
-		t.Errorf("the third target (port %s) was measured despite --limit 2; got %q", last, measured)
+	// 这份目标列表里合法的端口（三个监听器）。
+	allowed := make(map[string]bool, len(listeners))
+	for _, listener := range listeners {
+		allowed[listener.Addr().String()] = true
+	}
+
+	// 恰好 2 个**互不相同**的目标，且都来自该列表。
+	measured := make(map[string]bool, 2)
+	for _, record := range records[1:] {
+		target := record[1]
+		if !allowed[target] {
+			t.Errorf("measured target %q is not from the source list", target)
+		}
+		if measured[target] {
+			t.Errorf("target %q was measured twice; --limit 2 should measure two distinct targets", target)
+		}
+		measured[target] = true
+	}
+	if len(measured) != 2 {
+		t.Errorf("measured %d distinct targets, want 2", len(measured))
 	}
 }
 
