@@ -38,7 +38,18 @@ type Producer[T any] func(ctx context.Context, send func(T) bool) int
 
 // RunStats 是一次运行的统计。
 type RunStats struct {
-	// Submitted 是实际投喂进队列并被 worker 取走的 job 数。
+	// Produced 是**成功投喂进队列**的 job 数。
+	//
+	// 它与 Submitted 的区别很关键：生产者在取消时可能刚好把一个 job
+	// 放进了队列，而没有任何 worker 来得及取走它。
+	// 那个 job 既不在 Submitted 里（没人取），也不在 Skipped 里，
+	// 于是 Processed == Submitted 会让 Completeness() 显示 1——
+	// 明明有活儿没干完，却报"完整"。实测踩到过这个坑。
+	//
+	// Produced 由发送动作本身计数，因此它覆盖那个"被遗弃在队列里"的 job。
+	Produced int
+
+	// Submitted 是实际投喂进队列并**被 worker 取走**的 job 数。
 	Submitted int
 
 	// Processed 是被完整处理的 job 数（ProcessFunc 返回 nil）。
@@ -47,8 +58,13 @@ type RunStats struct {
 	// Emitted 是交付的结果条数。
 	Emitted int
 
-	// Skipped 是已投喂但因为 ctx 取消而未被处理的 job 数。
+	// Skipped 是被 worker 取走但因为 ctx 取消而未被处理的 job 数。
 	Skipped int
+
+	// Abandoned 是已投喂但从未被任何 worker 取走的 job 数。
+	//
+	// = Produced - Submitted。取消时队列里剩下的就是这些。
+	Abandoned int
 
 	// Errors 是 ProcessFunc 返回错误的次数（框架层失败）。
 	Errors int
@@ -63,14 +79,16 @@ type RunStats struct {
 	Elapsed time.Duration
 }
 
-// Completeness 返回"已处理 / 已提交"的比例。
+// Completeness 返回"已处理 / 已投喂"的比例。
 //
+// 分母用 Produced 而不是 Submitted：被遗弃在队列里的 job 同样是
+// "没干完的活儿"，用 Submitted 做分母会把它们漏掉（见 Produced 的说明）。
 // 没有任何 job 时返回 1（空任务视为完整）。
 func (s RunStats) Completeness() float64 {
-	if s.Submitted == 0 {
+	if s.Produced == 0 {
 		return 1
 	}
-	return float64(s.Processed) / float64(s.Submitted)
+	return float64(s.Processed) / float64(s.Produced)
 }
 
 // Run 用 workers 个并发 worker 处理 Producer 投喂的 job。
@@ -188,9 +206,18 @@ func Run[T any, R any](
 	}
 
 	// 投喂完成后关闭队列，worker 读到关闭即退出。
+	//
+	// produced 在**每次成功发送**时累加，因此它包含那个可能被
+	// 遗弃在队列里的最后一个 job（发送成功但没有 worker 取走）。
+	var producedMu sync.Mutex
+	produced := 0
+
 	total := produce(ctx, func(job T) bool {
 		select {
 		case jobs <- job:
+			producedMu.Lock()
+			produced++
+			producedMu.Unlock()
 			return true
 		case <-ctx.Done():
 			return false
@@ -201,11 +228,21 @@ func Run[T any, R any](
 	workerWG.Wait()
 
 	stats.Elapsed = time.Since(start)
-	if stats.Submitted == 0 {
-		// Producer 一个 job 都没投出去（空列表或立刻被取消）：
-		// 用它的返回值兜底，避免统计里 Submitted 恒为 0。
+
+	stats.Produced = produced
+	if stats.Produced == 0 {
+		// 一个 job 都没能送出去：用 Producer 的返回值兜底。
+		stats.Produced = total
+	}
+	if stats.Submitted == 0 && total > 0 {
 		stats.Submitted = total
 	}
+
+	// 被遗弃在队列里的 job：投喂成功但没人取走。
+	if stats.Abandoned = stats.Produced - stats.Submitted; stats.Abandoned < 0 {
+		stats.Abandoned = 0
+	}
+
 	if ctx.Err() != nil {
 		stats.Canceled = true
 	}

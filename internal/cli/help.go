@@ -11,20 +11,20 @@ import (
 // helpOrder 固定顶层帮助中“当前可用命令”的显示顺序。
 //
 // 显式列出顺序，而不是遍历 map，保证帮助输出稳定、可测试。
-var helpOrder = []string{"help", "fetch", "detect", "probe", "scan", "trace", "export", "aggregate", "db", "version"}
+var helpOrder = []string{"help", "fetch", "detect", "probe", "scan", "trace", "export", "aggregate", "query", "db", "version"}
 
 // roadmapOrder 固定“规划中命令”的显示顺序，方便用户理解路线图。
 //
 // 这些命令尚未实现，这里只做说明，避免用户误以为功能已可用。
+// 命令一旦实现，必须从这里移到 helpOrder —— 两处都有会让同一个名字
+// 同时出现在“可用”与“规划中”，用户完全无法判断它到底能不能用。
 var roadmapOrder = []string{
 	"upload", // 上传匿名 batch 到 GitHub
-	"query",  // 查询 IP:Port 线路画像
 }
 
 // roadmapSummary 是规划中命令的一行说明。
 var roadmapSummary = map[string]string{
-	"upload": "将匿名压缩批次上传到 GitHub 数据仓库",
-	"query":  "查询某个 IP:Port 在不同地区 / 运营商下的线路画像",
+	"upload": "将匿名压缩批次上传到 GitHub 数据仓库（暂缓：先把本地链路跑通）",
 }
 
 // printHelp 输出顶层帮助。

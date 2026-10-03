@@ -58,37 +58,18 @@ func makeRow(o rowOptions) Row {
 		row.TimestampUTC = "2026-10-03T10:00:00Z"
 	}
 
-	row.Collector = &struct {
-		Country   string `json:"country"`
-		Province  string `json:"province"`
-		City      string `json:"city"`
-		ISP       string `json:"isp"`
-		ASN       string `json:"asn"`
-		IPVersion string `json:"ip_version"`
-	}{Country: o.country, Province: o.province, City: o.city, ISP: o.isp, ASN: o.asn}
+	row.Collector = &CollectorRef{
+		Country: o.country, Province: o.province, City: o.city,
+		ISP: o.isp, ASN: o.asn,
+	}
 
 	switch o.kind {
 	case "measurement":
-		row.Measurement = &struct {
-			Success      bool    `json:"success"`
-			LatencyMS    float64 `json:"latency_ms"`
-			ErrorType    string  `json:"error_type"`
-			ErrorMessage string  `json:"error_message"`
-		}{Success: o.success, LatencyMS: o.latency, ErrorType: o.errorType}
+		row.Measurement = &MeasurementRef{
+			Success: o.success, LatencyMS: o.latency, ErrorType: o.errorType,
+		}
 	case "trace":
-		row.Trace = &struct {
-			Success       bool    `json:"success"`
-			Engine        string  `json:"engine"`
-			EngineVersion string  `json:"engine_version"`
-			Mode          string  `json:"mode"`
-			DurationMS    float64 `json:"duration_ms"`
-			HopCount      int     `json:"hop_count"`
-			RespondedHops int     `json:"responded_hops"`
-			LocalFiltered bool    `json:"local_filtered"`
-			ErrorType     string  `json:"error_type"`
-
-			Hops []HopView `json:"hops"`
-		}{
+		row.Trace = &TraceRef{
 			Success: o.traceSuccess, Engine: "nexttrace", EngineVersion: "1.7.3",
 			Mode: "tcp", DurationMS: 1200, HopCount: o.hopCount, RespondedHops: o.responded,
 			LocalFiltered: true, ErrorType: o.errorType, Hops: o.hops,
@@ -311,6 +292,95 @@ func TestLatencyHistogramRejectsInvalidSamples(t *testing.T) {
 
 	if h.Count != 0 {
 		t.Errorf("Count = %d, want 0 for invalid samples", h.Count)
+	}
+
+	// **0 也必须被丢掉**。
+	//
+	// 0 在真实数据里表示"没有测到"（失败的探测、超时跳），
+	// 而不是"0 毫秒"。收进来会让分位数被一堆 0 拉垮——
+	// 实测表现是"只有一个 1.31ms 样本的跳，p50 却报成 0.00"。
+	h.Observe(0)
+	if h.Count != 0 {
+		t.Errorf("Count = %d, want 0 (zero means 'not measured', not '0 ms')", h.Count)
+	}
+
+	// 一个真实样本必须完整反映出来。
+	h.Observe(1.31)
+	if h.Count != 1 {
+		t.Fatalf("Count = %d, want 1", h.Count)
+	}
+	median, ok := h.Quantile(0.50)
+	if !ok {
+		t.Fatal("Quantile failed")
+	}
+	if median <= 0 || median > 1.31 {
+		t.Errorf("p50 = %v, want a positive value <= the only sample (1.31)", median)
+	}
+}
+
+// TestQuantileStaysWithinExactExtremes 是一条反自相矛盾的回归测试。
+//
+// 分桶的代表值是几何中点，可能略微超出桶内真实样本的范围，
+// 于是出现 "p90 = 305.6 而 max = 300.1" 这种输出（实测踩到过）。
+// 分位数必须落在 [min, max] 之内。
+func TestQuantileStaysWithinExactExtremes(t *testing.T) {
+	cases := []struct {
+		name    string
+		samples []float64
+	}{
+		{"single sample", []float64{300.1}},
+		{"two close samples", []float64{300.1, 305.6}},
+		{"wide range", []float64{1.2, 3.4, 50, 300.1, 1300}},
+		{"many identical", []float64{42, 42, 42, 42, 42}},
+		{"tiny values", []float64{0.11, 0.12, 0.13}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewLatencyHistogram()
+			for _, sample := range tc.samples {
+				h.Observe(sample)
+			}
+
+			for _, p := range []float64{0.01, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99} {
+				value, ok := h.Quantile(p)
+				if !ok {
+					t.Fatalf("Quantile(%v) failed", p)
+				}
+				if value < h.Min {
+					t.Errorf("p%v = %v, below the exact min %v", p*100, value, h.Min)
+				}
+				if value > h.Max {
+					t.Errorf("p%v = %v, above the exact max %v (contradictory output)",
+						p*100, value, h.Max)
+				}
+			}
+		})
+	}
+}
+
+// TestSnapshotIsSelfConsistent 验证快照里的数字彼此不矛盾。
+func TestSnapshotIsSelfConsistent(t *testing.T) {
+	h := NewLatencyHistogram()
+	for _, sample := range []float64{300.1, 305.6, 310.2} {
+		h.Observe(sample)
+	}
+
+	snapshot := h.Snapshot()
+	if snapshot.MinMS > snapshot.P50MS {
+		t.Errorf("min %v > p50 %v", snapshot.MinMS, snapshot.P50MS)
+	}
+	if snapshot.P50MS > snapshot.P90MS {
+		t.Errorf("p50 %v > p90 %v", snapshot.P50MS, snapshot.P90MS)
+	}
+	if snapshot.P90MS > snapshot.P95MS {
+		t.Errorf("p90 %v > p95 %v", snapshot.P90MS, snapshot.P95MS)
+	}
+	if snapshot.P95MS > snapshot.P99MS {
+		t.Errorf("p95 %v > p99 %v", snapshot.P95MS, snapshot.P99MS)
+	}
+	if snapshot.P99MS > snapshot.MaxMS {
+		t.Errorf("p99 %v > max %v", snapshot.P99MS, snapshot.MaxMS)
 	}
 }
 

@@ -20,9 +20,12 @@
 //	internal/detect    测量者地区 / 运营商检测（可解释的源、手动优先）
 //	internal/privacy   隐私过滤：内网/保留地址判定与替换
 //	internal/export    公开 JSONL 导出（Schema、压缩、隐私过滤的唯一出口）
+//	internal/aggregate 数据聚合（目标 × 地区 × 运营商分组、延迟直方图）
+//	internal/query     单目标线路画像查询（本地库或公开 JSONL）
 //	internal/identity  本地匿名标识 collector_id（随机生成，非硬件指纹）
 //
-// 后续阶段的包（upload / aggregate）会随对应 Phase 逐步加入。
+// 后续阶段的包（upload）会随对应 Phase 逐步加入；
+// upload 目前按用户要求暂缓，先确保本地链路完整可用。
 //
 // 本地验证要求（每个 Phase 都必须通过）：
 //

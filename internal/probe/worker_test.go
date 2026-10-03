@@ -312,19 +312,43 @@ func TestRunEmitPanicIsContained(t *testing.T) {
 //
 // 关键点：已经投喂但没处理的 job 必须计入 Skipped，
 // 这样上层才能知道"这次测量不完整"，而不是拿残缺统计当完整结果。
+//
+// 取消时机用**完成信号**而不是定时器：早先用 time.Sleep(20ms)，
+// 在负载高的机器上（或 CI 上）可能在任何一个 job 被处理之前就触发，
+// 于是 Completeness() 恰好等于 1，断言随机失败。
+// 现在只有在"确实已经处理过若干 job"之后才取消，行为是确定的。
 func TestRunCooperativeProducerStopsOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	const jobCount = 1000
+	const (
+		jobCount = 100000
+		queue    = 1
+	)
 
-	var processed int32
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		cancel()
-	}()
+	var (
+		processed int32
+		enqueued  int32
+	)
 
-	stats := Run(ctx, 4, 0,
+	// cancelOnce 保证只取消一次。
+	var cancelOnce sync.Once
+	trigger := func() { cancelOnce.Do(cancel) }
+
+	// 触发取消的条件由**被投喂/被处理的事实**驱动，与机器快慢无关。
+	//
+	// 关键参数是"处理慢、生产快"：worker 每个 job 睡 5ms，
+	// 生产者则不受限地投喂，等到第 3 个 job 处理完（约 15ms）时，
+	// 生产者早已投喂了远多于 200 个。于是取消那一刻必然存在
+	// 大量"已投喂但未处理"的 job，Skipped > 0、Completeness < 1
+	// 都由计数事实保证，而不是靠 sleep 猜测。
+	const (
+		triggerAfterEnqueued  = 200
+		triggerAfterProcessed = 3
+		perJobDelay           = 5 * time.Millisecond
+	)
+
+	stats := Run(ctx, 1, queue,
 		func(ctx context.Context, send func(int) bool) int {
 			sent := 0
 			for i := 0; i < jobCount; i++ {
@@ -332,13 +356,20 @@ func TestRunCooperativeProducerStopsOnCancel(t *testing.T) {
 					return sent
 				}
 				sent++
+				atomic.AddInt32(&enqueued, 1)
 			}
 			return sent
 		},
 		func(ctx context.Context, job int, emit func(int)) error {
-			// 模拟耗时处理，让取消有机会在中间发生。
-			time.Sleep(2 * time.Millisecond)
-			atomic.AddInt32(&processed, 1)
+			time.Sleep(perJobDelay)
+			done := atomic.AddInt32(&processed, 1)
+
+			// 生产者已经领先很多时才取消，
+			// 此时队列里必然还有大量未处理的 job。
+			if done >= triggerAfterProcessed && atomic.LoadInt32(&enqueued) >= triggerAfterEnqueued {
+				trigger()
+			}
+
 			emit(job)
 			return nil
 		},
@@ -354,11 +385,28 @@ func TestRunCooperativeProducerStopsOnCancel(t *testing.T) {
 	if got := int(atomic.LoadInt32(&processed)); got > stats.Processed {
 		t.Errorf("started %d jobs but Processed = %d; stats must not over-report", got, stats.Processed)
 	}
+
 	// 不完整必须可以从统计里看出来。
-	if stats.Completeness() >= 1 {
-		t.Errorf("Completeness() = %v, want < 1 for an interrupted run", stats.Completeness())
+	//
+	// 前提是生产者确实领先于 worker（上面的计数条件保证这一点），
+	// 因此这不是"碰运气"的断言。
+	if stats.Processed == 0 {
+		t.Fatal("no job was processed at all; the fixture did not take effect")
 	}
-	// 每个被投喂的 job 要么处理了、要么跳过了，不能凭空消失。
+	if stats.Completeness() >= 1 {
+		t.Errorf("Completeness() = %v, want < 1 for an interrupted run (processed=%d produced=%d)",
+			stats.Completeness(), stats.Processed, stats.Produced)
+	}
+
+	// 完整的账目：每个被投喂的 job 要么处理了、要么被取走后跳过、
+	// 要么还留在队列里没人取。三者之和必须等于投喂数。
+	//
+	// 早先只有 Submitted/Skipped，于是"发送成功但没人取走"的那个
+	// job 会凭空消失（Processed == Submitted，看似完整）。
+	if got := stats.Processed + stats.Skipped + stats.Abandoned; got != stats.Produced {
+		t.Errorf("accounting mismatch: processed(%d) + skipped(%d) + abandoned(%d) = %d, want produced=%d",
+			stats.Processed, stats.Skipped, stats.Abandoned, got, stats.Produced)
+	}
 	if stats.Processed+stats.Skipped > stats.Submitted {
 		t.Errorf("Processed(%d) + Skipped(%d) > Submitted(%d)",
 			stats.Processed, stats.Skipped, stats.Submitted)

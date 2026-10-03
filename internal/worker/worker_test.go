@@ -250,12 +250,77 @@ func TestRunProcessErrorDoesNotStopOthers(t *testing.T) {
 }
 
 // TestRunStatsCompleteness 覆盖比例函数的边界。
+//
+// 分母是 Produced（成功投喂数）而不是 Submitted（被取走数）：
+// 取消时可能有 job 已经进了队列但没人来得及取走，用 Submitted
+// 做分母会让这种"没干完"显示成完整。
 func TestRunStatsCompleteness(t *testing.T) {
 	if got := (RunStats{}).Completeness(); got != 1 {
 		t.Errorf("empty Completeness() = %v, want 1", got)
 	}
-	if got := (RunStats{Submitted: 4, Processed: 1}).Completeness(); got != 0.25 {
+	if got := (RunStats{Produced: 4, Submitted: 4, Processed: 1}).Completeness(); got != 0.25 {
 		t.Errorf("Completeness() = %v, want 0.25", got)
+	}
+	// 被遗弃在队列里的 job 必须拉低完整性。
+	if got := (RunStats{Produced: 4, Submitted: 3, Processed: 3, Abandoned: 1}).Completeness(); got != 0.75 {
+		t.Errorf("Completeness() = %v, want 0.75 (one job was abandoned in the queue)", got)
+	}
+}
+
+// TestRunReportsAbandonedJobs 验证"投喂成功但没人取走"的 job 被计数。
+//
+// 这是一个真实的统计缺口：只有 Submitted/Skipped 时，
+// 那个被遗弃在队列里的 job 会凭空消失，
+// 于是 Processed == Submitted 让整次运行看起来是完整的。
+func TestRunReportsAbandonedJobs(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 队列开大一点，让生产者把 job 堆在队列里；worker 很慢，
+	// 因此取消时队列里必然还有未取走的 job。
+	const total = 50
+
+	var mu sync.Mutex
+	var produced int
+
+	stats := Run(ctx, 1, 32,
+		func(ctx context.Context, send func(int) bool) int {
+			for i := 0; i < total; i++ {
+				if !send(i) {
+					return i
+				}
+				mu.Lock()
+				produced++
+				mu.Unlock()
+			}
+			return total
+		},
+		func(ctx context.Context, job int, emit func(int)) error {
+			// 第一个 job 处理完就取消：此时队列里已经堆了很多。
+			if job == 0 {
+				cancel()
+			}
+			emit(job)
+			return nil
+		},
+		func(int) {},
+	)
+
+	// 账目必须闭合。
+	if got := stats.Processed + stats.Skipped + stats.Abandoned; got != stats.Produced {
+		t.Errorf("processed(%d) + skipped(%d) + abandoned(%d) = %d, want produced=%d",
+			stats.Processed, stats.Skipped, stats.Abandoned, got, stats.Produced)
+	}
+	if stats.Produced == 0 {
+		t.Fatal("nothing was produced; the fixture did not take effect")
+	}
+	// worker 只处理了极少数 job，因此一定有 job 没干完。
+	if stats.Completeness() >= 1 {
+		t.Errorf("Completeness() = %v, want < 1 (produced=%d processed=%d)",
+			stats.Completeness(), stats.Produced, stats.Processed)
+	}
+	if stats.Abandoned+stats.Skipped == 0 {
+		t.Error("Abandoned + Skipped = 0, but the run was cancelled early")
 	}
 }
 

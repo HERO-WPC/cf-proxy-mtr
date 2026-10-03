@@ -222,6 +222,7 @@ func newCommands() map[string]Command {
 		newTraceCommand(),
 		newExportCommand(),
 		newAggregateCommand(),
+		newQueryCommand(),
 		newDBCommand(),
 		{
 			Name:    "version",

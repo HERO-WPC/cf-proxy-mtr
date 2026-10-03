@@ -307,3 +307,109 @@ func parseFlags(fs *flag.FlagSet, args []string) error {
 	}
 	return nil
 }
+
+// parseFlagsAllowInterspersed 允许选项与位置参数任意交错。
+//
+// 为什么需要它：Go 的 flag 包在遇到第一个非选项参数时就**停止解析**，
+// 因此 `query 1.1.1.1:443 --db x.db` 里的 --db 会被当成位置参数，
+// 报出 "unexpected argument(s)"——而帮助里给出的示例正是这个写法。
+//
+// 做法：先把 argv 重排成"选项在前、位置参数在后"，再交给标准的
+// Parse。重排需要知道哪些选项会吃掉后面一个值，这从
+// fs.VisitAll 的 flag.Value 类型推断（IsBoolFlag 接口）。
+func parseFlagsAllowInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
+	reordered, positionals := reorderInterspersed(fs, args)
+
+	if err := fs.Parse(reordered); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil, usageError("use '%s --help' for usage", fs.Name())
+		}
+		return nil, usageError("%v", err)
+	}
+
+	// 正常情况下位置参数已经被排到末尾，fs.Args() 就是它们；
+	// 用收集到的列表作为权威结果（避免重排出错时静默丢参数）。
+	remaining := fs.Args()
+	if len(remaining) > len(positionals) {
+		positionals = remaining
+	}
+	return positionals, nil
+}
+
+// boolFlag 是"不需要值"的选项（flag 包用它区分 -v 与 -db x）。
+type boolFlag interface {
+	IsBoolFlag() bool
+}
+
+// reorderInterspersed 把参数重排成"选项及其值在前、位置参数在后"。
+func reorderInterspersed(fs *flag.FlagSet, args []string) (reordered []string, positionals []string) {
+	// 先收集所有已知选项名与"是否需要值"。
+	needsValue := make(map[string]bool)
+	fs.VisitAll(func(f *flag.Flag) {
+		isBool := false
+		if boolValue, ok := f.Value.(boolFlag); ok {
+			isBool = boolValue.IsBoolFlag()
+		}
+		needsValue[f.Name] = !isBool
+	})
+
+	reordered = make([]string, 0, len(args))
+	positionals = make([]string, 0, len(args))
+
+	// sawTerminator 记录是否出现过顶层的 "--"。
+	//
+	// 这个标记必须在重排后的参数里**保留**：它是 flag 包的"到此为止"
+	// 标记。早先的版本把 "--" 吃掉了，于是 `-- --hops a` 里的 --hops
+	// 会被当成真正的选项解析（实测踩到过），而用户写 "--" 的意图
+	// 正是"后面都是位置参数"。
+	//
+	// 注意 "值位置"上的 "--" 是普通值（例如 `--db --` 的值就是 "--"），
+	// 不算终止符——那种情况在下面的值分支里被直接消费掉。
+	sawTerminator := false
+	inTerminator := false
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+
+		if inTerminator {
+			positionals = append(positionals, arg)
+			continue
+		}
+		if arg == "--" {
+			sawTerminator = true
+			inTerminator = true
+			continue
+		}
+
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			// 位置参数。注意 `-` 常被用作"标准输出/输入"的约定值，
+			// 因此上面单独放行。
+			positionals = append(positionals, arg)
+			continue
+		}
+
+		// 选项：可能是 -name=value / --name=value，也可能要吃掉下一个参数。
+		name := strings.TrimLeft(arg, "-")
+		hasInlineValue := false
+		if index := strings.IndexByte(name, '='); index >= 0 {
+			name = name[:index]
+			hasInlineValue = true
+		}
+
+		reordered = append(reordered, arg)
+
+		// 需要值且没有内联值时，把下一个参数一并归入选项。
+		// 注意这里不检查下一个是不是 "--"：`--db --` 的值就是 "--"。
+		if !hasInlineValue && needsValue[name] && i+1 < len(args) {
+			i++
+			reordered = append(reordered, args[i])
+		}
+	}
+
+	// 把位置参数接在后面；若用户写过 "--"，则在它们之前补回该标记，
+	// 保证重排后它仍然是"到此为止"的位置。
+	if sawTerminator {
+		reordered = append(reordered, "--")
+	}
+	return append(reordered, positionals...), positionals
+}

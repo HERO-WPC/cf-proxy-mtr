@@ -21,6 +21,58 @@ import (
 	"time"
 )
 
+// CollectorRef 是行里采集者的地区/运营商信息。
+//
+// 用**具名类型**而不是内联匿名结构：匿名结构无法从包外构造，
+// 于是"把数据库行转成公开行"这种事（见 internal/query）就做不到，
+// 只能复制一份结构定义——那正是两条路径迟早漂移的原因。
+type CollectorRef struct {
+	Country   string `json:"country"`
+	Province  string `json:"province"`
+	City      string `json:"city"`
+	ISP       string `json:"isp"`
+	ASN       string `json:"asn"`
+	IPVersion string `json:"ip_version"`
+}
+
+// TargetMetaRef 是行里目标的上游元数据。
+type TargetMetaRef struct {
+	Country string   `json:"country"`
+	CCA2    string   `json:"cca2"`
+	Region  string   `json:"region"`
+	City    string   `json:"city"`
+	Colo    *ColoRef `json:"colo"`
+}
+
+// ColoRef 是 Cloudflare 接入点信息。
+type ColoRef struct {
+	IATA string `json:"iata"`
+	CCA2 string `json:"cca2"`
+	City string `json:"city"`
+}
+
+// MeasurementRef 是行里的测量结果。
+type MeasurementRef struct {
+	Success      bool    `json:"success"`
+	LatencyMS    float64 `json:"latency_ms"`
+	ErrorType    string  `json:"error_type"`
+	ErrorMessage string  `json:"error_message"`
+}
+
+// TraceRef 是行里的跟踪结果。
+type TraceRef struct {
+	Success       bool      `json:"success"`
+	Engine        string    `json:"engine"`
+	EngineVersion string    `json:"engine_version"`
+	Mode          string    `json:"mode"`
+	DurationMS    float64   `json:"duration_ms"`
+	HopCount      int       `json:"hop_count"`
+	RespondedHops int       `json:"responded_hops"`
+	LocalFiltered bool      `json:"local_filtered"`
+	ErrorType     string    `json:"error_type"`
+	Hops          []HopView `json:"hops"`
+}
+
 // Row 是输入 JSONL 的一行（公开 Schema 的读取视图）。
 //
 // 只声明聚合需要的字段：多余的字段被忽略，缺失的字段按零值处理。
@@ -38,47 +90,10 @@ type Row struct {
 	SessionID    string `json:"session_id"`
 	CollectorID  string `json:"collector_id"`
 
-	Collector *struct {
-		Country   string `json:"country"`
-		Province  string `json:"province"`
-		City      string `json:"city"`
-		ISP       string `json:"isp"`
-		ASN       string `json:"asn"`
-		IPVersion string `json:"ip_version"`
-	} `json:"collector"`
-
-	TargetMeta *struct {
-		Country string `json:"country"`
-		CCA2    string `json:"cca2"`
-		Region  string `json:"region"`
-		City    string `json:"city"`
-		Colo    *struct {
-			IATA string `json:"iata"`
-			CCA2 string `json:"cca2"`
-			City string `json:"city"`
-		} `json:"colo"`
-	} `json:"target_meta"`
-
-	Measurement *struct {
-		Success      bool    `json:"success"`
-		LatencyMS    float64 `json:"latency_ms"`
-		ErrorType    string  `json:"error_type"`
-		ErrorMessage string  `json:"error_message"`
-	} `json:"measurement"`
-
-	Trace *struct {
-		Success       bool    `json:"success"`
-		Engine        string  `json:"engine"`
-		EngineVersion string  `json:"engine_version"`
-		Mode          string  `json:"mode"`
-		DurationMS    float64 `json:"duration_ms"`
-		HopCount      int     `json:"hop_count"`
-		RespondedHops int     `json:"responded_hops"`
-		LocalFiltered bool    `json:"local_filtered"`
-		ErrorType     string  `json:"error_type"`
-
-		Hops []HopView `json:"hops"`
-	} `json:"trace"`
+	Collector   *CollectorRef   `json:"collector"`
+	TargetMeta  *TargetMetaRef  `json:"target_meta"`
+	Measurement *MeasurementRef `json:"measurement"`
+	Trace       *TraceRef       `json:"trace"`
 }
 
 // HopView 是聚合侧对一跳的读取视图。
@@ -273,9 +288,17 @@ func bucketValue(index int) float64 {
 
 // Observe 记录一个样本。
 //
-// 负值与 NaN 被忽略：它们不是有效延迟，收进来会把统计带偏。
+// 非正值、NaN、Inf 都被忽略：
+//
+//   - 负值与 NaN 显然无效；
+//   - **0 也必须丢掉**。0 在真实延迟里意味着"没有测到"（失败的探测、
+//     超时跳），而不是"0 毫秒"。收进来会让分位数被一堆 0 拉垮——
+//     实测表现是"只有一个 1.31ms 样本的跳，p50 却报成 0.00"。
+//
+// 代价是无法用直方图回答"有多少次没测到"，那由调用方单独计数
+// （见 query 包里的 HopStat.Timeouts）。
 func (h *LatencyHistogram) Observe(ms float64) {
-	if h == nil || math.IsNaN(ms) || math.IsInf(ms, 0) || ms < 0 {
+	if h == nil || math.IsNaN(ms) || math.IsInf(ms, 0) || ms <= 0 {
 		return
 	}
 	if len(h.buckets) == 0 {
@@ -334,7 +357,12 @@ func (h *LatencyHistogram) Mean() float64 {
 
 // Quantile 返回近似分位数（p 取 0~1）。
 //
-// 返回的第二个值表示"这是近似值"。对空直方图返回 0/false。
+// 返回值可能受分桶误差影响，但**一定落在 [Min, Max] 之间**：
+// 桶的代表值是几何中点，可能略微超出该桶内真实样本的范围，
+// 于是出现"p90 = 305.6 而 max = 300.1"这种自相矛盾的输出
+// （实测踩到过）。这里显式夹紧到精确极值，保证结果不自相矛盾。
+//
+// 返回的第二个值表示"有值"。对空直方图返回 0/false。
 func (h *LatencyHistogram) Quantile(p float64) (float64, bool) {
 	if h == nil || h.Count == 0 {
 		return 0, false
@@ -352,10 +380,21 @@ func (h *LatencyHistogram) Quantile(p float64) (float64, bool) {
 	for i, count := range h.buckets {
 		cumulative += count
 		if cumulative >= target {
-			return bucketValue(i), true
+			return clamp(h.Min, bucketValue(i), h.Max), true
 		}
 	}
 	return h.Max, true
+}
+
+// clamp 把 value 夹在 [low, high] 之间。
+func clamp(low, value, high float64) float64 {
+	if value < low {
+		return low
+	}
+	if value > high {
+		return high
+	}
+	return value
 }
 
 // Histogram 是可序列化的分位数快照。

@@ -41,7 +41,7 @@ Phase 8  ✅ TCP Probe + NextTrace 两级测量（只跟踪探测成功的目标
 Phase 9  ✅ 结果导出（export 包 + privacy 包：JSONL / gzip、公开 Schema、隐私过滤）
 Phase 10 ⏸️ GitHub 上传（按用户要求暂缓：先把全部流程在本地跑通）
 Phase 11 ✅ 数据聚合（aggregate 包：按目标 × 地区 × 运营商分组、跨节点对比）
-Phase 12 ⏳ 查询与统计
+Phase 12 ✅ 查询与统计（query 包 + query 命令：单目标跨地区画像）
 Phase 13 ⏳ 跨平台打包与发布
 ```
 
@@ -61,6 +61,7 @@ cf-route-tester trace --target 1.1.1.1:443   # 单独跟踪一个目标
 cf-route-tester export --list-sessions       # 查看可导出的会话
 cf-route-tester export --session <id>        # 导出为公开 JSONL（自动隐私过滤）
 cf-route-tester aggregate --input batch.jsonl.gz   # 把导出物聚合为统计结果
+cf-route-tester query 1.1.1.1:443 --db data/results.db   # 查单目标线路画像
 cf-route-tester db stats       # 查看本地数据库状态
 cf-route-tester db migrate     # 应用数据库迁移
 cf-route-tester db vacuum      # 整理数据库文件
@@ -1018,6 +1019,91 @@ notes:
 当只有一个节点贡献数据时会直接说明「跨地区对比还没有意义」——
 否则一个 100% 的成功率看起来像是普遍结论，实际只是单点观察。
 
+### query：查询单个 IP:Port 的线路画像
+
+```bash
+cf-route-tester query 1.1.1.1:443 --db data/results.db        # 位置参数最自然
+cf-route-tester query 1.1.1.1:443 --input data/batches        # 查公开 JSONL
+cf-route-tester query 1.1.1.1:443 --db x.db --hops --series   # 逐跳 + 时间序列
+cf-route-tester query --list-targets --input data/batches     # 列出数据里的目标
+cf-route-tester query --stats --db data/results.db            # 只看全局统计
+cf-route-tester query 1.1.1.1:443 --db x.db --format json     # 机器可读
+```
+
+两个数据源**必须恰好给一个**（`--db` 与 `--input` 互斥）：两个都给会让
+"这个数字从哪来"说不清。位置参数与选项可以**任意交错**——
+`query TARGET --db x` 与 `query --db x TARGET` 都可以。
+
+输出示例（真实数据，两个采集者）：
+
+```text
+45.63.67.144:443
+  regions:     2
+  probes:      3 total, 2 ok (66.7%)
+  traces:      1 total, 1 ok
+  latency:     min 250.2  p50 250.2  p90 300.5  p95 300.5  max 300.5  avg 275.4 ms
+  spread:      50.2 ms between the best and worst region (p50)
+
+  failures:
+    timeout:               1
+
+  by region / ISP:
+    REGION                                          PROBES      OK      OK%    P50ms
+    CN/Zhejiang/Hangzhou/China Mobile/AS9808               2       1    50.0%    300.5
+    US/California/Los Angeles/Vultr/AS20473              1       1   100.0%    250.2
+
+  AS path (CN/Zhejiang/Hangzhou/China Mobile/AS9808):
+    AS64500-AS20473                                              1
+```
+
+`--hops` 会额外给出逐跳延迟与超时情况（按 TTL 聚合，而不是按 IP——
+同一个 TTL 在不同时间可能由不同的等价路由器应答）：
+
+```text
+  hops (CN/Zhejiang/Hangzhou/China Mobile/AS9808):
+    TTL  IP                             ASN           TO     P50ms     MAXms
+      1  192.168.1.1                                   0      1.31      6.25
+      2  192.168.1.1                                   0      1.19      1.22
+      3  *                                             1      0.00      0.00
+      4  203.0.113.24                  AS64500        0      4.58     16.54
+      6  203.0.113.6                 AS9808         0     10.34     10.71
+      9  203.0.113.9                  AS58453        0    195.12    196.45
+```
+
+#### 与 aggregate 的分工
+
+| 命令 | 回答的问题 | 数据源 |
+| --- | --- | --- |
+| `aggregate` | 这一批数据**整体**如何（跨目标） | 公开 JSONL |
+| `query` | **这一个**目标如何（跨维度下钻） | 本地库或公开 JSONL |
+
+两者共用同一套统计逻辑（`aggregate.LatencyHistogram` 与分组键），
+因此"查数据库得到的数字"与"聚合 JSONL 得到的数字"是一致的。
+
+#### 裸 IP 有歧义时报错，不瞎猜
+
+```text
+$ cf-route-tester query 1.1.1.1 --input data/batches
+Error: 1.1.1.1 matches 2 ports (443, 2053); specify the port, e.g. 1.1.1.1:443
+```
+
+一个 IP 有多个端口时静默返回其中一个会给出**错误的目标**，
+而用户会以为那就是他要的。只有一个端口时才允许省略端口。
+
+#### 分位数是近似值，且被标记
+
+延迟用固定对数直方图（相对误差约 3.5%），因此分位数是近似值，
+JSON 输出里带 `percentiles_approx: true`。**极值与平均值是精确的**。
+
+分位数一定落在 `[min, max]` 之内——桶的代表值是几何中点，
+可能略微超出桶内真实样本的范围，于是会出现"p90 = 305.6 而 max = 300.1"
+这种自相矛盾的输出（实测踩到过），因此显式夹紧到精确极值。
+
+同理，**0 毫秒不会被计入延迟样本**：0 在真实数据里意味着"没有测到"
+（失败的探测、超时跳），而不是"0 毫秒"。收进来会让分位数被一堆 0
+拉垮——实测表现是"只有一个 1.31ms 样本的跳，p50 却报成 0.00"。
+"有多少次没测到"由超时列（`TO`）单独回答。
+
 ### db：本地 SQLite 数据库
 
 ```bash
@@ -1372,6 +1458,9 @@ cf-route-tester/
 │   │   ├── schema.go             公开 Schema（Row / Measurement / Trace）
 │   │   ├── convert.go            storage -> Row 转换 + 隐私过滤 + 错误信息清洗
 │   │   └── output.go             JSONL / gzip 编码（确定性 gzip 头）
+│   ├── query/                    单目标线路画像查询（已实现）
+│   │   ├── query.go              数据集索引、目标/地区画像、AS 路径
+│   │   └── load.go               两个数据源适配（SQLite / JSONL）
 │   ├── aggregate/                数据聚合（已实现）
 │   │   ├── aggregate.go          输入读取、延迟直方图、分组键、错误计数
 │   │   ├── collector.go          累积状态（分组 / 目标 / 采集者维度）
