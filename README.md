@@ -34,10 +34,10 @@ Phase 1  ✅ all.json 获取与解析（source 包 + fetch 命令 + 缓存）
 Phase 2  ✅ Target 数据模型（model 包：不变量、归一化、去重、隐私边界）
 Phase 3  ✅ TCP Probe（probe 包：错误分类、worker pool、probe 命令）
 Phase 4  ✅ SQLite（storage 包：迁移、只追加时间序列、db 命令、probe --db）
-Phase 5  ✅ 全量扫描 + Resume（scheduler 包：测量会话、断点续测、scan 命令）
+Phase 5  ✅ 全量扫描（scheduler 包：两级测量编排、scan 命令）
 Phase 6  ✅ 本机地区 / 运营商信息（detect 包：可解释的检测源、手动优先）
 Phase 7  ✅ NextTrace 集成（trace 包：外部进程、真实 JSON 解析、trace 命令）
-Phase 8  ✅ TCP Probe + NextTrace 两级测量（只跟踪探测成功的目标，可续测）
+Phase 8  ✅ TCP Probe + NextTrace 两级测量（只跟踪探测成功的目标）
 Phase 9  ✅ 结果导出（export 包 + privacy 包：JSONL / gzip、公开 Schema、隐私过滤）
 Phase 10 ⏸️ GitHub 上传（按用户要求暂缓：先把全部流程在本地跑通）
 Phase 11 ✅ 数据聚合（aggregate 包：按目标 × 地区 × 运营商分组、跨节点对比）
@@ -55,16 +55,15 @@ cf-route-tester web            # 启动图形界面（本地网页，数据不�
 cf-route-tester fetch          # 下载 / 缓存 / 解析 all.json，输出目标数量
 cf-route-tester detect         # 检测测量者所在地区与运营商，写入本地标识
 cf-route-tester probe          # 对全部 IP:Port 做 TCP 连通性与延迟测量
-cf-route-tester probe --db data/results.db   # 同上，并把结果写入本地 SQLite
-cf-route-tester scan           # 全量扫描：测量 + 会话记录，写入数据库
-cf-route-tester scan --resume  # 继续上次未完成的扫描，只测没测过的目标
+cf-route-tester scan           # 全量扫描：结果**实时写入 CSV**（默认 data/results.csv）
+cf-route-tester scan --append  # 追加到已有结果文件（默认每次覆盖）
 cf-route-tester scan --trace   # 扫描后对**探测成功**的目标做线路跟踪
 cf-route-tester trace --target 1.1.1.1:443   # 单独跟踪一个目标
-cf-route-tester export --list-sessions       # 查看可导出的会话
+cf-route-tester export --list-sessions       # 查看可导出的会话（读取历史数据库）
 cf-route-tester export --session <id>        # 导出为公开 JSONL（自动隐私过滤）
 cf-route-tester aggregate --input batch.jsonl.gz   # 把导出物聚合为统计结果
-cf-route-tester query 1.1.1.1:443 --db data/results.db   # 查单目标线路画像
-cf-route-tester db stats       # 查看本地数据库状态
+cf-route-tester query 1.1.1.1:443 --db data/results.db   # 查单目标线路画像（读历史库）
+cf-route-tester db stats       # 查看历史数据库状态
 cf-route-tester db migrate     # 应用数据库迁移
 cf-route-tester db vacuum      # 整理数据库文件
 ```
@@ -206,7 +205,7 @@ Windows 上直接双击 `cf-route-tester-gui-*.exe` 也可以——那是用
 启动后终端会打印一个带令牌的地址：
 
 ```text
-time="..." level=INFO msg="web: starting" version=0.1.0 platform=windows/amd64 db=data/results.db
+time="..." level=INFO msg="web: starting" version=0.1.0 platform=windows/amd64 results=data/results.db
 time="..." level=INFO msg="webui: listening" url=http://127.0.0.1:8236
 
 请在浏览器中打开（地址里带有本次运行的访问令牌）：
@@ -215,7 +214,7 @@ time="..." level=INFO msg="webui: listening" url=http://127.0.0.1:8236
 令牌只对本次运行有效，重启后会换一个；它不会写入磁盘。
 ```
 
-界面能看数据库概览、启动/停止扫描（实时进度）、查看最近一次扫描的
+界面能看结果文件概览、启动/停止扫描（实时进度）、查看最近一次扫描的
 结果。**所有数据都只写本机**；上传功能尚未实现，因此没有任何数据会
 离开这台机器。
 
@@ -510,122 +509,135 @@ Unix 用 POSIX errno（`ECONNREFUSED` = 111），而且 Go 在 Windows 上
 还会把部分 WSA 错误归一化成伪 errno。两套数字都注册在案，
 因此同一个网络现象在 Windows 与 Linux 上得到同一个分类。
 
-### scan：全量扫描与断点续测
+### scan：全量扫描，结果实时写入 CSV
 
 ```bash
-cf-route-tester scan                       # 全部目标测一遍，写入 data/results.db
+cf-route-tester scan                       # 全部目标测一遍，写入 data/results.csv
 cf-route-tester scan --limit 300           # 只扫前 300 个（先验证链路是否通）
-cf-route-tester scan --resume              # 继续上次未完成的扫描
-cf-route-tester scan --resume --session 20260101T000000Z-00000000   # 指定会话
-cf-route-tester scan --new                 # 强制开始新会话（默认行为）
+cf-route-tester scan --out my.csv          # 换一个结果文件
+cf-route-tester scan --append              # 追加到已有文件（默认每次覆盖）
+cf-route-tester scan --trace               # 对**探测成功**的目标做线路跟踪
 cf-route-tester scan --country cn --province Sample Province --city Sample City \
                     --isp "China Mobile" --asn 9808
 ```
 
-输出示例（真实运行结果，600 个目标）：
+输出示例（真实运行结果）：
 
 ```text
-mode:        resume (skipped 156 already-measured target(s))
-session:     20260101T000000Z-00000000
-targets:     600 total, 444 to measure
+output:      data/docs.csv（覆盖）
+limit:       4 个目标
+workers:     100
+timeout:     2s
+trace:       disabled
 
-Completed: 444 / 444
-Success:   300
-Failed:    144
-Rate:      89.7/s
-Success %: 67.6%
-
-failures by type:
-  timeout:               144
-
-stored:      444 measurement(s)
-session progress: 600 measured (411 ok, 189 failed)
-session:     finished
+output:      data/docs.csv
+considered:  4 target(s)
+probed:      4
+succeeded:   3
+failed:      1
+rows:        4 written
+elapsed:     3.07s
 ```
 
-#### 断点续测的判据（本阶段的核心）
+#### 结果只进 CSV：没有数据库、没有会话、没有续测
 
-判断"某个目标是否已经测过"，依据的是：
+这个工具的实际用法是"跑一轮、看结果"。数据库带来的是会话、迁移、
+幂等去重、恢复逻辑——一整套使用者并不需要的东西。CSV 可以直接看、
+可以直接拖进表格，也**不会因为少了某个组件就读不出来**。
+
+因此 `scan` 与图形界面的扫描：
+
+- **不写数据库**。跑完只有 `data/results.csv`（以及日志），不会有 `.db` 文件；
+- **没有会话（session）**。每次 scan 就是一次独立的测量，没有会话 ID 这回事；
+- **没有续测（resume）**。中断就是中断，工具不假装知道你想不想接着跑；
+- **不做去重**。重跑就再写一遍，想保留多轮结果就加 `--append`。
+
+#### 中断不丢已测结果（本阶段的重点）
+
+每一行测完就**立即刷盘**，不等攒批、不等扫描结束。因此：
 
 ```text
-目标 × 采集者 × 测量会话
+Ctrl+C / 进程被杀 / 断电
+  -> 已经测完的目标，一行都不会丢
+  -> 只损失"正在测、还没测完"的那一个
 ```
 
-而**不是**"数据库里有没有这个目标的历史结果"。后者会让同一个节点
-永远无法重新测量全部目标——而定期重测正是本项目数据的来源。
-
-因此：
-
-- `scan`（默认）= 新会话 → 全部目标都测，历史数据继续累积（时间序列）；
-- `scan --resume` = 继续指定会话 → 只测该会话里**还没有测量结果**的目标；
-- 失败结果也算"已测"：超时、连接被拒同样是线路信息，
-  重跑时不该被当成"还没测过"。
-
-真实中断测试（1500 个目标跑到第 6 秒被强杀）：
+实测（12 个目标，跑到第 2 个时取消）：
 
 ```text
-$ kill <pid>                                  # 模拟 Ctrl+C / 崩溃
-$ db stats
-  scan_sessions:   1       <- 会话保持"未结束"
-  measurements:    N       <- 已经测到的部分留在库里
-
-$ scan --resume                               # 只测剩下的
-mode:        resume (skipped N already-measured target(s))
+$ scan --limit 12 ... &        # 中途 Ctrl+C
+$ wc -l data/results.csv
+3                              # 表头 + 2 行，已完成的两条都在
 ```
 
-会话状态存在数据库里，`--resume` 不指定会话时用身份文件里记住的
-上一个会话（`data/collector.json` 的 `last_session_id`），
-再退一步则取数据库里最近一个未结束的会话。
+这里刻意用 `Flush` 而不是 `fsync`：Flush 把数据交给操作系统，
+进程被杀也不会丢；而 fsync 要真的等磁盘落盘——每秒几十次会明显拖慢测量，
+而"操作系统崩溃"不是本工具需要防的场景。
 
-#### 落库策略：条数 + 时间双触发
+表头**只在文件为空时写一次**。追加模式下不重复写表头，
+否则表头会出现在文件中间，那种文件用 pandas 读会直接报错。
 
-测量结果按批写入，触发条件是**两者之一**：
+#### CSV 的列
 
 ```text
-攒够 500 条            -> 写库（保证吞吐）
-或距上次写库超过 2 秒   -> 写库（保证安全）
+timestamp_utc, target, ip, port, success, latency_ms,
+error_type, error_message, hop_count, as_path, hops, client_version
 ```
 
-只用条数是不够的：大量目标超时时（每个都要占满 timeout），
-一批可能要等好几分钟才满。实测 600 个目标 / 1s 超时 / 50 并发时，
-第一批 500 条要到第 6 秒才写下去——在那之前被 Ctrl+C，
-数据库里**一条都没有**，整段时间白测。加了时间上限之后，
-无论快慢都至少每 2 秒落一次盘。
+真实数据行：
 
-另外，落库与收尾一律使用 **未被取消的 context**：Ctrl+C 之后
-正是最需要把已测结果保存下来的时刻，用已取消的 ctx 会直接失败。
+```csv
+2026-10-03T18:00:17Z,159.60.146.81:443,159.60.146.81,443,true,284.683,,,,,,0.1.0
+2026-10-03T18:00:18Z,45.63.67.144:443,45.63.67.144,443,false,,timeout,dial tcp4 45.63.67.144:443: i/o timeout,,,,0.1.0
+```
+
+**失败时 `latency_ms` 是空单元格，不是 `0`。** 这一点很重要：
+0 毫秒与"没测到"在表格里是两回事，混在一起会让平均延迟、分位数
+全部失真。超时 1 秒的目标如果写成 `1000`，看起来就像"延迟 1 秒"，
+而它其实根本没连上。
+
+`hops` 把整条路径压进一个单元格，而不是每跳一行：
+
+```text
+1:10.0.0.1;2:203.0.113.4:163;3:*;4:198.51.100.7:CN2
+```
+
+`*` 表示该跳超时（留空会被读成"没有这一跳"）。一条路径 10~30 跳，
+每跳一行会让同一个目标在 CSV 里重复几十次，表格就没法用了。
+
+`error_message` 写进文件前会去掉**本机文件路径**（例如找不到引擎时
+报出的可执行文件路径），因为这份文件是要拿去看、可能要分享的。
+但**不会**去掉目标地址——`dial tcp 1.2.3.4:443: timeout` 里的地址
+正是"哪个目标失败了"。
 
 #### `--trace` 在引擎不可用时会明确说明"没做"
 
 （以下为真实运行输出，`--trace-binary no-such-engine` 模拟未安装 NextTrace）
 
 ```text
-trace:       UNAVAILABLE
+output:      data/doc-b.csv（覆盖）
+trace:       enabled (mode tcp) — 只跟踪 TCP 探测成功的目标
+
+output:      data/doc-b.csv
+considered:  2 target(s)
+probed:      2
+succeeded:   1
+failed:      1
+rows:        2 written
+elapsed:     2.353s
+
+trace:       SKIPPED
              file does not exist: "no-such-engine" not found in PATH
              NextTrace not found.
              Please install NextTrace or configure trace.nexttrace.binary.
-             TCP 测量继续进行；未指定 --binary 时默认从 PATH 查找 nexttrace。
-
-probe completed=3/3 success=3 failed=0
-
-Completed: 3 / 3
-Success:   3
-Failed:    0
-Success %: 100.0%
-
-stored:      3 measurement(s)
-session progress: 3 measured (3 ok, 0 failed)
-
-trace:       SKIPPED (no NextTrace engine available;
-             TCP measurements above are still valid)
-session:     finished
 ```
 
 两个刻意的决定：
 
 1. **引擎缺失不终止扫描**。TCP 测量本身仍有价值，
-   "用户没装 NextTrace"是最常见的情况之一。
-2. **绝不静默跳过**。明确标为 `SKIPPED` / `UNAVAILABLE`，
+   "用户没装 NextTrace"是最常见的情况之一，而且那 2 行 TCP 结果
+   已经写进 CSV 了。
+2. **绝不静默跳过**。明确标为 `SKIPPED`，并给出原因，
    否则汇总看起来像是跟踪过了——那会让用户基于错误的前提去分析数据。
 
 #### 两级测量：只跟踪探测成功的目标
@@ -638,122 +650,48 @@ cf-route-tester scan --trace --trace-binary "data/bin/nexttrace.exe" --trace-mod
 cf-route-tester scan --trace --trace-workers 4 --trace-timeout 25s
 ```
 
-扫描开始时会先把配置讲清楚（真实输出）：
+为什么必须这样分级：连 TCP 都连不上的目标，跑 traceroute 大概率在
+中途就断了。为它们花几十秒既得不到有效路径，又拖慢整次扫描。
+实测一次 traceroute 平均 17 秒，而 TCP 探测是毫秒级。
 
-```text
-source:     https://zip.cm.edu.kg/all.json (cache, json)
-targets:    3
-database:   /path/to/results.db
-collector:  c-00000000...  CN/Sample Province/Sample City/China Mobile/AS9808
-session:    20260101T000000Z-00000000 (new session)
-concurrency: 100 workers, timeout 1s
-trace:      enabled (mode tcp, 10 workers) — 只跟踪 TCP 探测成功的目标
-```
-
-`concurrency` 与 `trace:` 是**两套独立的并发**：探测是纯 socket
+`workers` 与 `trace-workers` 是**两套独立的并发**：探测是纯 socket
 （默认 100），跟踪每个 worker 都要启动一个外部进程（默认 10）。
 混在一个数字里会让用户把并发调到 100 去跑跟踪，那会拖垮机器。
 
-```
---- Level 2: route trace (only TCP-successful targets) ---
-candidates:  10 TCP-successful target(s)
-to trace:    10
-Completed:   10 / 10
-Success:     10
-Failed:      0
-Success %:   100.0%
-Avg hops:    23.3
-
-stored:      10 trace(s)
-```
-
-为什么必须这样分级（需求第 38 条）：连 TCP 都连不上的目标，跑 traceroute
-大概率在中途就断了。为它们花几十秒既得不到有效路径，又拖慢整次扫描。
-
-真实运行（12 个目标 / ICMP 模式 / 真实 NextTrace v1.7.3）：
+两级也会**分别汇报**：
 
 ```text
-Completed: 12 / 12          <- Level 1: TCP
-Success:   10
-Failed:    2                 (timeout)
-Success %: 83.3%
+probed:      12
+succeeded:   10      <- Level 1: TCP，整体可用率 83.3%
+failed:      2
 
---- Level 2: route trace (only TCP-successful targets) ---
-candidates:  10 TCP-successful target(s)   <- 12 - 2 个超时
-to trace:    10
-Success %:   100.0%
-Avg hops:    23.3
-stored:      10 trace(s)
+traced:      10 (ok 10)   <- Level 2: 只对那 10 个成功的
 ```
 
-注意两级是**分别汇报**的。"跟踪成功率 100%"指的是"能连上的目标里，
-全部成功拿到了路径"，与"整体可用率 83.3%"是两个不同的量——
-混在一起会让人以为线路质量比实际更好。
+"跟踪成功率 100%"指的是"能连上的目标里，全部成功拿到了路径"，
+与"整体可用率 83.3%"是两个不同的量——混在一起会让人以为线路质量
+比实际更好。
 
-#### 第二级也有断点续测
+跟踪结果与探测结果写在**同一个 CSV** 里，各自占一行：
+探测行没有 `hop_count` / `as_path` / `hops`，跟踪行则额外带上线路信息。
+这样既能看"通不通、多快"，也能看"走的是哪条线路"。
 
-不只看第一级。已经跟踪过的目标在 `--resume` 时会被跳过：
+#### 失败分类
 
-```text
---- Level 2: route trace (only TCP-successful targets) ---
-candidates:  10 TCP-successful target(s)
-already done:10 target(s) traced in this session, skipped
-to trace:    0
-```
+失败分类（数据库与分析的价值就在于"分得清是哪一种失败"）延续
+`probe` 的定义，写进 `error_type` 列：
 
-理由同样是代价：一次 traceroute 要几秒到几十秒（上面实测平均 17 秒），
-中断重跑时把这些重跑一遍代价很高。
-
-幂等性也做了实测：
-
-```text
-$ scan --trace --limit 12 ...          # 第一次
-measurements=12 traces=10
-
-$ scan --trace --resume ...            # 再跑一次
-mode:        resume (skipped 12 already-measured target(s))
-targets:     12 total, 0 to measure
-session:     finished
-
-$ 再次统计
-measurements=12 traces=10              # 没有翻倍
-```
-
-#### 会话状态与数据事实必须一致
-
-有一个容易忽略的边界：对一个**已经跑完**的会话再执行 `--resume`。
-
-这不该报错——那是用户的正常疑问（"我上次跑完了吗？"）——
-但也不该往一个已结束的会话里继续追加数据。现在的语义是：
-
-| 情况 | 行为 |
+| 分类 | 含义 |
 | --- | --- |
-| 会话还开着，但数据已经齐了 | 正常收尾，标记会话结束（幂等） |
-| 会话已结束，再次 `--resume` | 稳定报告"没有要测的"，**不报错、不重复测量** |
-| 会话已结束，**却还有目标没测** | 报错。这是真问题：会话被提前关闭，状态与数据矛盾 |
+| `timeout` | 连接超时，目标可能在黑洞路由后面或被防火墙丢弃 |
+| `refused` | 端口关闭（RST），主机活着但服务没监听 |
+| `unreachable` | 网络/主机不可达（ICMP 反馈） |
+| `dns` | 域名解析失败 |
+| `canceled` | 本地主动放弃（Ctrl+C） |
+| `permission_denied` | 权限不足（跟踪模式下常见，需要管理员 + WinDivert） |
 
-第三种情况以前会被伪装成"你续测了一个已结束的会话，请用 --new"，
-让人以为是操作问题；现在的错误信息直说会话是被提前关闭的：
-
-```text
-session "..." is already finished but 3 target(s) are still unmeasured;
-the session was closed prematurely — start a new scan with --new
-```
-
-#### 跟踪结果的落库批更小
-
-| 级别 | 批大小 | 时间上限 | 理由 |
-| --- | --- | --- | --- |
-| measurements | 500 | 2 秒 | 快（毫秒级），攒大点省 fsync |
-| traces | **20** | **5 秒** | 慢（十几秒一条），攒 500 条要几小时 |
-
-跟踪结果里同时保存两样东西，用途完全不同：
-
-- `trace_json`：**归一化后**的跳列表（业务查询只依赖它）；
-- `raw_json`：引擎原始输出（仅诊断；上游改格式不会让历史数据失去意义）。
-
-本地库**不做隐私过滤**：`LocalFiltered` 为 false，内网地址原样保留，
-供用户自己诊断路径。过滤属于导出层（Phase 9）。
+同一分类在不同平台由不同错误码映射而来，具体见表
+`internal/probe/errno_windows.go` / `errno_unix.go`。
 
 ### trace：使用 NextTrace 做线路跟踪
 
@@ -1485,7 +1423,7 @@ Go 工具链   modernc.org/sqlite 自身要求 go 1.26，因此 go.mod 的
 | `fetch` | 下载 / 缓存 / 解析 `all.json` |
 | `detect` | 检测本机地区与运营商，写入本地标识文件 |
 | `probe` | TCP 连通性与延迟测量 |
-| `scan` | 全量扫描：会话记录、断点续测、两级测量 |
+| `scan` | 全量扫描：结果实时写入 CSV、两级测量 |
 | `trace` | 使用 NextTrace 对 `IP:Port` 做线路跟踪 |
 | `export` | 导出为可公开的 JSONL（自动隐私过滤） |
 | `aggregate` | 把公开 JSONL 聚合为按地区 / 运营商分组的统计 |
@@ -1695,7 +1633,8 @@ cf-route-tester/
 │   ├── trace/                    NextTrace 集成（外部进程 + JSON 归一化）
 │   ├── detect/                   本机地区 / 运营商检测
 │   ├── identity/                 本地匿名标识 collector_id
-│   ├── scheduler/                扫描编排、断点续测、两级测量
+│   ├── scheduler/                扫描编排（历史数据库路径仍在用）
+│   ├── csvstore/                 结果实时追加写入 CSV
 │   ├── storage/                  本地 SQLite（迁移 / 只追加写入 / 查询）
 │   ├── privacy/                  隐私过滤（内网地址判定与替换）
 │   ├── export/                   公开导出（JSONL / CSV，隐私过滤的唯一出口）
@@ -1764,8 +1703,17 @@ cf-route-tester/
 
 | 文件 | 作用 |
 | --- | --- |
-| `service.go` | `RunScan` / `Stats` / `ProgressHub`。把"加载目标 → 开库 → 决定会话 → 跑调度器 → 记录会话"从 CLI 里抽出来，让命令行与图形界面共用同一份实现（复制一份的代价是两边的续测判据迟早分叉，而那是**静默的数据错误**）。含错误分类（用法 / 无目标 / 无会话）供调用方选择退出码或 HTTP 状态码。 |
-| `service_test.go` | 真实本机监听 + 真实 SQLite：测量与落库、limit 取前 N 个、**参数校验发生在任何副作用之前**、续测不产生重复行、进度回调、引擎不可用时仍完成 TCP 测量、画像覆盖优先于本地文件。 |
+| `service.go` | `ProgressHub` / `CSVProgressHub` / `Stats` 与共用的错误分类。`ProgressHub` 保留供历史数据库路径使用；`CSVProgressHub` 服务 CSV 扫描（事件多带 `CurrentTarget`，且 `Publish` 永不阻塞、慢订阅者丢自己的事件）。 |
+| `csvscan.go` | **结果只进 CSV 的扫描实现**：加载目标 → 开 CSV → 逐个探测并**立即写入一行** → 只对探测成功的目标跟踪并再写一行。没有会话、没有续测、没有去重。`CSVScanOptions.Progress` / `OnTarget` / `OnTrace` 供界面显示进度与线路信息。 |
+| `service_test.go` | 历史数据库路径的测试：真实本机监听 + 真实 SQLite、参数校验发生在任何副作用之前、进度回调、引擎不可用时仍完成 TCP 测量。 |
+| `csvscan_test.go` | CSV 路径的测试：真实写入、**不创建数据库**、参数校验先于副作用、limit、进度与当前目标、追加不覆盖、以及**取消后已测行仍在文件里**（不调用任何 Close 直接读文件）。 |
+
+### `internal/csvstore/` — 结果实时写入 CSV
+
+| 文件 | 作用 |
+| --- | --- |
+| `csvstore.go` | 结果文件的追加写入器。三条约定：**每行写完立即 `Flush`**（中断不丢已完成结果）、**表头只在文件为空时写一次**（追加模式不重复写，否则表头会落在文件中间）、**不做会话与恢复**。未测到的延迟写空单元格而不是 `0`（0ms 与"没测到"在表格里含义不同）。`SanitizeErrorMessage` 在写入前去掉本机文件路径，但保留目标地址。 |
+| `csvstore_test.go` | 表头与列数、**不调用 Close 也不丢数据**（模拟进程被杀）、追加不重复表头、未测延迟为空、并发写入不丢行不串行、特殊字符转义、路径清洗（含 `i/o` 不被误判为路径）、超长信息按 rune 边界截断、父目录自动创建、重复 Close 幂等。 |
 
 ### `internal/webui/` — 图形界面
 
@@ -1866,7 +1814,7 @@ cf-route-tester/
 
 | 文件 | 作用 |
 | --- | --- |
-| `scheduler.go` | 一次完整测量的编排：会话确定 → 待测目标 → TCP 探测 → 落库 → **只对成功目标跟踪** → 落库 → 收尾。含断点续测判据、条数+时间双触发落库、中断后保留会话。 |
+| `scheduler.go` | 一次完整测量的编排（**历史数据库路径**）：会话确定 → 待测目标 → TCP 探测 → 落库 → **只对成功目标跟踪** → 收尾。`scan` 命令已改用 `csvscan.go`；此包保留供 `db` / `export` / `query` 读取既有数据。含条数+时间双触发落库、中断后保留会话。 |
 | `scheduler_test.go` | 续测判据（三元组）、只测未完成目标、中断后会话保持未结束、两级过滤、跟踪失败不中断、幂等去重、落库失败被计数。 |
 
 ### `internal/storage/` — 本地 SQLite
@@ -1947,7 +1895,7 @@ cf-route-tester/
 | 文件 | 命令 | 作用 |
 | --- | --- | --- |
 | `cmd_probe.go` | `probe` | TCP 探测，支持 `--db` 落库、`--json` 输出 JSONL、失败分类汇总。 |
-| `cmd_scan.go` | `scan` | 全量扫描：会话控制（`--resume` / `--new` / `--session`）、进度、两级测量汇总。 |
+| `cmd_scan.go` | `scan` | 全量扫描：结果实时写入 CSV（`--out` / `--append`）、进度、两级测量汇总。 |
 | `cmd_trace.go` | `trace` | 单个/批量线路跟踪，`--hops` 逐跳表、`--json` JSONL。 |
 | `cmd_detect.go` | `detect` | 检测本机地区/运营商，写入标识文件；发起请求**之前**打印"谁会看到你的 IP"。 |
 | `cmd_db.go` | `db` | `db stats` / `migrate` / `vacuum`。 |
