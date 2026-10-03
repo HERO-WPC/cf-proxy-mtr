@@ -209,6 +209,19 @@
               <option value="api.nxtrace.org">api.nxtrace.org</option>
             </select>
           </div>
+          <div style="grid-column: 1 / -1">
+            <div class="check" style="margin:0">
+              <input type="checkbox" id="useASNPrefix" checked>
+              <label for="useASNPrefix" style="margin:0">
+                用本地 ASN 前缀识别线路（<b>无限、不限流、无需账号</b>）
+              </label>
+            </div>
+            <div class="hint" style="margin-top:6px">
+              按"线路的 IP 段"（来自 RouteViews BGP 数据）判断路径走了 CN2 / 163 / CMI 等哪几条线路。
+              首次使用会抓取约 1.7&nbsp;MB 前缀并缓存 7 天，之后完全离线。
+              勾上它就可以把上面的数据源设成 <code>disable-geoip</code>，彻底不依赖任何限流的 GeoIP 服务。
+            </div>
+          </div>
         </div>
       </div>
 
@@ -420,6 +433,7 @@ startBtn.addEventListener('click', async () => {
     trace_mode: document.getElementById('traceMode').value,
     data_provider: document.getElementById('dataProvider').value,
     pow_provider: document.getElementById('powProvider').value,
+    no_asn_prefix: !document.getElementById('useASNPrefix').checked,
   };
 
   banner('', '');

@@ -46,6 +46,7 @@ import (
 	"time"
 
 	"github.com/cf-route-tester/cf-route-tester/internal/applog"
+	"github.com/cf-route-tester/cf-route-tester/internal/asnprefix"
 	"github.com/cf-route-tester/cf-route-tester/internal/model"
 	"github.com/cf-route-tester/cf-route-tester/internal/service"
 )
@@ -84,6 +85,9 @@ type Config struct {
 
 	// Token 允许测试固定 token（留空则随机生成）。
 	Token string
+
+	// ASNPrefixDir 是 ASN 前缀缓存目录（空表示用默认值）。
+	ASNPrefixDir string
 
 	// DefaultCSVPath 是结果 CSV 的默认路径（请求里没给时使用）。
 	//
@@ -527,6 +531,9 @@ type scanRequest struct {
 	// PowProvider 是 NextTrace API v3 的 PoW 令牌源。
 	PowProvider string `json:"pow_provider"`
 
+	// NoASNPrefix 为真时不用本地 ASN 前缀识别线路。
+	NoASNPrefix bool `json:"no_asn_prefix"`
+
 	// OutputPath 是结果 CSV 的路径（留空用默认值）。
 	//
 	// 结果只进 CSV：没有会话、没有数据库、没有续测。
@@ -625,6 +632,11 @@ func (s *Server) runScan(ctx context.Context, req scanRequest, cancel context.Ca
 		OnProbe: s.emitProbe,
 		// OnTrace 输出线路：ASN 编号 + 线路名称 + 落地地区。
 		OnTrace: s.emitTrace,
+		// 本地 ASN 前缀识别（默认开启）：无限、不限流、无需账号。
+		NoASNPrefix: req.NoASNPrefix,
+		ASNPrefixOptions: asnprefix.Options{
+			Dir: s.cfg.ASNPrefixDir,
+		},
 	}
 
 	started := time.Now().UTC()

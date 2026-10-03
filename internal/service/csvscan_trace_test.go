@@ -125,6 +125,8 @@ func TestRunCSVScanTracesSuccessfulTargetsOnly(t *testing.T) {
 		Timeout:             2 * time.Second,
 		Trace:               true,
 		traceEngineOverride: engine,
+		// 测试不该联网：假引擎已经给出 ASN，不需要前缀数据。
+		NoASNPrefix: true,
 	})
 	if err != nil {
 		t.Fatalf("RunCSVScan: %v", err)
@@ -184,6 +186,8 @@ func TestRunCSVScanTracesInParallel(t *testing.T) {
 		Trace:               true,
 		TraceConfig:         TraceOptions{Workers: targets},
 		traceEngineOverride: engine,
+		// 测试不该联网：假引擎已经给出 ASN，不需要前缀数据。
+		NoASNPrefix: true,
 	})
 	elapsed := time.Since(start)
 
@@ -229,6 +233,8 @@ func TestRunCSVScanTraceRowsAreComplete(t *testing.T) {
 		Trace:               true,
 		TraceConfig:         TraceOptions{Workers: 4},
 		traceEngineOverride: engine,
+		// 测试不该联网：假引擎已经给出 ASN，不需要前缀数据。
+		NoASNPrefix: true,
 	})
 	if err != nil {
 		t.Fatalf("RunCSVScan: %v", err)
@@ -309,6 +315,7 @@ func TestRunCSVScanTraceEngineFailureKeepsProbeRows(t *testing.T) {
 		Timeout:             2 * time.Second,
 		Trace:               true,
 		traceEngineOverride: broken,
+		NoASNPrefix:         true,
 	})
 	if err != nil {
 		t.Fatalf("RunCSVScan returned an error even though probing succeeded: %v", err)
@@ -367,6 +374,8 @@ func TestRunCSVScanTraceRespectsInterrupt(t *testing.T) {
 			Trace:               true,
 			TraceConfig:         TraceOptions{Workers: 1},
 			traceEngineOverride: engine,
+			// 测试不该联网：假引擎已经给出 ASN，不需要前缀数据。
+			NoASNPrefix: true,
 		})
 	}()
 

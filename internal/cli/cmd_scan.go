@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cf-route-tester/cf-route-tester/internal/asnprefix"
 	"github.com/cf-route-tester/cf-route-tester/internal/identity"
 	"github.com/cf-route-tester/cf-route-tester/internal/model"
 	"github.com/cf-route-tester/cf-route-tester/internal/probe"
@@ -47,6 +48,11 @@ type scanParams struct {
 	// 以及 NextTrace API 的 PoW 令牌从哪儿取。
 	traceDataProvider string
 	tracePowProvider  string
+
+	// 本地 ASN 前缀识别（默认开启）。
+	traceNoASNPrefix      bool
+	traceASNPrefixDir     string
+	traceRefreshASNPrefix bool
 
 	// 采集者画像覆盖项。
 	collectorCountry   string
@@ -104,6 +110,12 @@ func scanFlagSet(p *scanParams) *flag.FlagSet {
 		"跟踪模式：tcp / icmp / udp（--trace 时使用）")
 	fs.StringVar(&p.traceDataProvider, "trace-data-provider", string(trace.DefaultDataProvider),
 		"线路跟踪的 GeoIP 数据源（ASN/运营商/地区的来源），可选："+providerList())
+	fs.BoolVar(&p.traceNoASNPrefix, "trace-no-asn-prefix", false,
+		"不用本地 ASN 前缀识别线路（默认开启；它是无限、不限流、无需账号的线路识别方式）")
+	fs.StringVar(&p.traceASNPrefixDir, "trace-asn-prefix-dir", asnprefix.DefaultDir,
+		"ASN 前缀缓存目录")
+	fs.BoolVar(&p.traceRefreshASNPrefix, "trace-refresh-asn-prefix", false,
+		"忽略缓存，重新抓取 ASN 前缀（默认 7 天过期）")
 	fs.StringVar(&p.tracePowProvider, "trace-pow-provider", "",
 		"线路跟踪的 PoW 令牌源（仅 --data-provider NextTrace-API 时生效），可选："+powProviderList())
 	fs.IntVar(&p.traceWorkers, "trace-workers", trace.DefaultWorkers,
@@ -252,6 +264,11 @@ func runScan(env *Env, args []string) error {
 			Mode:         p.traceMode,
 			DataProvider: p.traceDataProvider,
 			PowProvider:  p.tracePowProvider,
+		},
+		NoASNPrefix: p.traceNoASNPrefix,
+		ASNPrefixOptions: asnprefix.Options{
+			Dir: p.traceASNPrefixDir,
+			TTL: asnPrefixTTL(p.traceRefreshASNPrefix),
 		},
 	}
 
@@ -454,6 +471,20 @@ func cliLandingSuffix(location string) string {
 		return ""
 	}
 	return "  落地 " + trimmed
+}
+
+// asnPrefixTTL 返回前缀缓存的有效期。
+//
+// --trace-refresh-asn-prefix 时返回一个极小的值，
+// 等价于"立即视为过期"，从而强制重新抓取。
+//
+// 用"极小 TTL"而不是另加一个 force 参数：缓存层已经
+// 完整支持过期重抓，多一个开关只会多一条分支要测。
+func asnPrefixTTL(refresh bool) time.Duration {
+	if refresh {
+		return time.Nanosecond
+	}
+	return asnprefix.DefaultTTL
 }
 
 // probeTimeout 返回本次扫描的单目标超时。

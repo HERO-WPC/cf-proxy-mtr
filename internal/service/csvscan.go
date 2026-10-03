@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cf-route-tester/cf-route-tester/internal/asnmap"
+	"github.com/cf-route-tester/cf-route-tester/internal/asnprefix"
 	"github.com/cf-route-tester/cf-route-tester/internal/csvstore"
 	"github.com/cf-route-tester/cf-route-tester/internal/model"
 	"github.com/cf-route-tester/cf-route-tester/internal/probe"
@@ -60,6 +61,17 @@ type CSVScanOptions struct {
 
 	// OnTrace 在一条线路跟踪完成后调用（可为 nil，**会并发调用**）。
 	OnTrace func(outcome TraceOutcome)
+
+	// ASNPrefix 按"线路的 IP 段"识别路径走了哪些线路。
+	//
+	// 为 nil 时用下一项的参数按需创建一个；两者都为空则整段跳过。
+	ASNPrefix *asnprefix.Resolver
+
+	// ASNPrefixOptions 是创建 ASNPrefix 的参数（缓存目录、TTL 等）。
+	ASNPrefixOptions asnprefix.Options
+
+	// NoASNPrefix 为真时完全不用前缀匹配。
+	NoASNPrefix bool
 
 	// probeOverride 允许测试替换探测配置（并发性测试需要
 	// 一个"每个目标都恰好耗时 timeout"的确定性拨号器）。
@@ -318,7 +330,8 @@ func (s *Service) RunCSVScan(ctx context.Context, opts CSVScanOptions) (*CSVScan
 			s.log("scan: trace engine unavailable: %v", engineErr)
 			result.TraceUnavailable = engineErr.Error()
 		} else {
-			s.runTracePhase(ctx, store, engine, targets, successful, opts, result)
+			prefixes := resolveASNPrefix(ctx, opts, s.log)
+			s.runTracePhase(ctx, store, engine, prefixes, targets, successful, opts, result)
 		}
 	}
 
@@ -346,6 +359,7 @@ func (s *Service) runTracePhase(
 	ctx context.Context,
 	store *csvstore.Store,
 	engine *trace.NextTraceEngine,
+	prefixes *asnprefix.Resolver,
 	targets []model.Target,
 	successful []string,
 	opts CSVScanOptions,
@@ -436,7 +450,7 @@ func (s *Service) runTracePhase(
 					Target:       id,
 					Landing:      landing(target),
 					HopCount:     traceResult.HopCount(),
-					Route:        asnmap.FullPath(hopASNs(traceResult.Hops)),
+					Route:        routeSummary(traceResult, prefixes),
 					Success:      traceResult.Success,
 					ErrorType:    string(traceResult.ErrorType),
 					ErrorMessage: traceResult.ErrorMessage,
@@ -445,7 +459,7 @@ func (s *Service) runTracePhase(
 
 			// 每行拿到就立刻写盘，与探测阶段同样的性质：
 			// 中断时已完成的线路不会丢。
-			if err := store.Append(traceRow(target, traceResult)); err != nil {
+			if err := store.Append(traceRow(target, traceResult, prefixes)); err != nil {
 				mu.Lock()
 				result.Errors++
 				mu.Unlock()
@@ -479,6 +493,27 @@ func (s *Service) resolveTraceEngine(ctx context.Context, opts CSVScanOptions) (
 		return opts.traceEngineOverride, nil
 	}
 	return s.buildTraceEngine(ctx, opts.TraceConfig)
+}
+
+// resolveASNPrefix 按需取得前缀解析器。
+//
+// 返回 nil 表示不做前缀匹配（调用方会退回用引擎给的 ASN）。
+//
+// 它**不返回错误**：前缀数据是"让线路名更准"的增强，
+// 拿不到时退化成引擎的 ASN 即可，不该让跟踪失败。
+func resolveASNPrefix(ctx context.Context, opts CSVScanOptions, logf func(string, ...any)) *asnprefix.Resolver {
+	if opts.NoASNPrefix {
+		return nil
+	}
+	if opts.ASNPrefix != nil {
+		return opts.ASNPrefix
+	}
+
+	prefixOpts := opts.ASNPrefixOptions
+	if prefixOpts.Logf == nil {
+		prefixOpts.Logf = logf
+	}
+	return asnprefix.Load(ctx, prefixOpts)
 }
 
 // traceOutcome 是跟踪阶段的"结果类型"。
@@ -548,6 +583,42 @@ func landing(target model.Target) string {
 	return target.Location.String()
 }
 
+// resolveRoute 返回一条路径经过的线路（ASN 列表，按跳序去重）。
+//
+// 优先用**前缀匹配**（prefixes 非 nil 且认出了东西）：
+// 它按"线路的 IP 段"判断，直接来自 BGP 数据，不依赖任何
+// 限流的 GeoIP 服务。命中时给出的就是"走没走 CN2/163/CMI"，
+// 而且即使引擎那边配了 disable-geoip 也照样工作。
+//
+// 前缀匹配没认出任何线路时，退回引擎给的逐跳 ASN：
+// 有些路径确实不经过 asnmap 认识的那 30 条线路，
+// 而引擎可能有更广的 ASN 覆盖。
+//
+// CSV 的 as_path 与日志里的线路串都走这个函数，因此两者
+// **不会**出现"日志说走 CN2、CSV 说走 163"这种自相矛盾。
+func resolveRoute(result *trace.TraceResult, prefixes *asnprefix.Resolver) []string {
+	if result == nil {
+		return nil
+	}
+
+	if prefixes != nil && prefixes.Ready() {
+		hopIPs := make([]string, 0, len(result.Hops))
+		for _, hop := range result.Hops {
+			hopIPs = append(hopIPs, hop.IP)
+		}
+		if matched := prefixes.ResolvePath(hopIPs); len(matched) > 0 {
+			return matched
+		}
+	}
+
+	return hopASNs(result.Hops)
+}
+
+// routeSummary 把线路渲染成**含 ASN 编号**的形式（给日志用）。
+func routeSummary(result *trace.TraceResult, prefixes *asnprefix.Resolver) string {
+	return asnprefix.PathWithNames(resolveRoute(result, prefixes), asnmap.Name)
+}
+
 // hopASNs 取出每一跳的 ASN。
 //
 // 跳过空值：没有 ASN 的跳（超时、内网）对"线路"这件事没有信息量，
@@ -594,7 +665,9 @@ func probeRow(target model.Target, result probe.ProbeResult) csvstore.Row {
 //
 // 出错时也写一行（Success=false 带原因）："这个目标追不了"
 // 同样是有用的信息，静默丢掉会让 CSV 看起来像是漏测了。
-func traceRow(target model.Target, result *trace.TraceResult) csvstore.Row {
+//
+// prefixes 与日志用的是同一份判断，避免两边说法不一致。
+func traceRow(target model.Target, result *trace.TraceResult, prefixes *asnprefix.Resolver) csvstore.Row {
 	if result == nil {
 		return csvstore.Row{
 			Timestamp:     time.Now().UTC(),
@@ -607,21 +680,18 @@ func traceRow(target model.Target, result *trace.TraceResult) csvstore.Row {
 		}
 	}
 
-	hops := make([]string, 0, len(result.Hops))
-	for _, hop := range result.Hops {
-		hops = append(hops, hop.ASN)
-	}
-
 	return csvstore.Row{
-		Timestamp:     time.Now().UTC(),
-		Target:        target.ID,
-		IP:            target.IP,
-		Port:          target.Port,
-		Success:       result.Success,
-		ErrorType:     string(result.ErrorType),
-		ErrorMessage:  result.ErrorMessage,
-		HopCount:      result.HopCount(),
-		ASPath:        asnmap.ShortPath(hops),
+		Timestamp:    time.Now().UTC(),
+		Target:       target.ID,
+		IP:           target.IP,
+		Port:         target.Port,
+		Success:      result.Success,
+		ErrorType:    string(result.ErrorType),
+		ErrorMessage: result.ErrorMessage,
+		HopCount:     result.HopCount(),
+		// CSV 只写线路**名称**（如 "CN2 > CMI"）：这一列是要拿去
+		// 排序聚合的，越干净越好；编号在日志里给。
+		ASPath:        asnmap.ShortPath(resolveRoute(result, prefixes)),
 		Hops:          formatHops(result.Hops),
 		ClientVersion: version.Version,
 	}

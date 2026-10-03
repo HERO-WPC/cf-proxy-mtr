@@ -29,6 +29,18 @@
 data/**/*.db
 data/**/*.db-journal
 
+# 结果 CSV（每轮扫描都会重写，不该进版本库）
+/data/results.csv
+dist/data/
+
+# ASN 前缀缓存（从 RouteViews 抓取，约 1.7 MB）
+#
+# 用 **data/ 而不是 /data/：测试的工作目录是包目录，
+# 因此缓存会落在 internal/xxx/data/asnprefix/ 下——那种东西
+# 曾经被误提交过 30 个文件。这里连同嵌套位置一起忽略。
+data/asnprefix/
+**/data/asnprefix/
+
 # Export output / 导出产物
 /output/
 

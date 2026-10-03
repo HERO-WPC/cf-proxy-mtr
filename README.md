@@ -955,6 +955,73 @@ after 3 attempts (host=api.nxtrace.org): too many requests
 **`disable-geoip` 的代价要说清楚**：不做地区查询，因此 `as_path` 与
 落地地区必然为空。选它意味着只要路径、不要归属，不是"跟踪坏了"。
 
+#### 本地 ASN 前缀识别：无限、不限流、不需要账号
+
+所有免费的 GeoIP 服务都有限流：NextTrace-API 卡在 PoW 令牌、
+IPinfo 卡在额度、ip-api 免费版 45 次/分钟。**因为每查一个 IP
+都要发一次网络请求，而限流就是为这个设计的。**
+
+本项目用的办法是**把它反过来**：
+
+```text
+不去查"这个 IP 属于哪个 ASN"，而是先拿到"关心那几条线路的 IP 段"，
+再看路径里有没有跳落在这些段里。
+```
+
+要认的线路就是 asnmap 里那 30 条（163 / CN2 / 169 / CUII / CUG /
+CMNET / CMI / CMIN2 + 国际骨干），因此只需要抓 30 个 ASN 的前缀：
+
+```bash
+curl -L "https://api.routeviews.org/asn/4809?af=4"    # AS4809 = CN2
+curl -L "https://api.routeviews.org/asn/4809?af=6"    # 同一条的 IPv6 段
+```
+
+数据来自 **RouteViews**（公共 BGP 归档），**不需要账号、不需要 token、
+没有限流**。抓一次缓存下来（约 1.7 MB / 30 个文件，7 天过期），
+之后**完全离线**——不再有任何网络查询。
+
+于是可以这样跑，让引擎彻底不碰 GeoIP：
+
+```bash
+cf-route-tester scan --trace --trace-data-provider disable-geoip --out data/results.csv
+```
+
+真实输出（`--verbose`）：
+
+```text
+线路 159.60.146.81:443：15 跳，CMNET(AS56046) > CMI(AS58453)  落地 US/Illinois/Chicago
+线路 216.128.154.87:8443：25 跳，CMNET(AS9808) > CMNET(AS56046) > CMI(AS58453) > Arelion(AS1299) > Vultr(AS20473)  落地 US/Illinois/Elk Grove Village
+```
+
+注意第二行认出了 `Arelion(AS1299)` —— 那是国际骨干，说明这条路径
+**没有**全程走 CMI，而是从 CMI 出去转到了 Arelion。这正是
+"看它有没有走某条线路"要回答的问题。
+
+代价只有一个：**只认得出这 30 条线路**，别的 IP 归属不知道。
+而本项目的线路名本来就只来自这 30 条，落地地区又来自 `all.json`，
+所以这个代价实际上不是代价。
+
+相关开关：
+
+| 开关 | 作用 |
+| --- | --- |
+| （默认开启） | 首次抓取约 1.7 MB 前缀并缓存 7 天，之后离线 |
+| `--trace-no-asn-prefix` | 关掉，退回用引擎给的逐跳 ASN |
+| `--trace-asn-prefix-dir` | 换缓存目录（默认 `data/asnprefix`） |
+| `--trace-refresh-asn-prefix` | 忽略缓存立即重抓 |
+
+图形界面里是跟踪选项下的一个勾选框：
+
+```text
+[x] 用本地 ASN 前缀识别线路（无限、不限流、无需账号）
+```
+
+**前两级的分工**：前缀匹配优先，因为它的数据直接来自 BGP 表；
+前缀没认出任何线路时才退回引擎给的 ASN（有些路径确实不经过
+这 30 条线路，而引擎可能有更广的覆盖）。CSV 的 `as_path` 与日志
+走的是同一个判断，因此**不会**出现"日志说走 CN2、CSV 说走 163"
+这种自相矛盾。
+
 #### 数据源名字写错会被挡住，而不是静默换源
 
 这是必须做成受校验类型（而不是透传字符串）的原因：
@@ -1822,6 +1889,7 @@ cf-route-tester/
 | `service_test.go` | 历史数据库路径的测试：真实本机监听 + 真实 SQLite、参数校验发生在任何副作用之前、进度回调、引擎不可用时仍完成 TCP 测量。 |
 | `csvscan_test.go` | CSV 路径的测试：真实写入、**不创建数据库**、参数校验先于副作用、limit、进度与当前目标、追加不覆盖、以及**取消后已测行仍在文件里**（不调用任何 Close 直接读文件，并断言行数只增不减、没有半行残留）。 |
 | `csvscan_parallel_test.go` | 探测**并发性**的回归测试。注入一个"每次都耗满 timeout"的确定性拨号器，于是并行 ≈ 1×timeout、串行 ≈ N×timeout，差距足够大不会因网络抖动而偶发失败；另有一个测试证明并发峰值**不超过**配置值。两个都必须存在：前者守"确实并发了"，后者守"没有并发过头"。 |
+| `csvscan_prefix_test.go` | 本地 ASN 前缀识别的接线：引擎**不给任何 ASN**（`disable-geoip` 的效果）时仍由前缀匹配产出线路名、前缀匹配优先于引擎的 ASN、前缀没认出时退回引擎 ASN、关掉开关时退回原样、CSV 的 `as_path` 与日志走同一份判断、`NoASNPrefix` 时不建缓存。 |
 | `csvscan_trace_test.go` | 跟踪阶段的测试（这段代码一度零覆盖）。用引擎的 `RunCommand` 注入点，不需要 nexttrace 也不需要管理员权限：只跟踪探测成功的目标、跟踪并发、并发下跟踪行完整（含 `as_path` 解析出 `163 > CN2`）、引擎失败仍保留探测行、取消停止剩余跟踪、CSV 列顺序被钉住。 |
 
 ### `internal/csvstore/` — 结果实时写入 CSV
@@ -1990,6 +2058,23 @@ cf-route-tester/
 | --- | --- |
 | `asnmap.go` | `routes` 表（163 / CN2 / 169 / 9929 / CMNET / CMI / CMIN2 / CUG 等）、`Normalize`、`Lookup`、`Label`、`ShortPath` / `FullPath`。**只翻名字，不给评分**；未知 ASN 返回空名称而不是猜一个。 |
 | `asnmap_test.go` | 用户给出的八条映射逐条固定、各种 ASN 写法归一化、拒绝路径串等非 ASN、未知不编名、短路径略去未知项、相邻去重但**保留不相邻重复**、CMI 与 CMIN2 必须能区分。 |
+
+### `internal/asnprefix/` — 用线路的 IP 段识别线路
+
+把"查每个 IP 属于哪个 ASN"反过来做：只取**关心那几条线路的 IP 段**，
+再看路径里有没有跳落在段里。因为只需要 30 条线路的前缀，
+所以抓一次就能缓存，之后完全离线——**没有限流、不需要账号、不需要 token**。
+
+| 文件 | 作用 |
+| --- | --- |
+| `prefix.go` | IP 段集合与包含判断。按前缀起始地址排序后用二分查找，因此几万条前缀也是微秒级；前缀**主机位被 mask 掉**（RouteViews 数据里确实出现过 `1.2.3.4/24` 这种写法，不规范化会漏判）；容忍嵌套前缀；v4/v6 分开存。 |
+| `store.go` | 从 RouteViews 抓取并缓存。`DefaultBaseURL` 是 `https://api.routeviews.org/asn`；缓存 7 天过期（骨干线路的段变化很慢）；写入是**原子的**（临时文件 + rename，否则半截 JSON 会被当成"没有缓存"而反复重抓）；抓取失败时退回**过期缓存**（过期的前缀仍比没有强）。 |
+| `resolver.go` | `Match`（一个 IP 命中哪几条线路，顺序固定）、`ResolvePath`（按跳序只去掉**相邻**重复）、`PathWithNames`（`CN2(AS4809) > CMI(AS58453)`）、`Size` / `Ready`。 |
+| `asnprefix_test.go` | v4/v6 包含判断（含边界：`/24` 的最后一个地址与刚好越界）、带主机位的写法、嵌套前缀、坏数据被跳过而不是让整批失败、匹配顺序稳定、私有/非法地址不匹配、`ResolvePath` 只去相邻重复（"出去绕一圈又回来"必须保留）、抓取与缓存、过期重抓、抓取失败退回过期缓存、全盘失败不 panic、单个地址族 404 不算失败、缓存写入不留临时文件。 |
+
+**为什么 `Match` 返回全部命中而不是第一个**：一个 IP 可能同时落在多条线路的宣告里（转售、代理、嵌套宣告），挑一个就等于丢信息。顺序固定为 asnmap 的顺序，否则同一份数据两次运行会给出不同线路名。
+
+**为什么 `ResolvePath` 只去相邻重复**：一条路径可能先走 CN2、出去绕一圈又回到 CN2 —— 那是真实且有意义的信息，全局去重会抹掉它。
 
 ### `internal/export/` 的 CSV
 
