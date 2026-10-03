@@ -35,7 +35,7 @@ Phase 2  ✅ Target 数据模型（model 包：不变量、归一化、去重、
 Phase 3  ✅ TCP Probe（probe 包：错误分类、worker pool、probe 命令）
 Phase 4  ✅ SQLite（storage 包：迁移、只追加时间序列、db 命令、probe --db）
 Phase 5  ✅ 全量扫描 + Resume（scheduler 包：测量会话、断点续测、scan 命令）
-Phase 6  ⏳ 本机地区 / 运营商信息
+Phase 6  ✅ 本机地区 / 运营商信息（detect 包：可解释的检测源、手动优先）
 Phase 7  ⏳ NextTrace 集成
 Phase 8  ⏳ TCP Probe + NextTrace 两级测量
 Phase 9  ⏳ 结果导出
@@ -51,6 +51,7 @@ Phase 13 ⏳ 跨平台打包与发布
 cf-route-tester --help
 cf-route-tester version
 cf-route-tester fetch          # 下载 / 缓存 / 解析 all.json，输出目标数量
+cf-route-tester detect         # 检测测量者所在地区与运营商，写入本地标识
 cf-route-tester probe          # 对全部 IP:Port 做 TCP 连通性与延迟测量
 cf-route-tester probe --db data/results.db   # 同上，并把结果写入本地 SQLite
 cf-route-tester scan           # 全量扫描：测量 + 会话记录，写入数据库
@@ -61,7 +62,7 @@ cf-route-tester db vacuum      # 整理数据库文件
 ```
 
 尚未实现（执行时明确报 `not implemented yet`，退出码 2）：
-`detect`、`trace`、`export`、`upload`、`aggregate`、`query`。
+`trace`、`export`、`upload`、`aggregate`、`query`。
 
 ---
 
@@ -175,6 +176,108 @@ cache:        data/all.json (written)
 - **网络失败可回退过期缓存**：默认 `--allow-stale=true`，
   但会在输出中用 `origin: cache (stale)` 与 `warning: using STALE cache` 明确提示。
 - **代理**：`--proxy` 显式指定时优先；未指定则沿用环境变量 `HTTP_PROXY` / `HTTPS_PROXY`。
+
+### detect：测量者所在地区与运营商
+
+```bash
+cf-route-tester detect                       # 检测并显示（不写入）
+cf-route-tester detect --write               # 检测并写入 data/collector.json
+cf-route-tester detect --source local        # 只用离线源，不联系任何外部服务
+cf-route-tester detect --isp "China Mobile Zhejiang" --province Zhejiang --write
+cf-route-tester detect --json                # 机器可读输出
+```
+
+输出示例（真实运行结果）：
+
+```text
+detection sources:
+  [local] local
+      inspects the local network stack for an egress IP version; contacts no external service
+      (country/ISP cannot be determined offline without guessing)
+  [exposes your public IP] geoip
+      queries http://ip-api.com/json/?fields=... for the public IP, country, region, city, ISP and ASN
+
+source results:
+  local  OK      (no fields)  (1ms)
+  geoip  OK      country=CN province=Shanghai city=Shanghai \
+                 isp=Example Telecom asn=AS64500 ip_version=ipv4  (1.699s)
+
+field sources:
+  country:    geoip
+  province:   geoip
+  city:       geoip
+  isp:        geoip
+  asn:        geoip
+  ip_version: geoip
+
+collector profile:
+  country:    CN
+  province:   Shanghai
+  city:       Shanghai
+  isp:        Example Telecom
+  asn:        AS64500
+  ip_version: ipv4
+```
+
+#### 检测源与隐私
+
+每个源都必须**如实声明**自己会联系谁、是否暴露本机 IP。地理定位在原理上
+必须让服务端看到请求来源，这不是可以含糊过去的事，因此 CLI 会在发起请求
+**之前**打印这句话，用户可以在那一刻中止：
+
+| 源 | 做什么 | 是否暴露本机 IP |
+| --- | --- | --- |
+| `local` | 探测本机出口 IP 版本（UDP `dial` 到 RFC 5737 / RFC 3849 文档用途地址，**不发出任何报文**） | ❌ 从不 |
+| `geoip` | 查询可配置的公开 geo-IP API，取国家/地区/城市/ISP/ASN | ✅ 按定义会（端点可换） |
+
+`local` 源**只**给 IP 版本，不猜国家/城市/运营商。原因很实在：
+离线推断地理位置的唯一"技巧"是问公共 DNS 解析器"我的地址是什么"，
+但那返回的是**解析器自己**的出口地址，不是用户的；据此查 ASN 得到的是
+DNS 服务商（Cloudflare / Google）的 ASN。把它写进采集者画像就是**错误数据**,
+而错误的地区/运营商分组会直接毁掉整个数据库的可比性。因此宁可少给一个字段。
+
+双栈环境下 `local` 会返回空的 IP 版本（无法只凭本机判断出口走哪一族），
+这是刻意的：留空比如实猜错好。
+
+#### 手动配置永远优先
+
+公网 ASN 不一定等于用户实际感知的接入线路（家宽可能走母公司 ASN、
+企业出口可能走总部 ASN），因此：
+
+```text
+手动填写的值（命令行或已有配置文件）  >  自动检测结果
+```
+
+真实示例：检测给出 `province=Shanghai, isp=Example Telecom`，
+用户在自己机器上改成 `--province Zhejiang --city Hangzhou --isp "China Mobile Zhejiang"`：
+
+```text
+$ detect --isp "China Mobile Zhejiang" --province Zhejiang --city Hangzhou --write
+$ cat data/collector.json
+{
+  "collector_id": "c-0b720f1207df74114840f2be949d229b",
+  "profile": {
+    "country": "CN",
+    "province": "Zhejiang",          <- 手动值保持
+    "city": "Hangzhou",              <- 手动值保持
+    "isp": "China Mobile Zhejiang",  <- 手动值保持
+    "asn": "AS64500",               <- 未被手填，仍是检测结果
+    "ip_version": "ipv4"
+  }
+}
+```
+
+`collector_id` 在任何情况下都不会被 detect 改动：它是随机生成的匿名标识，
+换了就等于丢掉历史数据的关联。
+
+#### 写入的内容边界
+
+标识文件里**只有**两样东西：随机 `collector_id`，以及 6 个粗粒度字段
+（country / province / city / isp / asn / ip_version）。
+
+即使 geo-IP 响应里带了 `lat` / `lon` / `zip` / `hostname` / `mac` /
+`local_ip` / `device_id`，也**不会**被写入——有测试专门喂一份塞满这些字段的
+响应，断言它们一个都没落盘（`TestDetectNeverWritesIdentifyingData`）。
 
 ### probe：TCP 连通性与延迟测量
 
@@ -668,7 +771,10 @@ cf-route-tester/
 │   │   ├── errno_unix.go         Unix POSIX errno 表
 │   │   └── worker.go             有界 worker pool + Runner（NextTrace 可复用）
 │   ├── trace/                    Trace 引擎接口、NextTrace 调用与解析（Phase 7）
-│   ├── detect/                   本机地区 / 运营商检测（Phase 6）
+│   ├── detect/                   本机地区 / 运营商检测（已实现）
+│   │   ├── detect.go             Source 接口、合并规则（手动优先）、报告
+│   │   ├── source_local.go       离线源：只推断出口 IP 版本
+│   │   └── source_geoip.go       联网源：可配置的 geo-IP API + 宽松解析
 │   ├── identity/                 本地匿名标识 collector_id（已实现）
 │   ├── scheduler/                扫描编排与断点续测（已实现）
 │   │   └── scheduler.go          会话 -> 待测目标 -> Probe -> 落库 -> 收尾

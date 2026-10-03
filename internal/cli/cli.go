@@ -218,6 +218,7 @@ func newCommands() map[string]Command {
 		newFetchCommand(),
 		newProbeCommand(),
 		newScanCommand(),
+		newDetectCommand(),
 		newDBCommand(),
 		{
 			Name:    "version",
