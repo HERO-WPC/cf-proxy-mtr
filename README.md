@@ -181,8 +181,8 @@ Windows 上直接双击 `cf-route-tester-gui-*.exe` 也可以——那是用
 启动后终端会打印一个带令牌的地址：
 
 ```text
-log:        data/logs/cf-route-tester.log
-listening:  http://127.0.0.1:8236
+time="..." level=INFO msg="web: starting" version=0.1.0 platform=windows/amd64 db=data/results.db
+time="..." level=INFO msg="webui: listening" url=http://127.0.0.1:8236
 
 请在浏览器中打开（地址里带有本次运行的访问令牌）：
   http://127.0.0.1:8236/?token=65fa66747f4219fec23d688daecccfd2c41d2df527a1a8e9fca73101fdb81890

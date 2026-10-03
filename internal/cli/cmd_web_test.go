@@ -139,11 +139,11 @@ func TestWebIsNotInRoadmap(t *testing.T) {
 	}
 }
 
-// TestWebStartMessageCarriesToken 验证启动提示里带上了完整地址。
+// TestWebReadyMessageIsActionable 验证"服务就绪"提示里带上了完整地址。
 //
 // 用户需要点击那个地址才能进入界面；只打印端口是不够的。
-func TestWebStartMessageIsActionable(t *testing.T) {
-	// webStartMessage 需要一个已启动的 Server，因此这里直接检查
+func TestWebReadyMessageIsActionable(t *testing.T) {
+	// webReadyMessage 需要一个已启动的 Server，因此这里直接检查
 	// 它的组成部分是否完整（由 internal/webui 的测试验证真实输出）。
 	var p webParams
 	webFlagSet(&p)

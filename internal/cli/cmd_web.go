@@ -137,14 +137,12 @@ func runWeb(env *Env, args []string) error {
 		"db", p.db,
 		"console", p.console)
 
-	// 启动信息既给人也进日志。
+	// 日志文件路径**只由日志自己输出**（logger.Info 已经把
+	// "web: starting" 写到了控制台与文件）。
 	//
-	// **必须同时写日志**：无控制台时 Printf 到一个无效句柄等于丢弃，
-	// 而那个带 token 的地址是用户进入界面的唯一凭据。
-	startInfo := webStartMessage(nil, logger.Path())
-	if p.console {
-		fmt.Fprint(env.Stdout, startInfo)
-	}
+	// 早先这里额外用 fmt.Fprint 又打印了一次，导致同一行出现两遍：
+	// 一条来自 logger（走 Console writer），一条来自 fmt。
+	// 面向使用者的地址在服务起来之后再打印，那时才有内容可打。
 
 	svc := service.New(service.Options{
 		DBPath:       p.db,
@@ -181,7 +179,7 @@ func runWeb(env *Env, args []string) error {
 	// 而这个地址是用户进入界面的唯一凭据——丢了就只能重启服务。
 	logger.Info("web: ready", "url", server.URL(), "page", server.PageURL())
 	if p.console {
-		fmt.Fprint(env.Stdout, webStartMessage(server, logger.Path()))
+		fmt.Fprint(env.Stdout, webReadyMessage(server))
 	}
 
 	// 等 Ctrl+C 或终止信号。
@@ -209,21 +207,13 @@ func runWeb(env *Env, args []string) error {
 	return nil
 }
 
-// webStartMessage 组装启动提示。
+// webReadyMessage 组装"服务已就绪"的提示。
 //
-// server 可以为 nil：那时只输出日志路径（启动早期的提示用）。
-func webStartMessage(server *webui.Server, logPath string) string {
+// 它**只包含给使用者的信息**（地址与令牌），不重复日志路径——
+// 日志路径由 logger 自己输出一次即可，重复打印会让同一行出现两遍。
+func webReadyMessage(server *webui.Server) string {
 	var b strings.Builder
-	if logPath != "" {
-		fmt.Fprintf(&b, "log:        %s\n", logPath)
-	} else {
-		fmt.Fprintf(&b, "log:        (disabled)\n")
-	}
-	if server == nil {
-		return b.String()
-	}
-
-	fmt.Fprintf(&b, "listening:  %s\n", server.URL())
+	fmt.Fprintf(&b, "\nlistening:  %s\n", server.URL())
 	fmt.Fprintf(&b, "\n请在浏览器中打开（地址里带有本次运行的访问令牌）：\n")
 	fmt.Fprintf(&b, "  %s\n", server.PageURL())
 	fmt.Fprintf(&b, "\n令牌只对本次运行有效，重启后会换一个；它不会写入磁盘。\n")
