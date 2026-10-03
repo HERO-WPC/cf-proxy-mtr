@@ -45,10 +45,12 @@ Get-Content SHA256SUMS | ForEach-Object {
 
 ```text
 $ go run ./tools/release -skip-tests   # 第一次
-cf-route-tester-0.1.0-linux-amd64   11.16 MiB  24fe3bb6f6d91f9a
+  cf-route-tester-0.1.0-linux-amd64   11.16 MiB  <hash>
 $ go run ./tools/release -skip-tests   # 第二次
-cf-route-tester-0.1.0-linux-amd64   11.16 MiB  24fe3bb6f6d91f9a   <- 一致
+  cf-route-tester-0.1.0-linux-amd64   11.16 MiB  <hash>   <- 与上面完全相同
 ```
+
+（这里不写死具体哈希：它随每次提交变化。实际使用时两次输出一致即可。）
 
 这靠三件事：
 
@@ -127,11 +129,14 @@ go build -trimpath \
 client:         cf-route-tester
 version:        0.1.0
 schema_version: 1
-commit:         13edc88
-build_date:     2026-10-03T14:09:17Z
+commit:         <短 commit 号，由构建时的 git HEAD 决定>
+build_date:     <取自该 commit 的提交时间>
 go_version:     go1.26.5
 platform:       windows/amd64
 ```
+
+这里刻意不写死一个具体的 commit 号：每次提交它都会变，
+写进文档只会在下一次提交后变成错误信息。
 
 ## 三、生成完整发布包
 

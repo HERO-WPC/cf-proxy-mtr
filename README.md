@@ -1992,33 +1992,35 @@ linux/darwin/windows × amd64/arm64 交叉编译
 
 ## 许可证
 
-**本项目自身的许可证尚未选定**，`LICENSE` 文件里写明了发布前必须完成的事项。
+**GNU General Public License v3.0**（GPL-3.0），全文见 [`LICENSE`](LICENSE)。
 
-### 为什么这不是可以跳过的细节
+```text
+cf-route-tester
+Copyright (C) 2026 HERO-WPC
 
-一个没有许可证的公开仓库，在法律上默认是 **"保留所有权利"**：
-别人可以阅读，但**不能**合法地使用、修改或再分发——包括把它打包进
-自己的发行版。若你希望别人能用它，就必须显式给出许可证。
-因此**在把仓库公开之前**（或至少在发布第一个二进制之前）需要选定一个。
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+```
 
-### 需要你先决定的事
+### 这意味着什么
 
-1. **本项目采用哪个许可证**（常见选择：MIT / Apache-2.0 宽松，
-   或 GPL-3.0 强 copyleft）。
-2. **与 NextTrace-core 的关系**：它标注 **GPL-3.0**，而本项目
-   **以独立可执行文件的方式调用它**（`exec.Command` 启动子进程），
-   不复制其源码、不静态链接、不修改它。
-   这种"调用外部程序"的用法通常被认为不构成衍生作品，
-   因此一般**不会**强制本项目也采用 GPL。但这是需要你自己
-   确认（必要时咨询法律意见）的判断，我不会替你下结论。
-3. 若决定随包分发 NextTrace，需要同时提供它的许可证与源码获取方式说明。
+- 你可以自由使用、修改、再分发本项目，**包括商业用途**；
+- 但如果你**修改后分发**，必须以同样的 GPL-3.0 开源你的版本；
+- 不提供任何担保（见 `LICENSE` 第 15、16 条）。
 
-在上述事项确定之前，本仓库仅作为开发中的工作副本，
-未授予任何再分发许可。
+如果你想要一个可以被闭源项目直接使用的版本，GPL-3.0 做不到——
+那是 MIT / Apache-2.0 的适用范围。
 
-### 目前没有做的事
+### 第三方组件
 
-本项目**不**内嵌、**不**复制、**不**重新分发 NextTrace 的任何代码或二进制：
-`data/bin/` 下的 `nexttrace_*.exe` 被 `.gitignore` 忽略，
-用户按 `docs/INSTALL.md` 自行从上游下载。这也是把它做成
-"外部进程调用"而不是"内嵌库"的原因之一。
+本项目**不内嵌** NextTrace：它是以独立子进程方式调用的外部程序
+（`exec.Command`），源码不复制、不静态链接、二进制不入库
+（`data/bin/` 已被 `.gitignore` 忽略）。用户在需要线路跟踪功能时，
+按 [`docs/INSTALL.md`](docs/INSTALL.md) 自行从上游获取并遵守其许可证
+（NextTrace-core 同样是 GPL-3.0，与本项目方向一致）。
+
+Go 依赖的许可证清单（BSD-3-Clause 与 MIT，均与 GPL-3.0 兼容）
+列在 [`LICENSE`](LICENSE) 末尾，逐项是**读模块缓存里的 LICENSE 文件
+核对过**的，不是凭印象写的。
