@@ -14,7 +14,6 @@ import (
 	"github.com/cf-route-tester/cf-route-tester/internal/applog"
 	"github.com/cf-route-tester/cf-route-tester/internal/identity"
 	"github.com/cf-route-tester/cf-route-tester/internal/service"
-	"github.com/cf-route-tester/cf-route-tester/internal/storage"
 	"github.com/cf-route-tester/cf-route-tester/internal/webui"
 )
 
@@ -53,7 +52,7 @@ func newWebCommand() Command {
 // webParams 是 web 命令的参数。
 type webParams struct {
 	listen       string
-	db           string
+	out          string
 	identityPath string
 	logDir       string
 	logFile      string
@@ -81,7 +80,7 @@ func webFlagSet(p *webParams) *flag.FlagSet {
 
 	fs.StringVar(&p.listen, "listen", webui.DefaultListen,
 		"监听地址（默认只绑本机；改成 0.0.0.0:8123 会暴露到局域网）")
-	fs.StringVar(&p.db, "db", storage.DefaultPath, "SQLite 数据库路径")
+	fs.StringVar(&p.out, "out", webui.DefaultCSVPath, "结果 CSV 路径（每测完一个目标就写入一行）")
 	fs.StringVar(&p.identityPath, "identity", identity.DefaultPath, "本地匿名标识文件路径")
 	fs.StringVar(&p.logDir, "log-dir", applog.DefaultDir,
 		"日志目录（脱离命令行运行时，日志文件是唯一的排查入口；留空则不写文件）")
@@ -104,8 +103,8 @@ func runWeb(env *Env, args []string) error {
 	// 时只写文件，因为写 stderr 等于丢弃。
 	p.console = env == nil || !env.Detached
 
-	if strings.TrimSpace(p.db) == "" {
-		return usageError("--db must not be empty")
+	if strings.TrimSpace(p.out) == "" {
+		return usageError("--out must not be empty")
 	}
 
 	// 日志：**先建日志再干别的**。
@@ -134,7 +133,9 @@ func runWeb(env *Env, args []string) error {
 	logger.Info("web: starting",
 		"version", env.Info.Version,
 		"platform", env.Info.OS+"/"+env.Info.Arch,
-		"db", p.db,
+		// 记录**结果文件**而不是数据库：扫描结果只进 CSV，
+		// 日志里写 db=... 会让人以为数据存进了数据库。
+		"results", p.resultsPath(),
 		"console", p.console)
 
 	// 日志文件路径**只由日志自己输出**（logger.Info 已经把
@@ -145,7 +146,9 @@ func runWeb(env *Env, args []string) error {
 	// 面向使用者的地址在服务起来之后再打印，那时才有内容可打。
 
 	svc := service.New(service.Options{
-		DBPath:       p.db,
+		// DBPath 不再用于扫描（结果只进 CSV），保留它是为了让
+		// 旧的 db / export / aggregate / query 子命令仍然可用。
+		// web 界面本身不碰数据库。
 		IdentityPath: p.identityPath,
 		Source:       p.source.toConfig(),
 		Logf: func(format string, args ...any) {
@@ -160,6 +163,8 @@ func runWeb(env *Env, args []string) error {
 		Service:     svc,
 		Logger:      logger,
 		OpenBrowser: !p.noBrowser,
+		// 结果只进 CSV：没有数据库、没有会话、没有续测。
+		DefaultCSVPath: p.out,
 	})
 	if err != nil {
 		return err
@@ -213,6 +218,14 @@ func runWeb(env *Env, args []string) error {
 	}
 	logger.Info("web: stopped")
 	return nil
+}
+
+// resultsPath 返回结果 CSV 的路径。
+func (p webParams) resultsPath() string {
+	if strings.TrimSpace(p.out) != "" {
+		return p.out
+	}
+	return webui.DefaultCSVPath
 }
 
 // webReadyMessage 组装"服务已就绪"的提示。

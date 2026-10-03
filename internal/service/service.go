@@ -685,6 +685,127 @@ func (h *ProgressHub) Last() (scheduler.ProgressEvent, bool) {
 	return *h.last, true
 }
 
+// ---------------------------------------------------------------------------
+// CSV 扫描的进度（不带会话的那套）
+// ---------------------------------------------------------------------------
+
+// CSVProgressHub 把 csvscan 的进度广播给多个订阅者。
+//
+// 与上面的 ProgressHub 分开是因为两者的事件类型不同：
+// 旧的那套基于 scheduler.ProgressEvent（带 Phase / Completed），
+// CSV 那套基于 service.ProgressEvent（多了 CurrentTarget）。
+// 强行合并需要类型断言与转换，反而更难读。
+//
+// 语义与 ProgressHub 完全一致：Publish 永不阻塞、慢订阅者丢自己
+// 的事件、保留最近一次供后连上的订阅者立刻看到状态。
+type CSVProgressHub struct {
+	mu   sync.Mutex
+	subs map[int]chan ProgressEvent
+	next int
+
+	last    *ProgressEvent
+	lastSet bool
+}
+
+// NewProgressHubCSV 创建 CSV 扫描用的进度广播中心。
+func NewProgressHubCSV() *CSVProgressHub {
+	return &CSVProgressHub{subs: make(map[int]chan ProgressEvent)}
+}
+
+// Subscribe 订阅进度事件（会先收到最近一次状态）。
+func (h *CSVProgressHub) Subscribe() (<-chan ProgressEvent, func()) {
+	if h == nil {
+		ch := make(chan ProgressEvent)
+		close(ch)
+		return ch, func() {}
+	}
+
+	ch := make(chan ProgressEvent, 16)
+
+	h.mu.Lock()
+	id := h.next
+	h.next++
+	h.subs[id] = ch
+	var snapshot *ProgressEvent
+	if h.lastSet && h.last != nil {
+		event := *h.last
+		snapshot = &event
+	}
+	h.mu.Unlock()
+
+	if snapshot != nil {
+		select {
+		case ch <- *snapshot:
+		default:
+		}
+	}
+
+	return ch, func() {
+		h.mu.Lock()
+		if existing, ok := h.subs[id]; ok {
+			delete(h.subs, id)
+			close(existing)
+		}
+		h.mu.Unlock()
+	}
+}
+
+// Publish 广播一次进度（**永不阻塞**）。
+func (h *CSVProgressHub) Publish(event ProgressEvent) {
+	if h == nil {
+		return
+	}
+
+	h.mu.Lock()
+	h.last = &event
+	h.lastSet = true
+	subs := make([]chan ProgressEvent, 0, len(h.subs))
+	for _, ch := range h.subs {
+		subs = append(subs, ch)
+	}
+	h.mu.Unlock()
+
+	for _, ch := range subs {
+		select {
+		case ch <- event:
+		default:
+			// 满了就丢最旧的，保住最新状态。
+			select {
+			case <-ch:
+			default:
+			}
+			select {
+			case ch <- event:
+			default:
+			}
+		}
+	}
+}
+
+// Last 返回最近一次进度事件。
+func (h *CSVProgressHub) Last() (ProgressEvent, bool) {
+	if h == nil {
+		return ProgressEvent{}, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.lastSet || h.last == nil {
+		return ProgressEvent{}, false
+	}
+	return *h.last, true
+}
+
+// Reset 清空"最近一次进度"（新一轮扫描开始时调用）。
+func (h *CSVProgressHub) Reset() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.last = nil
+	h.lastSet = false
+	h.mu.Unlock()
+}
+
 // Reset 清空"最近一次进度"（新一轮扫描开始时调用）。
 func (h *ProgressHub) Reset() {
 	if h == nil {

@@ -7,8 +7,6 @@ import (
 	"time"
 
 	"github.com/cf-route-tester/cf-route-tester/internal/asnmap"
-	"github.com/cf-route-tester/cf-route-tester/internal/model"
-	"github.com/cf-route-tester/cf-route-tester/internal/scheduler"
 	"github.com/cf-route-tester/cf-route-tester/internal/service"
 	"github.com/cf-route-tester/cf-route-tester/internal/trace"
 )
@@ -91,10 +89,6 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 
 // emitScanStart 记录"开始扫描"以及这次扫描的关键参数。
 func (s *Server) emitScanStart(req scanRequest) {
-	mode := "新会话"
-	if req.Resume {
-		mode = "继续未完成的会话"
-	}
 	limit := "全部目标"
 	if req.Limit > 0 {
 		limit = fmt.Sprintf("前 %d 个目标", req.Limit)
@@ -108,7 +102,12 @@ func (s *Server) emitScanStart(req scanRequest) {
 		timeout = 3000
 	}
 
-	s.events.Info("开始测量：%s，%s，并发 %d，超时 %dms", mode, limit, workers, timeout)
+	out := req.OutputPath
+	if out == "" {
+		out = "(默认路径)"
+	}
+	s.events.Info("开始测量：%s，并发 %d，超时 %dms，结果写入 %s",
+		limit, workers, timeout, out)
 	if req.Trace {
 		s.events.Info("线路跟踪：已启用（模式 %s）", traceModeOrDefault(req.TraceMode))
 	} else {
@@ -117,29 +116,32 @@ func (s *Server) emitScanStart(req scanRequest) {
 }
 
 // emitLoadResult 记录目标列表的加载结果。
-func (s *Server) emitLoadResult(result *service.ScanResult) {
+func (s *Server) emitLoadResult(result *service.CSVScanResult) {
 	s.events.Info("目标列表：%d 个待测（来源 %s，%s）",
-		result.TargetsConsidered, result.SourceURL, originLabel(result.SourceFromCache))
+		result.Targets, result.SourceURL, originLabel(result.SourceFromCache))
 }
 
 // emitTarget 记录"正在测哪个目标"。
 //
+// 参数是字符串而不是 model.Target：CSV 模式下扫描器只知道
+// "IP:Port"，界面层不需要（也不该）拿到整个模型类型。
+//
 // 它会被多个 worker **并发**调用，因此这里只做两件事：
 // 把消息转给线程安全的 broker，并缓存当前目标
 // （供 /api/scan/status 返回，页面刷新时靠它恢复显示）。
-func (s *Server) emitTarget(target model.Target) {
+func (s *Server) emitTarget(target string) {
 	s.currentMu.Lock()
-	s.currentTarget = target.ID
+	s.currentTarget = target
 	s.currentMu.Unlock()
 
-	s.events.Emit(levelInfo, "正在测量 "+target.ID)
+	s.events.Emit(levelInfo, "正在测量 "+target)
 }
 
 // emitTrace 记录一条已完成线路的**线路信息**。
 //
 // 这是"AS4134 → 163"这类信息出现的地方：光有 ASN 编号
 // 对使用者没有意义，配上线路名称才知道走的是普通出口还是优质出口。
-func (s *Server) emitTrace(target model.Target, result *trace.TraceResult) {
+func (s *Server) emitTrace(target string, result *trace.TraceResult) {
 	if result == nil {
 		return
 	}
@@ -149,7 +151,7 @@ func (s *Server) emitTrace(target model.Target, result *trace.TraceResult) {
 		if reason == "" {
 			reason = string(result.ErrorType)
 		}
-		s.events.Warn("线路跟踪 %s 失败：%s", target.ID, reason)
+		s.events.Warn("线路跟踪 %s 失败：%s", target, reason)
 		return
 	}
 
@@ -157,26 +159,30 @@ func (s *Server) emitTrace(target model.Target, result *trace.TraceResult) {
 	if route == "" {
 		// 所有跳都没有已知 ASN：如实说"没识别出来"，
 		// 而不是显示一个空白的"线路："。
-		s.events.Info("线路 %s：%d 跳（未识别出已知骨干线路）", target.ID, result.HopCount())
+		s.events.Info("线路 %s：%d 跳（未识别出已知骨干线路）", target, result.HopCount())
 		return
 	}
 
 	s.events.Emit(levelGood, fmt.Sprintf("线路 %s：%d 跳，%s",
-		target.ID, result.HopCount(), route))
+		target, result.HopCount(), route))
 }
 
-// emitProgressEvent 把调度器进度翻译成日志行。
+// emitCSVProgress 把扫描进度翻译成日志行。
 //
-// 刻意**不**每个进度回调都写一行：进度回调按间隔触发，
-// 每次都写会让面板被"完成 37/100"刷满，反而看不到别的东西。
-// 只在阶段完成时写一行，中间的进度由进度条本身表达。
-func (s *Server) emitProgressEvent(event scheduler.ProgressEvent) {
+// 刻意**不**每个进度回调都写一行：那会让面板被"完成 37/100"刷满，
+// 反而看不到别的东西。只在阶段完成时写一行，中间的进度由进度条表达。
+func (s *Server) emitCSVProgress(event service.ProgressEvent) {
+	// 推给进度条：hub 自己保存最近一次，页面刷新后能恢复。
 	s.hub.Publish(event)
 
 	if event.Total > 0 && event.Completed == event.Total {
 		name := phaseLabel(event.Phase)
-		s.events.Good("%s完成：%d 个目标，成功 %d，失败 %d",
-			name, event.Completed, event.Success, event.Failed)
+		if event.Phase == "probe" {
+			s.events.Good("%s完成：%d 个目标，成功 %d，失败 %d",
+				name, event.Completed, event.Success, event.Failed)
+		} else {
+			s.events.Good("%s完成：%d 条线路", name, event.Completed)
+		}
 	}
 }
 
@@ -196,29 +202,34 @@ func (s *Server) emitScanEnd(outcome *scanOutcome) {
 		return
 	}
 
-	s.events.Good("测量完成：用时 %.1fs，成功 %d，失败 %d，落库 %d 条",
-		summary.ElapsedSeconds, summary.ProbeSuccess, summary.ProbeFailed, summary.Stored)
+	s.events.Good("测量完成：用时 %.1fs，成功 %d，失败 %d，写入 %d 行",
+		summary.ElapsedSecs, summary.Succeeded, summary.Failed, summary.RowsWritten)
 
-	if summary.TraceStored > 0 {
-		s.events.Good("线路跟踪完成：落库 %d 条", summary.TraceStored)
+	if summary.Traced > 0 {
+		s.events.Good("线路跟踪完成：%d 条（成功 %d）", summary.Traced, summary.TracedOK)
 	}
-	if summary.TraceSkipped {
+	if summary.TraceUnavailable != "" {
 		s.events.Warn("线路跟踪被跳过：%s", summary.TraceUnavailable)
 	}
 	if summary.Interrupted {
-		s.events.Warn("测量被中断：已测量的部分已保存，可以继续这个会话")
+		s.events.Warn("测量被中断：已经测完的部分都已写入 %s，不会丢", summary.OutputPath)
 	}
+	if summary.WriteErrors > 0 {
+		s.events.Error("有 %d 次写入失败，请检查磁盘空间与文件权限", summary.WriteErrors)
+	}
+
+	s.events.Info("结果文件：%s", summary.OutputPath)
 }
 
 // phaseLabel 返回阶段的显示名。
-func phaseLabel(phase scheduler.Phase) string {
+func phaseLabel(phase string) string {
 	switch phase {
-	case scheduler.PhaseProbe:
+	case "probe":
 		return "TCP 探测"
-	case scheduler.PhaseTrace:
+	case "trace":
 		return "线路跟踪"
 	default:
-		return string(phase)
+		return phase
 	}
 }
 

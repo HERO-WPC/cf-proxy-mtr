@@ -2,11 +2,13 @@ package webui
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -49,6 +51,8 @@ func newTestServer(t *testing.T, cachePath string) *Server {
 		Service: svc,
 		Logger:  applog.Discard(),
 		Token:   testToken,
+		// 结果写进临时目录：测试不该污染项目的 data/。
+		DefaultCSVPath: filepath.Join(dir, "results.csv"),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -89,12 +93,22 @@ func listenLocal(t *testing.T) int {
 // writeCache 写一份指向本机监听的目标缓存。
 func writeCache(t *testing.T, ports ...int) string {
 	t.Helper()
+	return writeCacheWithIP(t, "127.0.0.1", ports)
+}
+
+// writeCacheWithIP 写一份指定 IP 的目标缓存。
+//
+// 指定 IP 的用途：需要一个**必然超时**的目标时（192.0.2.0/24 之类的
+// 文档保留网段不会被路由），用它构造"扫描会持续一段时间"的场景。
+// 本机监听是微秒级完成的，靠它测"扫描进行中"的状态会随机失败。
+func writeCacheWithIP(t *testing.T, ip string, ports []int) string {
+	t.Helper()
 
 	data := make([]string, 0, len(ports))
 	for _, port := range ports {
 		data = append(data, fmt.Sprintf(
-			`{"ip":"127.0.0.1","port":[%d],"latitude":"0","longitude":"0","country":"CN","city":"Hangzhou"}`,
-			port))
+			`{"ip":"%s","port":[%d],"latitude":"0","longitude":"0","country":"CN","city":"Hangzhou"}`,
+			ip, port))
 	}
 	body := fmt.Sprintf(
 		`{"generated_at":"2026-10-03T00:00:00","list":{"ips":%d},"data":[%s]}`,
@@ -372,28 +386,44 @@ func TestScanStartStopAndResult(t *testing.T) {
 	if statusBody.Last == nil || statusBody.Last.Summary == nil {
 		t.Fatalf("no last-scan summary: %s", body)
 	}
-	if got := statusBody.Last.Summary.ProbeSuccess; got != 1 {
-		t.Errorf("probe_success = %d, want 1 (a real listener is accepting)", got)
+	if got := statusBody.Last.Summary.Succeeded; got != 1 {
+		t.Errorf("succeeded = %d, want 1 (a real listener is accepting)", got)
 	}
-	if got := statusBody.Last.Summary.Stored; got != 1 {
-		t.Errorf("stored = %d, want 1", got)
+	if got := statusBody.Last.Summary.RowsWritten; got != 1 {
+		t.Errorf("rows_written = %d, want 1", got)
+	}
+	if statusBody.Last.Summary.OutputPath == "" {
+		t.Error("the summary does not say where the results went; the user could not find them")
 	}
 
-	// 统计必须反映出落库的数据（这是"真的写进去了"的证据）。
-	status, body = request(t, http.MethodGet, server.URL()+"/api/stats", testToken, "", nil)
-	if status != http.StatusOK {
-		t.Fatalf("stats: status = %d", status)
+	// 结果必须**真的**在 CSV 文件里（而不是只在内存里）。
+	//
+	// 这是"结果只进 CSV"的核心断言：文件存在、有表头、有一行数据，
+	// 而且那一行是这个被测目标。
+	svc := server.cfg.Service
+	_ = svc
+	path := statusBody.Last.Summary.OutputPath
+
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("results CSV was not created at %s: %v", path, err)
 	}
-	var statsBody struct {
-		Storage struct {
-			Tables map[string]int64 `json:"Tables"`
-		} `json:"Storage"`
+	defer func() { _ = file.Close() }()
+
+	records, err := csv.NewReader(file).ReadAll()
+	if err != nil {
+		t.Fatalf("parse results csv: %v", err)
 	}
-	if err := json.Unmarshal([]byte(body), &statsBody); err != nil {
-		t.Fatalf("decode stats: %v", err)
+	if len(records) != 2 {
+		t.Fatalf("csv rows = %d, want 2 (header + 1 data row)", len(records))
 	}
-	if got := statsBody.Storage.Tables["measurements"]; got != 1 {
-		t.Errorf("measurements = %d, want 1", got)
+	if !strings.Contains(strings.Join(records[0], ","), "target") {
+		t.Errorf("csv header looks wrong: %v", records[0])
+	}
+
+	// 不该有数据库文件：这次改动就是为了不用数据库。
+	if _, statErr := os.Stat(filepath.Join(filepath.Dir(path), "results.db")); statErr == nil {
+		t.Error("a database file was created next to the CSV; scan must not use a database")
 	}
 
 	_ = ctx

@@ -157,11 +157,15 @@
           <input type="number" id="limit" value="0" min="0">
         </div>
         <div>
-          <label for="mode">扫描方式</label>
-          <select id="mode">
-            <option value="new">新会话</option>
-            <option value="resume">继续上次未完成的会话</option>
-          </select>
+          <label for="output">结果文件（CSV）</label>
+          <input type="text" id="output" placeholder="data/results.csv">
+        </div>
+      </div>
+
+      <div style="margin-top:12px">
+        <div class="check">
+          <input type="checkbox" id="append">
+          <label for="append" style="margin:0">追加到已有文件（不选则覆盖）</label>
         </div>
       </div>
 
@@ -191,7 +195,8 @@
         <button class="danger" id="stopBtn" disabled>停止</button>
       </div>
       <div class="hint">
-        扫描结果只会写入本机的 SQLite 数据库。上传功能尚未实现，因此这里没有任何数据会离开这台机器。
+        每测完一个目标就立刻写入 CSV，所以中途停掉也不会丢已经测完的结果。结果<b>只</b>写 CSV，
+        不使用数据库。想保留上一轮结果就勾选「追加」。
       </div>
     </div>
   </section>
@@ -327,7 +332,7 @@ async function loadStats() {
     if (e.status === 401) {
       banner('err', '访问令牌无效。请使用启动时打印的完整地址重新打开页面（地址里带有 token）。');
     } else {
-      banner('err', '读取数据库状态失败：' + e.message);
+      banner('err', '读取结果文件状态失败：' + e.message);
     }
     return;
   }
@@ -336,33 +341,27 @@ async function loadStats() {
   const box = document.getElementById('stats');
   box.innerHTML = '';
 
-  const tables = (s.Storage && s.Storage.Tables) || {};
-  box.appendChild(card('目标（IP:Port）', tables.targets || 0));
-  box.appendChild(card('测量记录', tables.measurements || 0));
-  box.appendChild(card('线路跟踪记录', tables.traces || 0));
-  box.appendChild(card('数据库大小', fmtBytes(s.Storage && s.Storage.SizeBytes)));
-  box.appendChild(card('schema 版本', (s.Storage && s.Storage.SchemaVersion) || 0));
+  // 结果文件的状态，而不是数据库。
+  //
+  // 这个页面不再展示"数据库里有多少行"——扫描结果只进 CSV，
+  // 显示数据库统计只会误导使用者以为数据存在库里。
+  box.appendChild(card('结果文件行数', s.rows || 0));
+  box.appendChild(card('文件大小', fmtBytes(s.size_bytes)));
+  box.appendChild(card('最后写入', fmtTime(s.modified_at)));
 
-  const schema = document.createElement('div');
-  schema.className = 'card';
-  const sl = document.createElement('div');
-  sl.className = 'label';
-  sl.textContent = '数据库文件';
-  const sv = document.createElement('div');
-  sv.className = 'value small';
-  sv.textContent = (s.Storage && s.Storage.Path) || '—';
-  schema.appendChild(sl);
-  schema.appendChild(sv);
-  box.appendChild(schema);
+  const fileCard = document.createElement('div');
+  fileCard.className = 'card';
+  const fl = document.createElement('div');
+  fl.className = 'label';
+  fl.textContent = '结果文件（CSV）';
+  const fv = document.createElement('div');
+  fv.className = 'value small';
+  fv.textContent = s.path || '—';
+  fileCard.appendChild(fl);
+  fileCard.appendChild(fv);
+  box.appendChild(fileCard);
 
-  // 最近会话
-  if (s.LatestSession) {
-    const ls = s.LatestSession;
-    box.appendChild(card('最近会话', ls.id || ls.ID || '—', true));
-    box.appendChild(card('最近测量时间', fmtTime(s.Storage && s.Storage.LastMeasurement)));
-  } else {
-    box.appendChild(card('最近会话', '（还没有扫描过）', true));
-  }
+  box.appendChild(card('正在扫描', s.scanning ? '是' : '否', true));
 
   banner('', '');
   renderOutcome(s.last_scan);
@@ -387,12 +386,13 @@ function setBusy(busy) {
 }
 
 startBtn.addEventListener('click', async () => {
-  const mode = document.getElementById('mode').value;
   const body = {
     workers: parseInt(document.getElementById('workers').value, 10) || 0,
     timeout_ms: parseInt(document.getElementById('timeout').value, 10) || 0,
     limit: parseInt(document.getElementById('limit').value, 10) || 0,
-    resume: mode === 'resume',
+    output_path: document.getElementById('output').value.trim(),
+    append: document.getElementById('append').checked,
+    resume: false,
     trace: traceBox.checked,
     trace_binary: document.getElementById('traceBinary').value.trim(),
     trace_mode: document.getElementById('traceMode').value,
@@ -555,38 +555,38 @@ function renderOutcome(last) {
 
   const s = last.summary || {};
   body.appendChild(kv([
-    ['会话', s.session_id || '—'],
+    ['结果文件', s.output_path || '—'],
     ['来源', (s.source_url || '—') + (s.source_from_cache ? '（本地缓存）' : '（网络）')],
-    ['耗时', (s.elapsed_seconds || 0).toFixed(1) + ' 秒'],
-    ['测量目标', (s.targets_pending || 0) + ' 个（共考虑 ' + (s.targets_total || 0) + ' 个）'],
-    ['探测成功', (s.probe_success || 0) + ' 个'],
-    ['探测失败', (s.probe_failed || 0) + ' 个'],
-    ['落库测量', (s.stored || 0) + ' 条'],
-    ['落库跟踪', (s.trace_stored || 0) + ' 条'],
-    ['会话状态', s.session_finished ? '已结束' : '未结束（可继续）'],
+    ['耗时', (s.elapsed_secs || 0).toFixed(1) + ' 秒'],
+    ['考虑目标', (s.targets || 0) + ' 个'],
+    ['已测', (s.probed || 0) + ' 个'],
+    ['成功', (s.succeeded || 0) + ' 个'],
+    ['失败', (s.failed || 0) + ' 个'],
+    ['写入行数', (s.rows_written || 0) + ' 行'],
+    ['跟踪', (s.traced || 0) + ' 条（成功 ' + (s.traced_ok || 0) + '）'],
   ]));
 
   if (s.interrupted) {
     const div = document.createElement('div');
     div.className = 'msg warn';
     div.style.marginTop = '12px';
-    div.textContent = '扫描被中断：结果不完整，但已测量的部分已保存。可以继续这个会话。';
+    div.textContent = '扫描被中断。已经测完的 ' + (s.rows_written || 0) +
+      ' 行都已写入 ' + (s.output_path || 'CSV') + '，没有丢失。';
     body.appendChild(div);
   }
-  if (s.trace_skipped) {
+  if (s.trace_unavailable) {
     const div = document.createElement('div');
     div.className = 'msg warn';
     div.style.marginTop = '12px';
-    div.textContent = '线路跟踪被跳过：' + (s.trace_unavailable || '跟踪引擎不可用') +
-      '（TCP 测量结果仍然有效）';
+    div.textContent = '线路跟踪被跳过：' + s.trace_unavailable + '（TCP 测量结果仍然有效）';
     body.appendChild(div);
   }
-  if (s.last_session_saved === false) {
+  if (s.write_errors > 0) {
     const div = document.createElement('div');
-    div.className = 'msg warn';
+    div.className = 'msg err';
     div.style.marginTop = '12px';
-    div.textContent = '警告：无法记住本次会话，下次「继续上次会话」可能找不到它。原因：' +
-      (s.last_session_error || '未知');
+    div.textContent = '有 ' + s.write_errors + ' 次写入失败：请检查磁盘空间与文件权限。' +
+      '失败的行不会出现在结果文件里，但测量本身已经完成。';
     body.appendChild(div);
   }
 }
@@ -599,9 +599,11 @@ const autoScrollBox = document.getElementById('autoScroll');
 const nowTargetEl = document.getElementById('nowTarget');
 const logConnEl = document.getElementById('logConn');
 
-// 与后端 defaultHistoryLimit 保持一致：旧的丢弃，避免长时间运行后
-// DOM 无限增长（几千行之后滚动会明显变卡）。
-const LOG_LIMIT = 500;
+// 与后端历史上限的关系：面板**一直保留**，不清空、不按扫描轮次重置。
+// 用户明确要求"实时日志一直存留，不要测下一个就刷新掉"——
+// 所以这里只做容量控制（旧行从顶部丢弃），不做任何自动清空。
+// 唯一清空途径是用户自己点「清空」。
+const LOG_LIMIT = 2000;
 let logCount = 0;
 
 // 后端会重发历史事件（页面刷新、SSE 重连），用序号去重，

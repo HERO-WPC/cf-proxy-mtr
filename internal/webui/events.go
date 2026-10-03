@@ -56,8 +56,11 @@ type eventBroker struct {
 
 // defaultHistoryLimit 是保留的事件条数。
 //
-// 500 行足够回溯一次扫描的开头，又不会让内存随长时间运行无限增长。
-const defaultHistoryLimit = 500
+// 2000 行足够回溯好几轮扫描的开头，又不会让内存随长时间运行无限增长。
+//
+// 刻意**不**在每次扫描开始时清空历史：用户明确要求日志一直存留。
+// 前端也保留同样规模的面板。
+const defaultHistoryLimit = 2000
 
 // newEventBroker 创建广播器。
 func newEventBroker() *eventBroker {

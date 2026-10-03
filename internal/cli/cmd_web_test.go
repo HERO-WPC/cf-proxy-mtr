@@ -25,7 +25,7 @@ func TestWebHelpExplainsSecurityAndLogs(t *testing.T) {
 
 	for _, want := range []string{
 		// 参数
-		"-listen", "-db", "-identity", "-log-dir", "-log-file",
+		"-listen", "-out", "-identity", "-log-dir", "-log-file",
 		"-no-browser", "-verbose",
 		// 数据源参数（与 probe/scan 共用）
 		"-url", "-cache", "-proxy",
@@ -58,6 +58,21 @@ func TestWebDefaultListenIsLoopback(t *testing.T) {
 	}
 }
 
+// TestWebDefaultOutIsSet 验证默认有结果文件路径。
+//
+// 空默认值会让每次扫描都报"必须给 --out"，用户第一次用就撞墙。
+func TestWebDefaultOutIsSet(t *testing.T) {
+	var p webParams
+	webFlagSet(&p)
+
+	if strings.TrimSpace(p.out) == "" {
+		t.Error("default --out is empty; a scan would fail with a usage error")
+	}
+	if !strings.HasSuffix(p.out, ".csv") {
+		t.Errorf("default --out = %q, want a .csv path", p.out)
+	}
+}
+
 // TestWebDefaultLogDirIsSet 验证默认会写日志文件。
 //
 // 脱离命令行运行时没有 stderr，日志文件是唯一的排查入口，
@@ -85,22 +100,22 @@ func TestWebRejectsUnknownFlag(t *testing.T) {
 	}
 }
 
-// TestWebRejectsEmptyDB 验证空 --db 被拒绝。
+// TestWebRejectsEmptyOut 验证空 --out 被拒绝。
 //
-// 扫描结果必须落库，空路径会让数据无处可去。
-func TestWebRejectsEmptyDB(t *testing.T) {
+// 结果要写进 CSV，空路径会让数据无处可去。
+func TestWebRejectsEmptyOut(t *testing.T) {
 	// 用一个必然空闲的端口并且不打开浏览器，避免真的弹窗；
 	// 但校验发生在起服务之前，因此这里不会真的监听。
 	code, _, stderr := runCLI("web",
-		"--db", "",
+		"--out", "",
 		"--no-browser",
 		"--listen", "127.0.0.1:0",
 		"--log-dir", filepath.Join(t.TempDir(), "logs"))
 	if code != ExitCodeUsage {
 		t.Fatalf("exit code = %d, want %d (stderr=%q)", code, ExitCodeUsage, stderr)
 	}
-	if !strings.Contains(stderr, "--db") {
-		t.Errorf("stderr = %q, want it to name --db", stderr)
+	if !strings.Contains(stderr, "--out") {
+		t.Errorf("stderr = %q, want it to name --out", stderr)
 	}
 }
 

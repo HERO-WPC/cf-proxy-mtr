@@ -26,6 +26,7 @@
 package webui
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -38,6 +39,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,7 +47,6 @@ import (
 
 	"github.com/cf-route-tester/cf-route-tester/internal/applog"
 	"github.com/cf-route-tester/cf-route-tester/internal/model"
-	"github.com/cf-route-tester/cf-route-tester/internal/scheduler"
 	"github.com/cf-route-tester/cf-route-tester/internal/service"
 )
 
@@ -83,13 +84,25 @@ type Config struct {
 
 	// Token 允许测试固定 token（留空则随机生成）。
 	Token string
+
+	// DefaultCSVPath 是结果 CSV 的默认路径（请求里没给时使用）。
+	//
+	// 结果只进 CSV：没有数据库、没有会话、没有续测。
+	DefaultCSVPath string
 }
+
+// DefaultCSVPath 是结果文件的默认位置。
+//
+// 用固定文件名而不是每次带时间戳：使用者关心的是"结果在哪"，
+// 一个名字固定的文件比一堆时间戳文件好找。想保留多轮结果时
+// 勾选「追加」或自己指定 --out。
+const DefaultCSVPath = "data/results.csv"
 
 // Server 是图形界面的 HTTP 服务。
 type Server struct {
 	cfg   Config
 	token string
-	hub   *service.ProgressHub
+	hub   *service.CSVProgressHub
 
 	// events 是界面日志面板的事件流（与 hub 分工见 events.go）。
 	events *eventBroker
@@ -104,8 +117,6 @@ type Server struct {
 	// currentTarget 是当前正在探测的目标（供页面刷新后恢复显示）。
 	currentMu     sync.Mutex
 	currentTarget string
-	// currentPhase 是当前阶段。
-	currentPhase string
 
 	httpServer *http.Server
 	listener   net.Listener
@@ -133,27 +144,29 @@ type scanOutcome struct {
 
 // ScanSummary 是扫描结果的展示摘要。
 //
-// 只挑界面需要的字段，而不是把 scheduler.Result 整个序列化出去：
-// 后者有二十多个字段，大部分对界面没有意义，而且会让内部结构
-// 意外地变成"对外接口"，以后改不动。
+// 只挑界面需要的字段，而不是把内部结构整个序列化出去：
+// 后者会让内部结构意外地变成"对外接口"，以后改不动。
 type ScanSummary struct {
-	SessionID         string  `json:"session_id"`
-	Resumed           bool    `json:"resumed"`
-	TargetsTotal      int     `json:"targets_total"`
-	TargetsPending    int     `json:"targets_pending"`
-	ProbeSuccess      int     `json:"probe_success"`
-	ProbeFailed       int     `json:"probe_failed"`
-	Stored            int     `json:"stored"`
-	TraceStored       int     `json:"trace_stored"`
-	TraceSkipped      bool    `json:"trace_skipped"`
-	TraceUnavailable  string  `json:"trace_unavailable,omitempty"`
-	Interrupted       bool    `json:"interrupted"`
-	SessionFinished   bool    `json:"session_finished"`
-	ElapsedSeconds    float64 `json:"elapsed_seconds"`
-	SourceURL         string  `json:"source_url"`
-	SourceFromCache   bool    `json:"source_from_cache"`
-	LastSessionSaved  bool    `json:"last_session_saved"`
-	LastSessionErrMsg string  `json:"last_session_error,omitempty"`
+	// OutputPath 是结果 CSV 的路径——界面要把它显示给用户，
+	// 否则用户不知道去哪儿找结果。
+	OutputPath string `json:"output_path"`
+
+	Targets     int     `json:"targets"`
+	Probed      int     `json:"probed"`
+	Succeeded   int     `json:"succeeded"`
+	Failed      int     `json:"failed"`
+	Traced      int     `json:"traced"`
+	TracedOK    int     `json:"traced_ok"`
+	RowsWritten int     `json:"rows_written"`
+	WriteErrors int     `json:"write_errors"`
+	Interrupted bool    `json:"interrupted"`
+	ElapsedSecs float64 `json:"elapsed_seconds"`
+
+	SourceURL       string `json:"source_url"`
+	SourceFromCache bool   `json:"source_from_cache"`
+
+	// TraceUnavailable 说明"要求跟踪但引擎不可用"的原因（可空）。
+	TraceUnavailable string `json:"trace_unavailable,omitempty"`
 }
 
 // New 创建服务。
@@ -180,7 +193,7 @@ func New(cfg Config) (*Server, error) {
 	return &Server{
 		cfg:    cfg,
 		token:  token,
-		hub:    service.NewProgressHub(),
+		hub:    service.NewProgressHubCSV(),
 		events: newEventBroker(),
 		// done 必须在这里创建。
 		//
@@ -425,22 +438,76 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleStats 返回数据库概览。
+// handleStats 返回结果文件的状态。
+//
+// 刻意**不**再报告数据库统计：扫描结果只进 CSV，
+// 显示"数据库里有几行"只会让人以为数据存在库里。
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if !s.authorize(w, r) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-
-	stats, err := s.cfg.Service.Stats(ctx)
-	if err != nil {
-		s.cfg.Logger.Warn("webui: stats failed", "error", err)
-		writeError(w, statusFor(err), err.Error())
-		return
+	payload := map[string]any{
+		"path":        s.resultsPath(),
+		"scanning":    s.isScanning(),
+		"last_scan":   s.lastOutcome(),
+		"rows":        int64(0),
+		"size_bytes":  int64(0),
+		"modified_at": "",
 	}
-	writeJSON(w, http.StatusOK, statsPayload{Stats: stats, Scanning: s.isScanning(), Last: s.lastOutcome()})
+
+	info, err := os.Stat(s.resultsPath())
+	if err == nil {
+		payload["size_bytes"] = info.Size()
+		payload["modified_at"] = info.ModTime().UTC().Format(time.RFC3339)
+		// 行数减 1 是表头；文件里只有表头时算 0 行。
+		if rows, countErr := countCSVRows(s.resultsPath()); countErr == nil {
+			if rows > 0 {
+				rows--
+			}
+			payload["rows"] = rows
+		}
+	}
+
+	writeJSON(w, http.StatusOK, payload)
+}
+
+// resultsPath 返回当前结果文件路径。
+func (s *Server) resultsPath() string {
+	if path := strings.TrimSpace(s.cfg.DefaultCSVPath); path != "" {
+		return path
+	}
+	return DefaultCSVPath
+}
+
+// countCSVRows 数一个 CSV 的数据行数（含表头）。
+//
+// 逐行数而不是读进内存：结果文件可能有几十万行，
+// 首页完全没必要为了显示一个数字把它读进来。
+func countCSVRows(path string) (int64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = file.Close() }()
+
+	var count int64
+	reader := bufio.NewReaderSize(file, 64*1024)
+	for {
+		_, readErr := reader.ReadString('\n')
+		count++
+		if readErr != nil {
+			// 最后一行没有换行符也算一行，但 EOF 之后不该再多算一次。
+			if errors.Is(readErr, io.EOF) {
+				count--
+			}
+			break
+		}
+	}
+	if count < 0 {
+		count = 0
+	}
+	return count, nil
 }
 
 // scanRequest 是启动扫描的请求体。
@@ -448,13 +515,19 @@ type scanRequest struct {
 	Workers       int    `json:"workers"`
 	TimeoutMS     int    `json:"timeout_ms"`
 	Limit         int    `json:"limit"`
-	Resume        bool   `json:"resume"`
-	SessionID     string `json:"session_id"`
 	Trace         bool   `json:"trace"`
 	TraceBinary   string `json:"trace_binary"`
 	TraceMode     string `json:"trace_mode"`
 	TraceWorkers  int    `json:"trace_workers"`
 	TraceTimeoutS int    `json:"trace_timeout_s"`
+
+	// OutputPath 是结果 CSV 的路径（留空用默认值）。
+	//
+	// 结果只进 CSV：没有会话、没有数据库、没有续测。
+	OutputPath string `json:"output_path"`
+
+	// Append 为真时追加到已有文件而不是覆盖。
+	Append bool `json:"append"`
 
 	Country   string `json:"country"`
 	Province  string `json:"province"`
@@ -498,7 +571,8 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	s.scanMu.Unlock()
 
 	s.cfg.Logger.Info("webui: scan requested",
-		"workers", req.Workers, "limit", req.Limit, "resume", req.Resume, "trace", req.Trace)
+		"workers", req.Workers, "limit", req.Limit, "trace", req.Trace,
+		"output", req.OutputPath, "append", req.Append)
 	s.emitScanStart(req)
 
 	go s.runScan(ctx, req, cancel)
@@ -507,25 +581,35 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 }
 
 // runScan 在后台执行扫描，并把结局记下来供界面查询。
+//
+// 结果**只写 CSV**：没有会话、没有数据库、没有续测。
+// 每一行测完就刷盘，因此中途停掉也不会丢已完成的测量。
 func (s *Server) runScan(ctx context.Context, req scanRequest, cancel context.CancelFunc) {
 	defer cancel()
 
-	opts := service.ScanOptions{
-		Workers:   req.Workers,
-		Timeout:   durationMS(req.TimeoutMS),
-		Limit:     req.Limit,
-		Resume:    req.Resume,
-		SessionID: strings.TrimSpace(req.SessionID),
-		Trace:     req.Trace,
+	outputPath := strings.TrimSpace(req.OutputPath)
+	if outputPath == "" {
+		outputPath = s.cfg.DefaultCSVPath
+	}
+	if strings.TrimSpace(outputPath) == "" {
+		outputPath = DefaultCSVPath
+	}
+
+	opts := service.CSVScanOptions{
+		OutputPath: outputPath,
+		Append:     req.Append,
+		Workers:    req.Workers,
+		Timeout:    durationMS(req.TimeoutMS),
+		Limit:      req.Limit,
+		Trace:      req.Trace,
 		TraceConfig: service.TraceOptions{
 			Binary:  strings.TrimSpace(req.TraceBinary),
 			Mode:    strings.TrimSpace(req.TraceMode),
 			Workers: req.TraceWorkers,
 			Timeout: durationSeconds(req.TraceTimeoutS),
 		},
-		Collector: collectorFrom(req),
 		// Progress 既推给进度条，也翻译成日志行（阶段完成时才写一条）。
-		Progress: s.emitProgressEvent,
+		Progress: s.emitCSVProgress,
 		// OnTarget 让日志面板显示"正在测哪个 IP"。
 		OnTarget: s.emitTarget,
 		// OnTrace 让日志面板显示这条线路走的是什么（163 / CN2 / ...）。
@@ -533,7 +617,7 @@ func (s *Server) runScan(ctx context.Context, req scanRequest, cancel context.Ca
 	}
 
 	started := time.Now().UTC()
-	result, err := s.cfg.Service.RunScan(ctx, opts)
+	result, err := s.cfg.Service.RunCSVScan(ctx, opts)
 	finished := time.Now().UTC()
 
 	outcome := &scanOutcome{StartedAt: started, FinishedAt: finished}
@@ -542,14 +626,10 @@ func (s *Server) runScan(ctx context.Context, req scanRequest, cancel context.Ca
 		outcome.Kind = classify(err)
 		s.cfg.Logger.Error("webui: scan failed", "kind", outcome.Kind, "error", err)
 	} else {
-		summary := summarize(result)
+		summary := summarizeCSVScan(result)
 		outcome.Summary = &summary
 		s.cfg.Logger.Info("webui: scan finished",
-			"session", summary.SessionID, "stored", summary.Stored, "traces", summary.TraceStored)
-
-		// 先报"这次实际测了多少、来自哪里"，再报完成。
-		// 顺序反了读起来像"先宣布结束、再补充开始"。
-		s.emitLoadResult(result)
+			"csv", summary.OutputPath, "rows", summary.RowsWritten, "errors", summary.WriteErrors)
 	}
 
 	s.emitScanEnd(outcome)
@@ -693,39 +773,37 @@ func (s *Server) cancelScan() bool {
 }
 
 // progressPayload 把进度事件转成界面用的结构。
-func progressPayload(event scheduler.ProgressEvent, ok bool) map[string]any {
+func progressPayload(event service.ProgressEvent, ok bool) map[string]any {
 	if !ok {
 		return nil
 	}
 	return map[string]any{
-		"phase":     string(event.Phase),
-		"completed": event.Completed,
-		"total":     event.Total,
-		"success":   event.Success,
-		"failed":    event.Failed,
+		"phase":          event.Phase,
+		"completed":      event.Completed,
+		"total":          event.Total,
+		"success":        event.Success,
+		"failed":         event.Failed,
+		"current_target": event.CurrentTarget,
 	}
 }
 
-// summarize 把调度器结果压成界面需要的字段。
-func summarize(result *service.ScanResult) ScanSummary {
+// summarizeCSVScan 把扫描结果压成界面需要的字段。
+func summarizeCSVScan(result *service.CSVScanResult) ScanSummary {
 	return ScanSummary{
-		SessionID:         result.SessionID,
-		Resumed:           result.Resumed,
-		TargetsTotal:      result.TargetsTotal,
-		TargetsPending:    result.TargetsPending,
-		ProbeSuccess:      result.Probe.Success,
-		ProbeFailed:       result.Probe.Failed,
-		Stored:            result.Stored,
-		TraceStored:       result.TraceStored,
-		TraceSkipped:      result.TraceSkipped,
-		TraceUnavailable:  result.TraceUnavailable,
-		Interrupted:       result.Interrupted,
-		SessionFinished:   result.SessionFinished,
-		ElapsedSeconds:    result.Elapsed().Seconds(),
-		SourceURL:         result.SourceURL,
-		SourceFromCache:   result.SourceFromCache,
-		LastSessionSaved:  result.LastSessionSaved,
-		LastSessionErrMsg: result.LastSessionError,
+		OutputPath:       result.OutputPath,
+		Targets:          result.Targets,
+		Probed:           result.Probed,
+		Succeeded:        result.Succeeded,
+		Failed:           result.Failed,
+		Traced:           result.Traced,
+		TracedOK:         result.TracedOK,
+		RowsWritten:      result.RowsWritten,
+		WriteErrors:      result.Errors,
+		Interrupted:      result.Interrupted,
+		ElapsedSecs:      result.Elapsed().Seconds(),
+		SourceURL:        result.SourceURL,
+		SourceFromCache:  result.SourceFromCache,
+		TraceUnavailable: result.TraceUnavailable,
 	}
 }
 
@@ -842,11 +920,4 @@ func randomToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(buf), nil
-}
-
-// statsPayload 是 /api/stats 的响应。
-type statsPayload struct {
-	*service.Stats
-	Scanning bool         `json:"scanning"`
-	Last     *scanOutcome `json:"last_scan"`
 }

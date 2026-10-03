@@ -236,22 +236,24 @@ func TestScanEmitsLogEvents(t *testing.T) {
 
 // TestScanStatusReportsCurrentTargetDuringScan 验证扫描期间
 // /api/scan/status 会报告当前目标（页面刷新后靠它恢复显示）。
+//
+// 用**必然超时**的非路由地址而不是本机监听：本机连接是微秒级完成的，
+// 扫描瞬间就结束了，测试会在轮询到之前错过窗口——那样测试会随机失败，
+// 而且失败原因看起来像产品缺陷。这里用保留地址 + 较长超时，
+// 让"扫描进行中"成为一个稳定的状态。
 func TestScanStatusReportsCurrentTargetDuringScan(t *testing.T) {
-	// 目标多点，保证扫描期间有足够时间查询状态。
-	ports := make([]int, 0, 12)
-	for i := 0; i < 12; i++ {
-		ports = append(ports, listenLocal(t))
-	}
-	server := newTestServer(t, writeCache(t, ports...))
+	// 192.0.2.0/24 是文档保留网段，不会被路由：连接必然超时。
+	cache := writeCacheWithIP(t, "192.0.2.1", []int{443, 8443})
+
+	server := newTestServer(t, cache)
 
 	status, body := request(t, http.MethodPost, server.URL()+"/api/scan", testToken,
-		`{"timeout_ms":3000,"workers":2}`, nil)
+		`{"limit":1,"timeout_ms":4000}`, nil)
 	if status != http.StatusAccepted {
 		t.Fatalf("start: status = %d (body=%s)", status, body)
 	}
 
-	// 轮询等待"当前目标"出现。
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	var current string
 	for time.Now().Before(deadline) {
 		_, body := request(t, http.MethodGet, server.URL()+"/api/scan/status", testToken, "", nil)
@@ -268,11 +270,15 @@ func TestScanStatusReportsCurrentTargetDuringScan(t *testing.T) {
 
 	if current == "" {
 		t.Error("current_target stayed empty during a scan; the UI could not show what is being measured")
-	} else if !strings.HasPrefix(current, "127.0.0.1:") {
-		t.Errorf("current_target = %q, want a 127.0.0.1 target", current)
+	} else if !strings.HasPrefix(current, "192.0.2.1:") {
+		t.Errorf("current_target = %q, want a 192.0.2.1 target", current)
 	}
 
-	waitIdle(t, server, 60*time.Second)
+	// 停止扫描，别让测试等满超时。
+	if _, stopBody := request(t, http.MethodPost, server.URL()+"/api/scan/stop", testToken, "", nil); stopBody == "" {
+		t.Log("stop request returned no body")
+	}
+	waitIdle(t, server, 30*time.Second)
 
 	// 扫描结束后必须清空：否则页面会一直显示一个早已测完的 IP。
 	_, body = request(t, http.MethodGet, server.URL()+"/api/scan/status", testToken, "", nil)
