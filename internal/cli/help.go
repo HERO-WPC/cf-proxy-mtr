@@ -11,14 +11,13 @@ import (
 // helpOrder 固定顶层帮助中“当前可用命令”的显示顺序。
 //
 // 显式列出顺序，而不是遍历 map，保证帮助输出稳定、可测试。
-var helpOrder = []string{"help", "fetch", "version"}
+var helpOrder = []string{"help", "fetch", "probe", "version"}
 
 // roadmapOrder 固定“规划中命令”的显示顺序，方便用户理解路线图。
 //
 // 这些命令尚未实现，这里只做说明，避免用户误以为功能已可用。
 var roadmapOrder = []string{
 	"detect",    // 检测本机地区 / 运营商
-	"probe",     // 仅做 TCP Probe
 	"scan",      // 全量扫描（Probe + Trace）
 	"trace",     // 仅做 NextTrace 线路跟踪
 	"export",    // 导出 JSONL / gzip / zstd
@@ -31,7 +30,6 @@ var roadmapOrder = []string{
 // roadmapSummary 是规划中命令的一行说明。
 var roadmapSummary = map[string]string{
 	"detect":    "检测测量者地区与运营商信息",
-	"probe":     "对全部 IP:Port 执行 TCP 连通性与延迟测量",
 	"scan":      "全量扫描：TCP Probe + NextTrace 两级测量（支持 --resume）",
 	"trace":     "使用 NextTrace 对指定 IP:Port 做线路跟踪",
 	"export":    "导出 measurements / traces 为 JSONL 及压缩批次",

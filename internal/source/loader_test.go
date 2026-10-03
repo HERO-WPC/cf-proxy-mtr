@@ -189,6 +189,69 @@ func TestLoadRefreshFlagBypassesFreshCache(t *testing.T) {
 	}
 }
 
+// TestLoadHonorsEmptyCache 验证"合法但空"的缓存会被当作有效缓存。
+//
+// 这是回归测试：早期实现把"缓存里 0 个目标"当成未命中，于是联网重下一次。
+// 后果有两个：
+//
+//  1. 数据源确实返回空列表时，每次运行都要重新下载（慢，且与"缓存有效"的语义矛盾）；
+//  2. 离线环境行为不可预期：明明有缓存，却因为"它是空的"而去联网。
+//
+// 空列表是否可用应当由调用方决定，而不是由缓存层替它猜。
+func TestLoadHonorsEmptyCache(t *testing.T) {
+	var requests int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		_, _ = w.Write(testJSONBody(t, "1.2.3.4"))
+	}))
+	defer srv.Close()
+
+	cachePath := filepath.Join(t.TempDir(), "all.json")
+	// 写一份空目标列表的缓存（源地址与即将使用的源一致）。
+	if err := WriteCache(cachePath, SourceMeta{URL: srv.URL, Format: "json"}, ParseStats{}, nil); err != nil {
+		t.Fatalf("WriteCache: %v", err)
+	}
+
+	l := testLoader(t, Config{URL: srv.URL, FallbackURL: "", CachePath: cachePath})
+	res, err := l.Load(context.Background(), LoadOptions{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if got := atomic.LoadInt32(&requests); got != 0 {
+		t.Errorf("network requests = %d, want 0 (an empty cache is still a valid cache)", got)
+	}
+	if !res.FromCache {
+		t.Error("FromCache = false, want true")
+	}
+	if len(res.Targets) != 0 {
+		t.Errorf("targets = %d, want 0", len(res.Targets))
+	}
+}
+
+// TestLoadMalformedCacheFallsBackToNetwork 验证损坏的缓存仍然算未命中。
+func TestLoadMalformedCacheFallsBackToNetwork(t *testing.T) {
+	srv := jsonServer(t, testJSONBody(t, "1.2.3.4"))
+
+	cachePath := filepath.Join(t.TempDir(), "all.json")
+	if err := os.WriteFile(cachePath, []byte(`{"schema_version":2,"targets":[{"id":"1.2.3`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	l := testLoader(t, Config{URL: srv.URL, FallbackURL: "", CachePath: cachePath})
+	res, err := l.Load(context.Background(), LoadOptions{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if res.FromCache {
+		t.Error("FromCache = true, want false for a corrupt cache")
+	}
+	if len(res.Targets) != 1 {
+		t.Errorf("targets = %d, want 1 from the network", len(res.Targets))
+	}
+}
+
 func TestLoadCacheFromDifferentSourceIsNotReused(t *testing.T) {
 	// 缓存记录的是"另一个数据源"，即使新鲜也不能当作当前源的数据。
 	srv := jsonServer(t, testJSONBody(t, "1.2.3.4"))

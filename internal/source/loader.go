@@ -277,9 +277,6 @@ func (l *Loader) tryCache(cachePath string, ttl time.Duration, now time.Time) (*
 		debugf("tryCache: inspect failed path=%q err=%v", cachePath, err)
 		return nil, false
 	}
-	if info.TargetCount == 0 {
-		return nil, false
-	}
 	if ttl > 0 && info.Age > ttl {
 		debugf("tryCache: expired path=%q age=%s ttl=%s", cachePath, info.Age, ttl)
 		return nil, false
@@ -289,6 +286,16 @@ func (l *Loader) tryCache(cachePath string, ttl time.Duration, now time.Time) (*
 			cachePath, info.SourceURL, l.cfg.URL)
 		return nil, false
 	}
+
+	// 注意：这里**不**因为"缓存里有 0 个目标"就判定未命中。
+	//
+	// 一份写入成功的空缓存，说明当时的数据源确实返回了空列表。
+	// 若把它当成未命中，程序会立刻联网重下一次——那既慢又不符合
+	// "缓存有效"的语义，还会让离线环境下的行为变得不可预期。
+	// 空列表是否可用由调用方决定（例如 probe 会明确报"没有目标可测"）。
+	//
+	// 真正损坏的缓存（截断、字段不合法）在 ReadCache 里会报错，
+	// 因此仍然会被判为未命中。
 	return l.readCacheResult(cachePath, now)
 }
 
@@ -302,9 +309,12 @@ func (l *Loader) tryStaleCache(cachePath string) (*Result, bool) {
 }
 
 // readCacheResult 完整读取缓存并转换为 Result。
+//
+// 只有"读不出来"（文件缺失、JSON 损坏、schema 不匹配）才算未命中。
+// 空目标列表是**成功**的读取结果，由调用方判断是否可用。
 func (l *Loader) readCacheResult(cachePath string, now time.Time) (*Result, bool) {
 	meta, stats, targets, writtenAt, err := ReadCache(cachePath)
-	if err != nil || len(targets) == 0 {
+	if err != nil {
 		return nil, false
 	}
 

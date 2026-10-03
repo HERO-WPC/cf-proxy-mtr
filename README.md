@@ -32,7 +32,7 @@
 Phase 0  ✅ 项目初始化（Go module / CLI / version / help / README / 基础测试）
 Phase 1  ✅ all.json 获取与解析（source 包 + fetch 命令 + 缓存）
 Phase 2  ✅ Target 数据模型（model 包：不变量、归一化、去重、隐私边界）
-Phase 3  ⏳ TCP Probe
+Phase 3  ✅ TCP Probe（probe 包：错误分类、worker pool、probe 命令）
 Phase 4  ⏳ SQLite
 Phase 5  ⏳ 全量扫描 + Resume
 Phase 6  ⏳ 本机地区 / 运营商信息
@@ -51,10 +51,11 @@ Phase 13 ⏳ 跨平台打包与发布
 cf-route-tester --help
 cf-route-tester version
 cf-route-tester fetch          # 下载 / 缓存 / 解析 all.json，输出目标数量
+cf-route-tester probe          # 对全部 IP:Port 做 TCP 连通性与延迟测量
 ```
 
 尚未实现（执行时明确报 `not implemented yet`，退出码 2）：
-`detect`、`probe`、`scan`、`trace`、`export`、`upload`、`aggregate`、`query`、`db`。
+`detect`、`scan`、`trace`、`export`、`upload`、`aggregate`、`query`、`db`。
 
 ---
 
@@ -169,6 +170,77 @@ cache:        data/all.json (written)
   但会在输出中用 `origin: cache (stale)` 与 `warning: using STALE cache` 明确提示。
 - **代理**：`--proxy` 显式指定时优先；未指定则沿用环境变量 `HTTP_PROXY` / `HTTPS_PROXY`。
 
+### probe：TCP 连通性与延迟测量
+
+```bash
+cf-route-tester probe                                  # 全部目标，默认 100 并发 / 3s 超时
+cf-route-tester probe --workers 100 --timeout 3s
+cf-route-tester probe --limit 300                      # 只测前 300 个（快速抽样）
+cf-route-tester probe --json --quiet > measurements.jsonl
+cf-route-tester probe --verbose                        # 逐条输出到 stderr
+```
+
+输出示例（真实运行结果，2000 个目标）：
+
+```text
+probed:      2000 / 2000 targets
+success:     1615 (80.8%)
+failed:      385 (19.2%)
+elapsed:     19.476s (102.7 targets/s)
+
+latency (ms, 1615 samples):
+  min 134.5   p50 234.3   p90 1195.0   p95 1265.8   max 2367.1   avg 368.1
+
+failures by type:
+  timeout:               384
+  connection_refused:    1
+```
+
+行为要点：
+
+- **测的是目标自身的端口**：`1.2.3.4:2053` 一定测 TCP 2053，绝不固定成 443。
+  这条由 `TestProbeUsesActualTargetPort` 与 `TestParseTargetDoesNotOverrideExplicitPort` 锁住。
+- **按地址族拨号**：IPv4 目标用 `tcp4`、IPv6 用 `tcp6`，
+  避免系统把 IPv6 目标解析成 IPv4 而"测了另一个地址"。
+- **严格限并发**：Job Queue → 固定 N 个 worker → 结果 channel。
+  同时运行的 worker 数永不超过 `--workers`（上限 2000），
+  绝不每个目标起一个 goroutine。结果边产生边消费，不把 1.5 万条结果堆在内存里。
+- **失败不影响整体**：任何错误都被分类后作为**结果**返回，
+  单条失败既不终止扫描也不丢数据。
+- **进度走 stderr，结果与汇总走 stdout**，便于管道使用。
+- **Ctrl+C**：中断后立即停止，汇总里明确标注 `warning: probing was interrupted`；
+  被中断的探测记为 `canceled`，**不计入丢包**。
+
+`--json` 每条结果一行（自带 `schema_version` 与 `client_version`）：
+
+```json
+{"schema_version":1,"client_version":"0.1.0","target_id":"45.63.67.144:443","ip":"45.63.67.144","port":443,"success":true,"latency_ms":252.3158,"timestamp":"2026-10-03T11:35:21.8611931Z"}
+```
+
+失败分类（数据库与分析的价值就在于"分得清是哪一种失败"）：
+
+| 分类 | 含义 | 计入丢包 |
+| --- | --- | --- |
+| `timeout` | 超时（含等待超时） | ✅ |
+| `connection_refused` | 对端拒绝：IP 可达但该端口没有服务 | ✅ |
+| `network_unreachable` | 网络/主机不可达 | ✅ |
+| `no_route` | 本机没有可用路由 | ✅ |
+| `connection_reset` | 连接被重置 | ✅ |
+| `permission_denied` | 本机策略拒绝（防火墙/安全软件） | ✅ |
+| `address_not_available` | 本机缺少匹配地址族的地址 | ✅ |
+| `other` | 无法归类的连接错误 | ✅ |
+| `canceled` | 本次运行被中断 | ❌ 本机主动放弃，不是线路证据 |
+| `invalid_target` | 目标数据非法 | ❌ 数据问题，不是线路问题 |
+
+`connection_refused` 与 `timeout` 必须分开：前者意味着"IP 通、端口没服务"，
+后者意味着"根本连不上"，两者对线路质量的结论完全不同。
+
+错误码 → 分类的映射是**分平台**的（`internal/probe/errno_windows.go` /
+`errno_unix.go`），因为 Windows 用 WSA 错误码（`WSAECONNREFUSED` = 10061）、
+Unix 用 POSIX errno（`ECONNREFUSED` = 111），而且 Go 在 Windows 上
+还会把部分 WSA 错误归一化成伪 errno。两套数字都注册在案，
+因此同一个网络现象在 Windows 与 Linux 上得到同一个分类。
+
 ---
 
 ## 数据源结构（实测）
@@ -233,7 +305,6 @@ cache:        data/all.json (written)
 | 命令 | 作用 |
 | --- | --- |
 | `detect` | 检测测量者地区与运营商信息 |
-| `probe` | 对全部 `IP:Port` 执行 TCP 连通性与延迟测量 |
 | `scan` | 全量扫描：TCP Probe + NextTrace 两级测量（支持 `--resume`） |
 | `trace` | 使用 NextTrace 对指定 `IP:Port` 做线路跟踪 |
 | `export` | 导出 measurements / traces 为 JSONL 及压缩批次 |
@@ -397,7 +468,12 @@ cf-route-tester/
 │   │   ├── parser.go             JSON / 文本容错解析、校验、去重、source metadata
 │   │   ├── cache.go              缓存读写（原子写入）、CacheInfo、格式版本校验
 │   │   └── loader.go             完整策略：缓存命中 / 刷新 / 降级 / 格式识别
-│   ├── probe/                    TCP Probe 与 worker pool（Phase 3）
+│   ├── probe/                    TCP Probe 与 worker pool（已实现）
+│   │   ├── probe.go              Prober / ProbeResult / 统计 / 错误分类
+│   │   ├── errno.go              错误码注册表（平台无关部分）
+│   │   ├── errno_windows.go      Windows WSA 错误码表
+│   │   ├── errno_unix.go         Unix POSIX errno 表
+│   │   └── worker.go             有界 worker pool + Runner（NextTrace 可复用）
 │   ├── trace/                    Trace 引擎接口、NextTrace 调用与解析（Phase 7）
 │   ├── detect/                   本机地区 / 运营商检测（Phase 6）
 │   ├── scheduler/                任务编排与断点续测（Phase 5）
