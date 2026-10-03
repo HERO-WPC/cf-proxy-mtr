@@ -14,9 +14,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cf-route-tester/cf-route-tester/internal/identity"
 	"github.com/cf-route-tester/cf-route-tester/internal/model"
 	"github.com/cf-route-tester/cf-route-tester/internal/probe"
 	"github.com/cf-route-tester/cf-route-tester/internal/source"
+	"github.com/cf-route-tester/cf-route-tester/internal/storage"
 	"github.com/cf-route-tester/cf-route-tester/internal/version"
 )
 
@@ -53,6 +55,25 @@ type probeParams struct {
 	workers int
 	timeout durationFlag
 	limit   int
+
+	// db 非空时把测量结果写入本地 SQLite。
+	//
+	// 空字符串表示只测量不入库（用于快速抽样观察网络状况）。
+	db string
+
+	// identityPath 是本地匿名标识文件路径（collector_id 的来源）。
+	identityPath string
+
+	// 采集者画像覆盖项：留空表示沿用本地标识文件中的值。
+	//
+	// 手动填写优先于自动检测，因为公网 ASN 不一定等于
+	// 用户实际感知的接入线路。
+	collectorCountry   string
+	collectorProvince  string
+	collectorCity      string
+	collectorISP       string
+	collectorASN       string
+	collectorIPVersion string
 
 	jsonOut bool
 	verbose bool
@@ -93,7 +114,41 @@ func probeFlagSet(p *probeParams) *flag.FlagSet {
 	fs.BoolVar(&p.jsonOut, "json", false, "把每条结果作为一行 JSON 写到 stdout（便于管道处理）")
 	fs.BoolVar(&p.verbose, "verbose", false, "显示每个目标的探测结果")
 	fs.BoolVar(&p.quiet, "quiet", false, "只输出汇总统计，不输出进度")
+
+	// 落库相关参数。
+	fs.StringVar(&p.db, "db", "", "把结果写入 SQLite（路径，留空表示不落库）")
+	fs.StringVar(&p.identityPath, "identity", identity.DefaultPath, "本地匿名标识文件路径（collector_id）")
+
+	// 采集者画像：留空表示沿用本地文件中的值。
+	fs.StringVar(&p.collectorCountry, "country", "", "采集者国家代码（覆盖本地标识）")
+	fs.StringVar(&p.collectorProvince, "province", "", "采集者省份（覆盖本地标识）")
+	fs.StringVar(&p.collectorCity, "city", "", "采集者城市（覆盖本地标识）")
+	fs.StringVar(&p.collectorISP, "isp", "", "采集者运营商（覆盖本地标识）")
+	fs.StringVar(&p.collectorASN, "asn", "", "采集者 ASN（覆盖本地标识）")
+	fs.StringVar(&p.collectorIPVersion, "ip-version", "", "采集者 IP 版本（覆盖本地标识）")
+
 	return fs
+}
+
+// collectorOverrides 把命令行给出的画像整理成覆盖表。
+//
+// 只包含**非空**项：空值表示"沿用本地文件里的值"，
+// 而不是"把它清空"。
+func (p probeParams) collectorOverrides() map[string]string {
+	out := make(map[string]string, 6)
+	for key, value := range map[string]string{
+		"country":    p.collectorCountry,
+		"province":   p.collectorProvince,
+		"city":       p.collectorCity,
+		"isp":        p.collectorISP,
+		"asn":        p.collectorASN,
+		"ip-version": p.collectorIPVersion,
+	} {
+		if strings.TrimSpace(value) != "" {
+			out[key] = strings.TrimSpace(value)
+		}
+	}
+	return out
 }
 
 // runProbe 实现 `cf-route-tester probe`。
@@ -135,8 +190,47 @@ func runProbe(env *Env, args []string) error {
 	// 并发上限由 probe.New 统一截断，这里不重复实现。
 	runner := probe.NewRunner(probe.RunnerConfig{Probe: cfg})
 
+	// 落库准备：目标与采集者必须先入库，测量才能引用它们
+	// （数据库用外键保证"不存在孤儿测量"）。
+	var (
+		store        *storage.Store
+		collectorPK  int64
+		targetsSaved int
+	)
+	if strings.TrimSpace(p.db) != "" {
+		store, err = openProbeStore(ctx, p)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if cerr := store.Close(); cerr != nil {
+				fmt.Fprintln(env.Stderr, "Error: closing database: "+cerr.Error())
+			}
+		}()
+
+		local, err := resolveIdentity(p.identityPath, p.collectorOverrides())
+		if err != nil {
+			return err
+		}
+
+		// 目标元数据是维度表，可以重复写入（UPSERT）。
+		targetsSaved, err = store.UpsertTargets(ctx, targets, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+
+		collectorPK, err = store.UpsertCollector(ctx, local.CollectorID, local.Profile.ToModel(), version.Version)
+		if err != nil {
+			return err
+		}
+	}
+
 	if !p.quiet {
 		printProbeHeader(env.Stderr, res, targets, runner.Prober().Config())
+		if store != nil {
+			fmt.Fprintf(env.Stderr, "database:  %s (collector %s, %d new target(s))\n\n",
+				store.Path(), shortCollectorID(p.identityPath), targetsSaved)
+		}
 	}
 
 	started := time.Now()
@@ -149,13 +243,42 @@ func runProbe(env *Env, args []string) error {
 		failed     int
 		completed  int
 
+		// 落库批次：攒够 batchSize 条就写一次。
+		//
+		// 为什么不每条一个事务：SQLite 每次提交都要 fsync，
+		// 逐条写入会把扫描速度拖到几百条/秒。批量事务能把
+		// 同样的写入量提升一个数量级，而"整批一个事务"
+		// 也保证了不会留下半批数据。
+		batch         []storage.Measurement
+		measureSaved  int
+		measureDupes  int
+		measureErrors int
+
 		jsonWriter *bufio.Writer
 	)
+	const measurementBatchSize = 500
 
 	if p.jsonOut {
 		jsonWriter = bufio.NewWriter(env.Stdout)
 	}
 	progress := newProgressPrinter(env.Stderr, len(targets), p.quiet)
+
+	// flushMeasurements 写入当前批次并清空缓冲。
+	flushMeasurements := func() {
+		if len(batch) == 0 {
+			return
+		}
+		saved, skipped, err := store.SaveMeasurements(ctx, batch)
+		measureSaved += saved
+		measureDupes += skipped
+		if err != nil {
+			// 写入失败不能让整个扫描崩掉：已经测到的结果仍在，
+			// 只是这一批没能落库。记录并继续，最后汇总里如实报告。
+			measureErrors++
+			fmt.Fprintln(env.Stderr, "Error: saving measurements: "+err.Error())
+		}
+		batch = batch[:0]
+	}
 
 	for result := range handle.Results() {
 		completed++
@@ -165,6 +288,13 @@ func runProbe(env *Env, args []string) error {
 		} else {
 			failed++
 			errorCount[result.ErrorType]++
+		}
+
+		if store != nil {
+			batch = append(batch, storage.NewMeasurement(collectorPK, "", result))
+			if len(batch) >= measurementBatchSize {
+				flushMeasurements()
+			}
 		}
 
 		if jsonWriter != nil {
@@ -190,6 +320,20 @@ func runProbe(env *Env, args []string) error {
 	}
 	progress.done()
 
+	// 排空最后一批测量。必须用**未被取消的** context：
+	// Ctrl+C 已经取消了探测 ctx，若沿用它写库会直接失败，
+	// 而那正是最需要把已测结果保存下来的时刻。
+	if store != nil {
+		saved, skipped, err := store.SaveMeasurements(context.Background(), batch)
+		measureSaved += saved
+		measureDupes += skipped
+		if err != nil {
+			measureErrors++
+			fmt.Fprintln(env.Stderr, "Error: saving final measurements: "+err.Error())
+		}
+		batch = nil
+	}
+
 	// Wait 必须在排空结果之后调用：它等待 pool goroutine 完全退出。
 	// pool 侧统计用于汇报 Dropped（被丢弃的结果数）；
 	// 其余汇总数字用消费者侧统计，因为它们如实反映
@@ -198,15 +342,19 @@ func runProbe(env *Env, args []string) error {
 	elapsed := time.Since(started)
 
 	summary := probeSummary{
-		Targets:     len(targets),
-		Completed:   completed,
-		Success:     success,
-		Failed:      failed,
-		ErrorCount:  errorCount,
-		Elapsed:     elapsed,
-		Interrupted: completed < len(targets),
-		Dropped:     poolStats.Dropped,
-		Latency:     summarizeLatencies(latencies),
+		Targets:       len(targets),
+		Completed:     completed,
+		Success:       success,
+		Failed:        failed,
+		ErrorCount:    errorCount,
+		Elapsed:       elapsed,
+		Interrupted:   completed < len(targets),
+		Dropped:       poolStats.Dropped,
+		Latency:       summarizeLatencies(latencies),
+		Stored:        measureSaved,
+		Duplicates:    measureDupes,
+		StoreFailures: measureErrors,
+		DBPath:        p.db,
 	}
 
 	if !p.jsonOut || !p.quiet {
@@ -226,6 +374,12 @@ type probeSummary struct {
 	Elapsed     time.Duration
 	Interrupted bool
 	Latency     latencySummary
+
+	// 落库统计（仅在 --db 非空时有意义）。
+	Stored        int
+	Duplicates    int
+	StoreFailures int
+	DBPath        string
 }
 
 // Rate 返回成功率（按已完成数计算）。
@@ -305,6 +459,17 @@ func printProbeSummary(w io.Writer, s probeSummary, res *source.Result, p probeP
 		// 丢结果意味着汇总里的样本数小于实际测到的数量，
 		// 必须明确告知，避免用户把"少了的样本"当成真实情况。
 		fmt.Fprintf(w, "warning: %d result(s) were dropped because the consumer could not keep up\n", s.Dropped)
+	}
+	if s.DBPath != "" {
+		fmt.Fprintf(w, "\nstored:      %d measurement(s) in %s\n", s.Stored, s.DBPath)
+		if s.Duplicates > 0 {
+			// 重复说明这批结果之前已经写过（例如断点续测重跑），
+			// 幂等跳过是正确行为，但必须让用户知道。
+			fmt.Fprintf(w, "duplicates:  %d row(s) already present, skipped\n", s.Duplicates)
+		}
+		if s.StoreFailures > 0 {
+			fmt.Fprintf(w, "warning: %d batch(es) failed to store; run 'db stats' to verify\n", s.StoreFailures)
+		}
 	}
 	if res.Stale {
 		fmt.Fprintf(w, "warning: target list came from a STALE cache\n")
@@ -523,6 +688,29 @@ func writeProbeJSONLine(w io.Writer, r probe.ProbeResult) error {
 
 // itoa 是本文件内的短整数格式化。
 func itoa(n int) string { return strconv.Itoa(n) }
+
+// openProbeStore 按 probe 的 --db 参数打开数据库。
+func openProbeStore(ctx context.Context, p probeParams) (*storage.Store, error) {
+	cfg := storage.DefaultConfig()
+	cfg.Path = p.db
+	return storage.Open(ctx, cfg)
+}
+
+// shortCollectorID 读取本地标识里的 collector_id 摘要，用于日志展示。
+//
+// 只显示前 10 位：完整 ID 会在日志里反复出现，缩短后既够用于
+// 人工核对"这是同一个节点"，又不至于让它散落在各处。
+func shortCollectorID(identityPath string) string {
+	local, err := identity.Load(identityPath)
+	if err != nil {
+		return "(unknown)"
+	}
+	id := local.CollectorID
+	if len(id) > 10 {
+		return id[:10] + "..."
+	}
+	return id
+}
 
 // describeErrorTypes 返回错误分类的中文说明（用于 --help）。
 //

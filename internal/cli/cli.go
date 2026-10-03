@@ -217,6 +217,7 @@ func newCommands() map[string]Command {
 		},
 		newFetchCommand(),
 		newProbeCommand(),
+		newDBCommand(),
 		{
 			Name:    "version",
 			Summary: "显示版本信息（--verbose 显示构建细节）",

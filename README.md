@@ -33,7 +33,7 @@ Phase 0  ✅ 项目初始化（Go module / CLI / version / help / README / 基�
 Phase 1  ✅ all.json 获取与解析（source 包 + fetch 命令 + 缓存）
 Phase 2  ✅ Target 数据模型（model 包：不变量、归一化、去重、隐私边界）
 Phase 3  ✅ TCP Probe（probe 包：错误分类、worker pool、probe 命令）
-Phase 4  ⏳ SQLite
+Phase 4  ✅ SQLite（storage 包：迁移、只追加时间序列、db 命令、probe --db）
 Phase 5  ⏳ 全量扫描 + Resume
 Phase 6  ⏳ 本机地区 / 运营商信息
 Phase 7  ⏳ NextTrace 集成
@@ -52,10 +52,14 @@ cf-route-tester --help
 cf-route-tester version
 cf-route-tester fetch          # 下载 / 缓存 / 解析 all.json，输出目标数量
 cf-route-tester probe          # 对全部 IP:Port 做 TCP 连通性与延迟测量
+cf-route-tester probe --db data/results.db   # 同上，并把结果写入本地 SQLite
+cf-route-tester db stats       # 查看本地数据库状态
+cf-route-tester db migrate     # 应用数据库迁移
+cf-route-tester db vacuum      # 整理数据库文件
 ```
 
 尚未实现（执行时明确报 `not implemented yet`，退出码 2）：
-`detect`、`scan`、`trace`、`export`、`upload`、`aggregate`、`query`、`db`。
+`detect`、`scan`、`trace`、`export`、`upload`、`aggregate`、`query`。
 
 ---
 
@@ -240,6 +244,99 @@ failures by type:
 Unix 用 POSIX errno（`ECONNREFUSED` = 111），而且 Go 在 Windows 上
 还会把部分 WSA 错误归一化成伪 errno。两套数字都注册在案，
 因此同一个网络现象在 Windows 与 Linux 上得到同一个分类。
+
+### db：本地 SQLite 数据库
+
+```bash
+cf-route-tester probe --db data/results.db                 # 测量并把结果落库
+cf-route-tester probe --db data/results.db --country cn --province Zhejiang \
+                     --city Hangzhou --isp "China Mobile" --asn 9808
+cf-route-tester db stats                                   # 行数、覆盖率、时间范围
+cf-route-tester db migrate                                 # 幂等，可安全重复执行
+cf-route-tester db vacuum                                  # 整理数据库文件
+```
+
+`db stats` 输出示例（真实运行结果，插入了 400 个目标的两次测量）：
+
+```text
+database:       dist/live-db/results.db
+size:           440.00 KiB
+schema_version: 1
+
+rows:
+  targets:         400
+  collectors:      1
+  scan_sessions:   0
+  measurements:    800
+  traces:          0
+
+measurement coverage:
+  targets with samples:    400
+  collectors with samples: 1
+  first:  2026-10-03T11:53:10Z
+  last:   2026-10-03T11:53:24Z
+  span:   14s
+```
+
+表结构（`internal/storage/migrations.go`，版本化迁移，绝不修改已发布的迁移）：
+
+| 表 | 语义 | 写入方式 |
+| --- | --- | --- |
+| `targets` | 测量目标（IP × Port）+ all.json 的 `source_*` / `colo_*` 元数据 | **UPSERT**（维度表：上游地理信息会更新，`first_seen` 保持不变） |
+| `collectors` | 匿名采集者（`collector_id` + 地区/运营商） | **UPSERT**（同一节点跨运行只保留一行） |
+| `scan_sessions` | 一次测量会话（`finished_at` 为空表示可续测） | UPSERT |
+| `measurements` | TCP 测量结果 | **只追加** |
+| `traces` | 线路跟踪结果 | **只追加** |
+
+关键设计决定：
+
+- **时间序列只追加**：`measurements` / `traces` 永远不 UPDATE 既有行。
+  "10:00 是 42ms、20:00 是 86ms"必须同时存在，否则"什么时候变差"
+  根本无法回答。实测：同一批 400 个目标跑两次 → 800 条测量，
+  目标表仍然是 400 行。
+- **重复导入是幂等的**：每行带一个 `dedup_key`
+  （`collector + session + target + timestamp` 的内容哈希，做长度前缀消除歧义），
+  上面有 UNIQUE 索引。同一个 batch 重复导入会变成空操作，
+  统计不会翻倍——需求第 69 条要求的正是这个。
+- **失败同样入库**：`error_type` 非空即失败，且失败是**线路信息**。
+  数据库层用 `CHECK (success = 1 OR error_type <> '')` 强制
+  "失败必须带分类"，不依赖调用方自觉。
+- **延迟用整数微秒存储**，读出时换算成毫秒：避免浮点累积误差。
+- **"没有坐标"写成 NULL 而不是 0**：0,0 是几内亚湾的合法坐标，
+  用 0 表示"未知"会把一批目标误判到同一个点上。
+- **外键约束打开**：测量必须引用已入库的目标与采集者
+  （避免产生无法分析的孤儿数据），且目标删除时测量级联删除。
+- **不保存隐私信息**：`collectors` 表刻意**没有**
+  `public_ip` / `local_ip` / `mac` / `hostname` / `device_id` / 精确经纬度。
+  这条约束有测试守卫（直接检查数据库实际创建出来的列名）。
+- **`collector_id` 随机生成**：`c-` + 32 位十六进制，来自 `crypto/rand`，
+  **不由** MAC / CPU / 磁盘 / 公网 IP / 主机名推导。本地保存在
+  `data/collector.json`；文件损坏时**拒绝静默重建**（那会让同一节点
+  在数据里变成两个节点），而是提示用户删除文件换新 ID。
+- **WAL 模式 + busy_timeout**：写入不阻塞读取，且多进程访问时
+  等待而不是立刻失败。
+- **迁移在事务里执行**，中途失败不会留下半套表结构；
+  重复执行是幂等的。
+
+### 关于 SQLite 依赖
+
+使用纯 Go 的 `modernc.org/sqlite`，**不引入 CGO**。这是硬性要求：
+项目要求 Windows 双击 exe 可用，并交叉编译
+`linux/darwin/windows × amd64/arm64`——`mattn/go-sqlite3` 需要 CGO，
+会同时破坏这两点。CI 里有一步专门在 `CGO_ENABLED=0` 下构建，
+一旦有人引入需要 CGO 的依赖就会立刻失败。
+
+代价与取舍：
+
+```text
+二进制体积  约 9.5 MiB（无驱动） -> 约 16 MiB（含驱动）
+            加 -ldflags "-s -w" 后约 11 MiB
+Go 工具链   modernc.org/sqlite 自身要求 go 1.26，因此 go.mod 的
+            go 指令是 1.26.0（从源码构建需要 Go 1.26+，
+            但发布出去的二进制对使用者没有这个要求）
+```
+
+为了"单文件、无外部依赖、可交叉编译"付这个体积是值得的。
 
 ---
 
@@ -476,8 +573,14 @@ cf-route-tester/
 │   │   └── worker.go             有界 worker pool + Runner（NextTrace 可复用）
 │   ├── trace/                    Trace 引擎接口、NextTrace 调用与解析（Phase 7）
 │   ├── detect/                   本机地区 / 运营商检测（Phase 6）
+│   ├── identity/                 本地匿名标识 collector_id（已实现）
 │   ├── scheduler/                任务编排与断点续测（Phase 5）
-│   ├── storage/                  SQLite 与 migrations（Phase 4）
+│   ├── storage/                  本地 SQLite（已实现）
+│   │   ├── sqlite.go             打开 / PRAGMA / 迁移 / 统计
+│   │   ├── migrations.go         版本化迁移（表结构的唯一来源）
+│   │   ├── model.go              Measurement / Trace / 目标与采集者 UPSERT
+│   │   ├── writer.go             只追加写入（整批一个事务 + 幂等去重）
+│   │   └── query.go              按目标 / 采集者 / 会话 / 时间窗口查询
 │   ├── export/                   JSONL / gzip / zstd 导出（Phase 9）
 │   ├── privacy/                  隐私过滤（本地地址等）（Phase 10）
 │   ├── upload/                   GitHub 上传（Phase 10）

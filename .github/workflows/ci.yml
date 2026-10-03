@@ -20,7 +20,9 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.21.x"
+          # 必须 >= go.mod 中声明的版本。SQLite 驱动
+          # modernc.org/sqlite 自身要求 go 1.26，因此这里不能更低。
+          go-version: "1.26.x"
 
       - name: gofmt check
         run: |
@@ -49,3 +51,21 @@ jobs:
             echo "building $os/$arch"
             GOOS="$os" GOARCH="$arch" go build ./...
           done
+
+      - name: Verify CGO is not required (pure-Go SQLite)
+        run: |
+          # 需求要求 Windows 双击 exe 可用、并支持交叉编译，
+          # 因此整个构建链必须能在 CGO_ENABLED=0 下完成。
+          # 一旦有人引入需要 CGO 的依赖，这一步会立刻失败。
+          CGO_ENABLED=0 go build ./...
+          CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build ./...
+
+      - name: Smoke test the built binary
+        run: |
+          # 端到端冒烟：建库、迁移、查看状态。
+          # 这一步验证的是"二进制真的能打开 SQLite 并读写"，
+          # 而单元测试只覆盖包级行为。
+          go build -o /tmp/cf-route-tester ./cmd/cf-route-tester
+          /tmp/cf-route-tester version
+          /tmp/cf-route-tester db migrate --db /tmp/ci-results.db
+          /tmp/cf-route-tester db stats --db /tmp/ci-results.db

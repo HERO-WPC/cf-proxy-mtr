@@ -11,7 +11,7 @@ import (
 // helpOrder 固定顶层帮助中“当前可用命令”的显示顺序。
 //
 // 显式列出顺序，而不是遍历 map，保证帮助输出稳定、可测试。
-var helpOrder = []string{"help", "fetch", "probe", "version"}
+var helpOrder = []string{"help", "fetch", "probe", "db", "version"}
 
 // roadmapOrder 固定“规划中命令”的显示顺序，方便用户理解路线图。
 //
@@ -24,7 +24,6 @@ var roadmapOrder = []string{
 	"upload",    // 上传匿名 batch 到 GitHub
 	"aggregate", // 聚合 raw 数据
 	"query",     // 查询 IP:Port 线路画像
-	"db",        // 本地数据库维护
 }
 
 // roadmapSummary 是规划中命令的一行说明。
@@ -36,7 +35,6 @@ var roadmapSummary = map[string]string{
 	"upload":    "将匿名压缩批次上传到 GitHub 数据仓库",
 	"aggregate": "聚合 data/raw 生成按地区 / 运营商分组的统计结果",
 	"query":     "查询某个 IP:Port 在不同地区 / 运营商下的线路画像",
-	"db":        "本地 SQLite 数据库维护（统计等）",
 }
 
 // printHelp 输出顶层帮助。
