@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -90,46 +91,62 @@ func mustTarget(t *testing.T, ip string, port int) model.Target {
 // 错误分类：按错误码
 // ---------------------------------------------------------------------------
 
-// TestClassifyErrno 覆盖两个平台的错误码取值。
+// TestClassifyErrno 覆盖**当前平台会真实出现**的错误码。
 //
-// 这是本包最重要的一张测试表：分类逻辑一旦在某平台上失效
-// （典型症状是"Windows 上全部落到 other"），众测数据库里的
-// 失败原因就没有任何聚合价值了。
+// 分类表是分平台的（errno_windows.go / errno_unix.go），因此测试
+// 也必须分平台，否则会在 Linux 上要求注册 Windows 的 WSA 码——
+// 而 Linux 内核永远不会返回 10061，那种断言只能是错的。
 //
-// 表里同时包含 Windows 的 WSA 码与 Unix 的 POSIX errno，
-// 因为在**当前平台**上只有一套会被真正触发，
-// 但两套都必须被注册到 platformErrnos 里（否则跨平台会退化）。
+// 两张表的实际约定：
+//
+//   - POSIX errno：**两套表都注册**。Windows 侧刻意也注册它们，
+//     因为 Go 会把一部分 WSA 错误归一化成伪 errno（见
+//     errno_windows.go 的说明），同一语义可能出现两种数字。
+//   - WSA 码：**只在 Windows 表里注册**。它们是 Windows 网络栈特有的
+//     取值，在 Unix 表里注册只会得到一条永远匹配不到的死条目。
+//
+// 因此在非 Windows 上跳过 Windows 专属用例不是"少测了"：
+// 那些编号在当前平台上本来就**不该**被注册，跳过它们正是断言了
+// 这一点。跨平台一致性靠的是"两张表用同样的语义与优先级"，
+// 而不是"每张表都收录所有平台的编号"。
 func TestClassifyErrno(t *testing.T) {
 	cases := []struct {
 		name string
 		code syscall.Errno
 		want ErrorType
-	}{
-		// ---- Windows WSA 错误码 ----
-		{"windows refused", 10061, ErrorTypeConnectionRefused},
-		{"windows reset", 10054, ErrorTypeConnectionReset},
-		{"windows aborted", 10053, ErrorTypeConnectionReset},
-		{"windows net unreachable", 10051, ErrorTypeNetworkUnreachable},
-		{"windows host unreachable", 10065, ErrorTypeNetworkUnreachable},
-		{"windows net down", 10050, ErrorTypeNetworkUnreachable},
-		{"windows timed out", 10060, ErrorTypeTimeout},
-		{"windows access denied", 10013, ErrorTypePermissionDenied},
-		{"windows addr not avail", 10049, ErrorTypeAddressNotAvailable},
-		{"windows af not supported", 10047, ErrorTypeAddressNotAvailable},
 
-		// ---- Unix errno（在 Windows 上这些常量存在但不会被内核返回；
-		//      在 Unix 上它们才是真实取值） ----
-		{"unix refused", syscall.ECONNREFUSED, ErrorTypeConnectionRefused},
-		{"unix reset", syscall.ECONNRESET, ErrorTypeConnectionReset},
-		{"unix net unreachable", syscall.ENETUNREACH, ErrorTypeNetworkUnreachable},
-		{"unix host unreachable", syscall.EHOSTUNREACH, ErrorTypeNetworkUnreachable},
-		{"unix timed out", syscall.ETIMEDOUT, ErrorTypeTimeout},
-		{"unix perm", syscall.EPERM, ErrorTypePermissionDenied},
-		{"unix addr not avail", syscall.EADDRNOTAVAIL, ErrorTypeAddressNotAvailable},
+		// windowsOnly 为真表示该编号只可能来自 Windows 网络栈。
+		windowsOnly bool
+	}{
+		// ---- Windows WSA 错误码（仅 Windows 表注册） ----
+		{"windows refused", 10061, ErrorTypeConnectionRefused, true},
+		{"windows reset", 10054, ErrorTypeConnectionReset, true},
+		{"windows aborted", 10053, ErrorTypeConnectionReset, true},
+		{"windows net unreachable", 10051, ErrorTypeNetworkUnreachable, true},
+		{"windows host unreachable", 10065, ErrorTypeNetworkUnreachable, true},
+		{"windows net down", 10050, ErrorTypeNetworkUnreachable, true},
+		{"windows timed out", 10060, ErrorTypeTimeout, true},
+		{"windows access denied", 10013, ErrorTypePermissionDenied, true},
+		{"windows addr not avail", 10049, ErrorTypeAddressNotAvailable, true},
+		{"windows af not supported", 10047, ErrorTypeAddressNotAvailable, true},
+
+		// ---- POSIX errno（两套表都注册） ----
+		{"unix refused", syscall.ECONNREFUSED, ErrorTypeConnectionRefused, false},
+		{"unix reset", syscall.ECONNRESET, ErrorTypeConnectionReset, false},
+		{"unix net unreachable", syscall.ENETUNREACH, ErrorTypeNetworkUnreachable, false},
+		{"unix host unreachable", syscall.EHOSTUNREACH, ErrorTypeNetworkUnreachable, false},
+		{"unix timed out", syscall.ETIMEDOUT, ErrorTypeTimeout, false},
+		{"unix perm", syscall.EPERM, ErrorTypePermissionDenied, false},
+		{"unix addr not avail", syscall.EADDRNOTAVAIL, ErrorTypeAddressNotAvailable, false},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.windowsOnly && runtime.GOOS != "windows" {
+				t.Skipf("errno %d is a Windows-only network code; the Unix table "+
+					"deliberately does not register it", int(tc.code))
+			}
+
 			// 先单独验证注册表本身（不依赖分类路径）。
 			got, ok := classifyErrno(tc.code)
 			if !ok {
