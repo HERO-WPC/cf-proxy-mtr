@@ -53,6 +53,7 @@ type scanParams struct {
 	traceNoASNPrefix      bool
 	traceASNPrefixDir     string
 	traceRefreshASNPrefix bool
+	traceASNBulkURL       string
 
 	// 采集者画像覆盖项。
 	collectorCountry   string
@@ -115,6 +116,8 @@ func scanFlagSet(p *scanParams) *flag.FlagSet {
 		"不用本地 ASN 前缀识别线路（默认开启；它是无限、不限流、无需账号的线路识别方式）")
 	fs.StringVar(&p.traceASNPrefixDir, "trace-asn-prefix-dir", asnprefix.DefaultDir,
 		"ASN 前缀缓存目录")
+	fs.StringVar(&p.traceASNBulkURL, "trace-asn-bulk-url", "",
+		"ASN 前缀全量表的地址（留空=用内置默认；可指向镜像或本地文件）")
 	fs.BoolVar(&p.traceRefreshASNPrefix, "trace-refresh-asn-prefix", false,
 		"忽略缓存，重新抓取 ASN 前缀（默认 7 天过期）")
 	fs.StringVar(&p.tracePowProvider, "trace-pow-provider", "",
@@ -286,8 +289,9 @@ func runScan(env *Env, args []string) error {
 		},
 		NoASNPrefix: p.traceNoASNPrefix,
 		ASNPrefixOptions: asnprefix.Options{
-			Dir: p.traceASNPrefixDir,
-			TTL: asnPrefixTTL(p.traceRefreshASNPrefix),
+			Dir:     p.traceASNPrefixDir,
+			BulkURL: p.traceASNBulkURL,
+			TTL:     asnPrefixTTL(p.traceRefreshASNPrefix),
 		},
 	}
 

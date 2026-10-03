@@ -475,9 +475,15 @@ func TestLoadFallsBackToCacheWhenBulkFails(t *testing.T) {
 	}
 }
 
-// TestLoadSurvivesTotalFailure 验证全盘失败时不 panic、不阻塞。
+// TestLoadSurvivesTotalFailure 验证下载全盘失败时**不 panic、不阻塞**，
+// 而且仍然可用（靠内置快照）。
 //
-// 线路名是锦上添花：拿不到不该让整轮测量失败。
+// 这条测试的契约在加入内置快照之后变了：以前"全盘失败"等于
+// "没有任何数据"，现在等于"退回内置快照"。**后者才是想要的
+// 行为**——下载失败不该让线路名整个消失。
+//
+// "确实一点数据都没有"的场景由 TestSnapshotDoesNotPretendToHaveUnknownASNs
+// 覆盖（快照里没有的 ASN 不该被假装加载成功）。
 func TestLoadSurvivesTotalFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -495,14 +501,21 @@ func TestLoadSurvivesTotalFailure(t *testing.T) {
 		},
 	})
 
-	if resolver.Ready() {
-		t.Error("resolver claims to be ready with no data")
-	}
-	if got := resolver.Match("1.1.1.1"); got != nil {
-		t.Errorf("Match = %v, want nil", got)
-	}
+	// 不能因为下载失败就崩掉或卡住——回到这里就说明没卡住。
 	if !containsAny(logs, "不可用") {
-		t.Errorf("logs do not report the failure: %v", logs)
+		t.Errorf("logs do not report the download failure: %v", logs)
+	}
+
+	// 而且必须仍然可用：内置快照接过来了。
+	if !resolver.Ready() {
+		t.Fatalf("下载失败后既没有缓存也没有用上内置快照；日志：%v", logs)
+	}
+	if !containsAny(logs, "内置快照") {
+		t.Errorf("logs do not mention the snapshot fallback: %v", logs)
+	}
+	if got := resolver.Match("1.1.1.1"); got == nil {
+		// 1.1.1.1 本身不属于这些线路很正常；这里只确认调用不 panic。
+		_ = got
 	}
 }
 

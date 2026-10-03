@@ -142,11 +142,36 @@ func Load(ctx context.Context, opts Options) *Resolver {
 	if err != nil {
 		opts.Logf("全量映射表不可用：%v", err)
 
-		// 退回已有缓存（含过期）。半份前缀仍然能认出部分线路，
+		// 退回已有缓存（含过期）。过期的前缀仍然能认出部分线路，
 		// 比完全认不出来强。
 		resolver.loadAllFromAnyCache()
-		opts.Logf("退回本地缓存：就绪 %d/%d 个 ASN（线路名可能少认一些）",
-			len(resolver.byASN), len(asns))
+		if len(resolver.byASN) > 0 {
+			opts.Logf("退回本地缓存：就绪 %d/%d 个 ASN（线路名可能少认一些）",
+				len(resolver.byASN), len(asns))
+			return resolver
+		}
+
+		// 连缓存都没有：用**内置快照**兜底。
+		//
+		// 这是"离线也能认出线路"的关键一步：下载失败不再等于
+		// 线路名全空。快照会略旧，因此把它有多旧说出来，
+		// 免得有人把过期数据当成现状。
+		loaded, generatedAt, snapErr := resolver.loadFromSnapshot()
+		if snapErr != nil {
+			opts.Logf("内置快照也不可用：%v", snapErr)
+			return resolver
+		}
+		if loaded == 0 {
+			opts.Logf("内置快照里没有可用的线路段（可能需要重新生成快照）")
+			return resolver
+		}
+
+		age := ""
+		if strings.TrimSpace(generatedAt) != "" {
+			age = "（生成于 " + generatedAt + "）"
+		}
+		opts.Logf("退回内置快照：就绪 %d/%d 个 ASN%s，线路段可能略旧",
+			loaded, len(asns), age)
 		return resolver
 	}
 
