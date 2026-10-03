@@ -438,11 +438,18 @@ func (p *Prober) Probe(ctx context.Context, target model.Target) ProbeResult {
 	conn, err := p.dialer(probeCtx, network, address)
 	latency := time.Since(start)
 
-	result.LatencyMS = milliseconds(latency)
 	if err != nil {
+		// 失败时**不**记录延迟。
+		//
+		// 这里的 latency 是"等了多久才放弃"，不是网络延迟：
+		// 超时 1 秒的目标会得到 latency=1000ms，看起来像是
+		// "延迟 1 秒"，而实际上它根本没连上。把它写进结果文件
+		// 会污染所有延迟统计（平均值、分位数全被拉高）。
 		result.ErrorType, result.ErrorMessage = classify(err, ctx)
 		return result
 	}
+
+	result.LatencyMS = milliseconds(latency)
 
 	// 连接成功：立刻关闭，不留任何连接。
 	// 关闭失败无补救手段，也不影响本次测量结论，因此显式忽略。

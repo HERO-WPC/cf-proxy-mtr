@@ -1,389 +1,204 @@
 package cli
 
 import (
+	"encoding/csv"
+	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/cf-route-tester/cf-route-tester/internal/model"
-	"github.com/cf-route-tester/cf-route-tester/internal/storage"
 )
 
-// scanArgs 构造一组把 scan 完全限制在本地的参数。
+// 本文件覆盖 `scan` 命令的**命令行表面**。
 //
-// 显式禁用备用数据源：万一缓存没命中，测试应当立刻失败，
+// 扫描结果只写 CSV：没有数据库、没有会话、没有续测。
+// 因此这里不再有"续测""会话 ID""落库"之类的测试——
+// 那些行为已经不存在，留着测它们只会让测试与实现脱节。
+
+// scanCSVArgs 构造一组把命令完全限制在本地的参数。
+//
+// 显式禁用备用数据源：万一缓存没命中，测试会立刻失败，
 // 而不是去访问 zip.cm.edu.kg。
-func scanArgs(cachePath, dbPath, identityPath string, extra ...string) []string {
+func scanCSVArgs(cachePath, outPath, identityPath string, extra ...string) []string {
 	args := []string{
 		"scan",
 		"--url", sourceDefaultURL(),
 		"--fallback-url", "",
 		"--cache", cachePath,
 		"--source-retries", "0",
-		"--db", dbPath,
+		"--out", outPath,
 		"--identity", identityPath,
 	}
 	return append(args, extra...)
 }
 
-func TestScanHelpListsSessionFlags(t *testing.T) {
+// writeScanCache 把一段目标列表写进临时缓存并返回路径。
+func writeScanCache(t *testing.T, body string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "all.json")
+	if err := writeCacheFromJSON(t, path, body); err != nil {
+		t.Fatalf("writeCacheFromJSON: %v", err)
+	}
+	return path
+}
+
+// readResultCSV 读结果文件。
+func readResultCSV(t *testing.T, path string) [][]string {
+	t.Helper()
+
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer func() { _ = file.Close() }()
+
+	records, err := csv.NewReader(file).ReadAll()
+	if err != nil {
+		t.Fatalf("parse csv: %v", err)
+	}
+	return records
+}
+
+// TestScanHelpListsCSVFlags 验证帮助里说明了结果文件参数。
+func TestScanHelpListsCSVFlags(t *testing.T) {
 	code, stdout, stderr := runCLI("scan", "--help")
 	if code != ExitCodeOK {
 		t.Fatalf("exit code = %d (stderr=%q)", code, stderr)
 	}
 
 	for _, want := range []string{
-		"Flags:",
-		"-db",
-		"-identity",
-		"-resume",
-		"-new",
-		"-session",
-		"-limit",
-		"-workers",
-		"-trace",
-		"Sessions:",
+		"-out", "-append", "-limit", "-workers", "-timeout",
+		"-trace", "-trace-mode", "-trace-binary", "-identity",
 	} {
 		if !strings.Contains(stdout, want) {
-			t.Errorf("scan help missing %q\ngot:\n%s", want, stdout)
+			t.Errorf("scan help missing %q", want)
+		}
+	}
+
+	// 会话与数据库的参数不该再出现：它们已经不存在了。
+	// 帮助里留着它们会让用户以为还能用。
+	for _, gone := range []string{"-resume", "-session", "-new", "-db"} {
+		if strings.Contains(stdout, gone) {
+			t.Errorf("scan help still mentions %q, but that flag no longer exists", gone)
 		}
 	}
 }
 
-func TestScanRejectsConflictingSessionFlags(t *testing.T) {
-	code, _, stderr := runCLI("scan", "--resume", "--new")
-	if code != ExitCodeUsage {
-		t.Fatalf("exit code = %d, want %d", code, ExitCodeUsage)
-	}
-	if !strings.Contains(stderr, "mutually exclusive") {
-		t.Errorf("stderr = %q, want a conflict message", stderr)
-	}
-}
+// TestScanWritesResultsToCSV 验证一次扫描真的把结果写进 CSV。
+func TestScanWritesResultsToCSV(t *testing.T) {
+	body, listeners := probeFixture(t, []int{0})
+	defer closeAll(listeners)
 
-func TestScanRejectsEmptyDatabasePath(t *testing.T) {
-	code, _, stderr := runCLI("scan", "--db", "")
-	if code != ExitCodeUsage {
-		t.Fatalf("exit code = %d, want %d", code, ExitCodeUsage)
-	}
-	if !strings.Contains(stderr, "--db") {
-		t.Errorf("stderr = %q, want a message about --db", stderr)
-	}
-}
-
-// TestScanStoresMeasurementsAndSession 是 Phase 5 的主干端到端测试。
-func TestScanStoresMeasurementsAndSession(t *testing.T) {
-	body, listeners := probeFixture(t, []int{0, 0, 0})
-	defer func() {
-		for _, l := range listeners {
-			_ = l.Close()
-		}
-	}()
-	cachePath := writeProbeCacheFrom(t, body)
-
+	cache := writeScanCache(t, body)
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "results.db")
-	identityPath := filepath.Join(dir, "collector.json")
+	out := filepath.Join(dir, "results.csv")
 
-	code, stdout, stderr := runCLI(scanArgs(cachePath, dbPath, identityPath,
-		"--workers", "3",
-		"--timeout", "2s",
-		"--country", "cn",
-		"--province", "Zhejiang",
-		"--city", "Hangzhou",
-		"--isp", "China Mobile",
-		"--asn", "9808",
-		"--quiet")...)
+	code, stdout, stderr := runCLI(scanCSVArgs(cache, out,
+		filepath.Join(dir, "collector.json"), "--timeout", "2s")...)
 	if code != ExitCodeOK {
 		t.Fatalf("exit code = %d (stderr=%q)", code, stderr)
 	}
 
-	// 汇总格式是需求第 19 条指定的样式。
-	for _, want := range []string{
-		"session:",
-		"targets:     3 total, 3 to measure",
-		"Completed: 3 / 3",
-		"Success:   3",
-		"Failed:    0",
-		"Rate:",
-		"stored:      3 measurement(s)",
-		"session:     finished",
-	} {
-		if !strings.Contains(stdout, want) {
-			t.Errorf("scan summary missing %q\ngot:\n%s", want, stdout)
-		}
+	// 汇总必须给出结果文件路径——否则用户不知道去哪儿找结果。
+	if !strings.Contains(stdout, out) {
+		t.Errorf("stdout does not mention the output file:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "rows:") {
+		t.Errorf("stdout does not report how many rows were written:\n%s", stdout)
 	}
 
-	// 数据库里必须有一个已结束的会话、三条测量、正确的采集者画像。
-	store, err := storage.Open(t.Context(), storage.Config{Path: dbPath})
-	if err != nil {
-		t.Fatal(err)
+	records := readResultCSV(t, out)
+	if len(records) != 2 {
+		t.Fatalf("csv rows = %d, want 2 (header + 1)", len(records))
 	}
-	defer func() { _ = store.Close() }()
-
-	ctx := t.Context()
-	stats, err := store.CollectStats(ctx)
-	if err != nil {
-		t.Fatal(err)
+	if records[0][0] != "timestamp_utc" {
+		t.Errorf("first header column = %q, want timestamp_utc", records[0][0])
 	}
-	if stats.Tables["measurements"] != 3 {
-		t.Errorf("measurements = %d, want 3", stats.Tables["measurements"])
+	if !strings.Contains(records[1][1], "127.0.0.1:") {
+		t.Errorf("target column = %q, want a 127.0.0.1 target", records[1][1])
 	}
-	if stats.Tables["scan_sessions"] != 1 {
-		t.Errorf("scan_sessions = %d, want 1", stats.Tables["scan_sessions"])
-	}
-
-	sessionID := extractSessionID(t, stdout)
-	session, err := store.LoadSession(ctx, sessionID)
-	if err != nil {
-		t.Fatalf("LoadSession(%s): %v", sessionID, err)
-	}
-	if !session.Finished() {
-		t.Error("session is not finished after a complete scan")
-	}
-	if session.TargetCount != 3 || session.CompletedCount != 3 {
-		t.Errorf("session counts = %d/%d, want 3/3", session.CompletedCount, session.TargetCount)
-	}
-
-	// 每条测量都必须关联到这次会话（断点续测判据的基础）。
-	measurements, err := store.QueryMeasurements(ctx, storage.MeasurementQuery{SessionID: sessionID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(measurements) != 3 {
-		t.Fatalf("measurements for session = %d, want 3", len(measurements))
-	}
-
-	collectors, err := store.LoadCollectors(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(collectors) != 1 {
-		t.Fatalf("collectors = %d, want 1", len(collectors))
-	}
-	if collectors[0].Country != "CN" || collectors[0].ASN != "AS9808" {
-		t.Errorf("collector = %+v, want normalized CN/AS9808", collectors[0])
+	if records[1][4] != "true" {
+		t.Errorf("success = %q, want true (a real listener is accepting)", records[1][4])
 	}
 }
 
-// TestScanResumeOnlyMeasuresPendingTargets 是需求第 20 条的 CLI 级测试。
+// TestScanDoesNotCreateDatabase 验证扫描不再碰数据库。
+func TestScanDoesNotCreateDatabase(t *testing.T) {
+	body, listeners := probeFixture(t, []int{0})
+	defer closeAll(listeners)
+
+	cache := writeScanCache(t, body)
+	dir := t.TempDir()
+	out := filepath.Join(dir, "results.csv")
+
+	code, _, stderr := runCLI(scanCSVArgs(cache, out,
+		filepath.Join(dir, "collector.json"), "--timeout", "2s")...)
+	if code != ExitCodeOK {
+		t.Fatalf("exit code = %d (stderr=%q)", code, stderr)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".db") || strings.Contains(entry.Name(), ".db-") {
+			t.Errorf("scan created a database file %q; it must only write CSV", entry.Name())
+		}
+	}
+}
+
+// TestScanRejectsEmptyOut 验证空 --out 被拒绝。
 //
-// 用一个"较大的 limit"与一个"较小的 limit"交错，验证续测确实
-// 只测没测过的目标，并且不会因为重跑而重复计数。
-func TestScanResumeOnlyMeasuresPendingTargets(t *testing.T) {
-	body, listeners := probeFixture(t, []int{0, 0, 0, 0, 0, 0})
-	defer func() {
-		for _, l := range listeners {
-			_ = l.Close()
-		}
-	}()
-	cachePath := writeProbeCacheFrom(t, body)
-
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "results.db")
-	identityPath := filepath.Join(dir, "collector.json")
-
-	// 第一次"中断的扫描"：只扫前 2 个目标（模拟跑到一半被杀）。
-	code, first, stderr := runCLI(scanArgs(cachePath, dbPath, identityPath,
-		"--limit", "2", "--workers", "2", "--timeout", "2s", "--quiet")...)
-	if code != ExitCodeOK {
-		t.Fatalf("first scan exit code = %d (stderr=%q)", code, stderr)
-	}
-	sessionID := extractSessionID(t, first)
-	if !strings.Contains(first, "session:     finished") {
-		t.Fatalf("first scan should finish its session:\n%s", first)
-	}
-
-	// 手工把会话重新打开：模拟"进程被杀，会话未结束"的真实中断场景。
-	// （第一次扫描正常结束了，因此这里显式重置 finished_at。）
-	store, err := storage.Open(t.Context(), storage.Config{Path: dbPath})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.DB().ExecContext(t.Context(),
-		`UPDATE scan_sessions SET finished_at = NULL WHERE id = ?`, sessionID); err != nil {
-		t.Fatalf("reopen session: %v", err)
-	}
-	_ = store.Close()
-
-	// 续测：目标列表是全部 6 个，但前 2 个已经在本会话测过。
-	code, resumed, stderr := runCLI(scanArgs(cachePath, dbPath, identityPath,
-		"--resume", "--session", sessionID, "--workers", "4", "--timeout", "2s", "--quiet")...)
-	if code != ExitCodeOK {
-		t.Fatalf("resume exit code = %d (stderr=%q)", code, stderr)
-	}
-
-	for _, want := range []string{
-		"mode:        resume",
-		"skipped 2 already-measured target(s)",
-		"targets:     6 total, 4 to measure",
-		"Completed: 4 / 4",
-		"stored:      4 measurement(s)",
-	} {
-		if !strings.Contains(resumed, want) {
-			t.Errorf("resume summary missing %q\ngot:\n%s", want, resumed)
-		}
-	}
-
-	// 库里必须是 6 条测量（2 旧 + 4 新），没有任何重复。
-	store, err = storage.Open(t.Context(), storage.Config{Path: dbPath})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = store.Close() }()
-
-	all, err := store.QueryMeasurements(t.Context(), storage.MeasurementQuery{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(all) != 6 {
-		t.Errorf("measurements = %d, want 6 (2 before + 4 after resume)", len(all))
-	}
-
-	// 每个目标在本会话里只能有一条测量。
-	perTarget := make(map[string]int, 6)
-	for _, m := range all {
-		perTarget[m.TargetID]++
-	}
-	for targetID, n := range perTarget {
-		if n != 1 {
-			t.Errorf("target %s has %d measurements, want 1", targetID, n)
-		}
-	}
-}
-
-// TestScanResumeWithoutSessionIDUsesLastSession 验证 --resume 的默认值。
-func TestScanResumeWithoutSessionIDUsesLastSession(t *testing.T) {
-	body, listeners := probeFixture(t, []int{0, 0})
-	defer func() {
-		for _, l := range listeners {
-			_ = l.Close()
-		}
-	}()
-	cachePath := writeProbeCacheFrom(t, body)
-
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "results.db")
-	identityPath := filepath.Join(dir, "collector.json")
-
-	code, first, stderr := runCLI(scanArgs(cachePath, dbPath, identityPath,
-		"--limit", "1", "--workers", "1", "--timeout", "2s", "--quiet")...)
-	if code != ExitCodeOK {
-		t.Fatalf("first scan exit code = %d (stderr=%q)", code, stderr)
-	}
-	sessionID := extractSessionID(t, first)
-
-	// 重新打开会话，模拟中断。
-	store, err := storage.Open(t.Context(), storage.Config{Path: dbPath})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.DB().ExecContext(t.Context(),
-		`UPDATE scan_sessions SET finished_at = NULL WHERE id = ?`, sessionID); err != nil {
-		t.Fatal(err)
-	}
-	_ = store.Close()
-
-	// 不带 --session：应当用身份文件里记住的上一个会话。
-	code, resumed, stderr := runCLI(scanArgs(cachePath, dbPath, identityPath,
-		"--resume", "--workers", "1", "--timeout", "2s", "--quiet")...)
-	if code != ExitCodeOK {
-		t.Fatalf("resume exit code = %d (stderr=%q)", code, stderr)
-	}
-	if !strings.Contains(resumed, sessionID) {
-		t.Errorf("resume should reuse the remembered session %s:\n%s", sessionID, resumed)
-	}
-	if !strings.Contains(resumed, "mode:        resume") {
-		t.Errorf("resume output should report resume mode:\n%s", resumed)
-	}
-}
-
-// TestScanResumeMissingSessionIsActionable 验证续测失败给出可操作提示。
-func TestScanResumeMissingSessionIsActionable(t *testing.T) {
+// 结果无处可去时必须明确报错，而不是静默测完什么也没留下。
+func TestScanRejectsEmptyOut(t *testing.T) {
 	body, listeners := probeFixture(t, []int{0})
-	defer func() {
-		for _, l := range listeners {
-			_ = l.Close()
-		}
-	}()
-	cachePath := writeProbeCacheFrom(t, body)
+	defer closeAll(listeners)
 
+	cache := writeScanCache(t, body)
 	dir := t.TempDir()
-	code, _, stderr := runCLI(scanArgs(cachePath, filepath.Join(dir, "results.db"),
-		filepath.Join(dir, "collector.json"),
-		"--resume", "--session", "20260101T000000Z-00000000",
-		"--timeout", "2s", "--quiet")...)
 
-	if code != ExitCodeError {
-		t.Fatalf("exit code = %d, want %d (stderr=%q)", code, ExitCodeError, stderr)
+	code, _, stderr := runCLI(scanCSVArgs(cache, "", filepath.Join(dir, "collector.json"))...)
+	if code != ExitCodeUsage {
+		t.Fatalf("exit code = %d, want %d (stderr=%q)", code, ExitCodeUsage, stderr)
 	}
-	// 错误信息必须告诉用户下一步怎么做。
-	if !strings.Contains(stderr, "--new") {
-		t.Errorf("stderr = %q, want a hint to use --new", stderr)
+	if !strings.Contains(stderr, "--out") {
+		t.Errorf("stderr = %q, want it to name --out", stderr)
 	}
 }
 
-// TestScanTraceFlagIsReportedAsSkipped 验证 --trace 在 Phase 7 之前
-// 会明确说明"没做"，而不是静默跳过（那会让用户以为已经跟踪过）。
-func TestScanTraceFlagIsReportedAsSkipped(t *testing.T) {
+// TestScanRejectsBadTraceMode 验证非法跟踪模式在任何副作用之前被拒绝。
+func TestScanRejectsBadTraceMode(t *testing.T) {
 	body, listeners := probeFixture(t, []int{0})
-	defer func() {
-		for _, l := range listeners {
-			_ = l.Close()
-		}
-	}()
-	cachePath := writeProbeCacheFrom(t, body)
+	defer closeAll(listeners)
 
+	cache := writeScanCache(t, body)
 	dir := t.TempDir()
-	code, stdout, stderr := runCLI(scanArgs(cachePath, filepath.Join(dir, "results.db"),
-		filepath.Join(dir, "collector.json"),
-		"--trace", "--timeout", "2s", "--quiet")...)
-	if code != ExitCodeOK {
-		t.Fatalf("exit code = %d (stderr=%q)", code, stderr)
-	}
-	if !strings.Contains(stdout, "trace:       SKIPPED") {
-		t.Errorf("summary must state that tracing was skipped:\n%s", stdout)
-	}
-}
+	out := filepath.Join(dir, "results.csv")
 
-// TestScanProgressGoesToStderr 验证进度与汇总的输出流分离。
-func TestScanProgressGoesToStderr(t *testing.T) {
-	body, listeners := probeFixture(t, []int{0, 0})
-	defer func() {
-		for _, l := range listeners {
-			_ = l.Close()
-		}
-	}()
-	cachePath := writeProbeCacheFrom(t, body)
-
-	dir := t.TempDir()
-	code, stdout, stderr := runCLI(scanArgs(cachePath, filepath.Join(dir, "results.db"),
-		filepath.Join(dir, "collector.json"),
-		"--workers", "2", "--timeout", "2s")...)
-	if code != ExitCodeOK {
-		t.Fatalf("exit code = %d (stderr=%q)", code, stderr)
+	code, _, stderr := runCLI(scanCSVArgs(cache, out,
+		filepath.Join(dir, "collector.json"), "--trace", "--trace-mode", "gre")...)
+	if code != ExitCodeUsage {
+		t.Fatalf("exit code = %d, want %d (stderr=%q)", code, ExitCodeUsage, stderr)
 	}
-
-	for _, want := range []string{"source:", "session:", "collector:", "concurrency:"} {
-		if !strings.Contains(stderr, want) {
-			t.Errorf("stderr should carry the header (%q):\n%s", want, stderr)
-		}
+	if !strings.Contains(stderr, "trace mode") {
+		t.Errorf("stderr = %q, want it to mention the trace mode", stderr)
 	}
-	if strings.Contains(stdout, "concurrency:") || strings.Contains(stdout, "collector:") {
-		t.Errorf("stdout should not carry the header:\n%s", stdout)
-	}
-	if !strings.Contains(stdout, "stored:") {
-		t.Errorf("stdout should carry the summary:\n%s", stdout)
+	// 连结果文件都不该被创建。
+	if _, err := os.Stat(out); err == nil {
+		t.Error("the results CSV was created before the parameters were validated")
 	}
 }
 
 // TestScanEmptyTargetListIsError 验证没有目标时明确报错。
 func TestScanEmptyTargetListIsError(t *testing.T) {
 	empty := `{"generated_at":"2026-10-03T00:00:00","list":{"ips":0},"data":[]}`
-	cachePath := writeRawCacheFromJSON(t, empty)
-
+	cache := writeRawCacheFromJSON(t, empty)
 	dir := t.TempDir()
-	code, stdout, stderr := runCLI(scanArgs(cachePath, filepath.Join(dir, "results.db"),
+
+	code, stdout, stderr := runCLI(scanCSVArgs(cache, filepath.Join(dir, "results.csv"),
 		filepath.Join(dir, "collector.json"), "--quiet")...)
 
 	if code != ExitCodeError {
@@ -392,149 +207,197 @@ func TestScanEmptyTargetListIsError(t *testing.T) {
 	if stdout != "" {
 		t.Errorf("stdout = %q, want empty on failure", stdout)
 	}
-	if !strings.Contains(stderr, "no targets to scan") {
+	if !strings.Contains(stderr, "no targets") {
 		t.Errorf("stderr = %q, want a clear message", stderr)
 	}
 }
 
-// TestScanRecordsLastSessionInIdentityFile 验证身份文件记住了会话。
-func TestScanRecordsLastSessionInIdentityFile(t *testing.T) {
-	body, listeners := probeFixture(t, []int{0})
-	defer func() {
-		for _, l := range listeners {
-			_ = l.Close()
-		}
-	}()
-	cachePath := writeProbeCacheFrom(t, body)
+// TestScanLimitKeepsSourceOrder 验证 --limit 取源顺序的前 N 个。
+func TestScanLimitKeepsSourceOrder(t *testing.T) {
+	body, listeners := probeFixture(t, []int{0, 0, 0})
+	defer closeAll(listeners)
 
+	cache := writeScanCache(t, body)
 	dir := t.TempDir()
-	identityPath := filepath.Join(dir, "collector.json")
+	out := filepath.Join(dir, "results.csv")
 
-	code, stdout, stderr := runCLI(scanArgs(cachePath, filepath.Join(dir, "results.db"),
-		identityPath, "--timeout", "2s", "--quiet")...)
+	code, _, stderr := runCLI(scanCSVArgs(cache, out,
+		filepath.Join(dir, "collector.json"),
+		"--limit", "2", "--timeout", "2s", "--workers", "2")...)
 	if code != ExitCodeOK {
 		t.Fatalf("exit code = %d (stderr=%q)", code, stderr)
 	}
-	sessionID := extractSessionID(t, stdout)
 
-	if !model.IsSessionID(sessionID) {
-		t.Fatalf("session id %q has an unexpected format", sessionID)
+	records := readResultCSV(t, out)
+	if len(records) != 3 {
+		t.Fatalf("csv rows = %d, want 3 (header + 2)", len(records))
 	}
 
-	blob, err := readFileString(identityPath)
-	if err != nil {
-		t.Fatalf("read identity file: %v", err)
+	// 被跳过的是**最后一个**端口（源顺序），不是任意一个。
+	skipped := listeners[2].Addr().String()
+	last := strings.Split(skipped, ":")[1]
+	measured := records[1][1] + " " + records[2][1]
+	if strings.Contains(measured, ":"+last) {
+		t.Errorf("the third target (port %s) was measured despite --limit 2; got %q", last, measured)
 	}
-	if !strings.Contains(blob, sessionID) {
-		t.Errorf("identity file does not remember session %s:\n%s", sessionID, blob)
+}
+
+// TestScanAppendKeepsPreviousResults 验证 --append 不覆盖已有结果。
+func TestScanAppendKeepsPreviousResults(t *testing.T) {
+	body, listeners := probeFixture(t, []int{0})
+	defer closeAll(listeners)
+
+	cache := writeScanCache(t, body)
+	dir := t.TempDir()
+	out := filepath.Join(dir, "results.csv")
+	identity := filepath.Join(dir, "collector.json")
+
+	for i := 0; i < 2; i++ {
+		args := scanCSVArgs(cache, out, identity, "--timeout", "2s", "--append")
+		if code, _, stderr := runCLI(args...); code != ExitCodeOK {
+			t.Fatalf("run %d: exit code = %d (stderr=%q)", i, code, stderr)
+		}
 	}
-	// 身份文件里不能出现任何可识别信息。
-	for _, forbidden := range []string{"public_ip", "local_ip", "mac", "hostname"} {
-		if strings.Contains(strings.ToLower(blob), forbidden) {
-			t.Errorf("identity file contains %q, which must never be persisted:\n%s", forbidden, blob)
+
+	records := readResultCSV(t, out)
+	if len(records) != 3 {
+		t.Fatalf("csv rows = %d, want 3 (one header + two runs)", len(records))
+	}
+	for i, record := range records {
+		if i > 0 && record[0] == "timestamp_utc" {
+			t.Errorf("header repeated at row %d", i)
 		}
 	}
 }
 
-// ---------------------------------------------------------------------------
-// 辅助
-// ---------------------------------------------------------------------------
+// TestScanTraceFlagReportsUnavailableEngine 验证引擎不可用时
+// TCP 结果照常写入，并明确说明跟踪被跳过。
+func TestScanTraceFlagReportsUnavailableEngine(t *testing.T) {
+	body, listeners := probeFixture(t, []int{0})
+	defer closeAll(listeners)
 
-// extractSessionID 从 scan 的汇总输出里取出会话 ID。
-func extractSessionID(t *testing.T, stdout string) string {
-	t.Helper()
-	for _, line := range strings.Split(stdout, "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "session:") {
-			continue
-		}
-		id := strings.TrimSpace(strings.TrimPrefix(line, "session:"))
-		// 汇总里 "session:     finished" 之类的行不是 ID。
-		if model.IsSessionID(id) {
-			return id
-		}
+	cache := writeScanCache(t, body)
+	dir := t.TempDir()
+	out := filepath.Join(dir, "results.csv")
+
+	code, stdout, stderr := runCLI(scanCSVArgs(cache, out,
+		filepath.Join(dir, "collector.json"),
+		"--trace", "--trace-binary", "definitely-not-installed-nexttrace-xyz",
+		"--timeout", "2s")...)
+	if code != ExitCodeOK {
+		t.Fatalf("exit code = %d (stderr=%q)", code, stderr)
 	}
-	t.Fatalf("no session id found in output:\n%s", stdout)
-	return ""
+
+	// TCP 结果必须已经写进去了：跟踪不可用不该让整轮白跑。
+	records := readResultCSV(t, out)
+	if len(records) < 2 {
+		t.Fatalf("csv rows = %d, want at least one data row", len(records))
+	}
+
+	combined := stdout + stderr
+	if !strings.Contains(combined, "SKIPPED") {
+		t.Errorf("output does not say tracing was skipped:\n%s", combined)
+	}
+	if !strings.Contains(combined, "NextTrace not found.") {
+		t.Errorf("output does not explain why:\n%s", combined)
+	}
 }
 
-// readFileString 读取文件内容为字符串。
+// TestScanProgressAndSummaryGoToExpectedStreams 验证进度走 stderr、
+// 汇总走 stdout，且 --quiet 只压掉进度。
+func TestScanProgressAndSummaryGoToExpectedStreams(t *testing.T) {
+	body, listeners := probeFixture(t, []int{0})
+	defer closeAll(listeners)
+
+	cache := writeScanCache(t, body)
+	dir := t.TempDir()
+	out := filepath.Join(dir, "results.csv")
+	identity := filepath.Join(dir, "collector.json")
+
+	code, stdout, stderr := runCLI(scanCSVArgs(cache, out, identity, "--timeout", "2s")...)
+	if code != ExitCodeOK {
+		t.Fatalf("exit code = %d", code)
+	}
+	if !strings.Contains(stderr, "probe completed") {
+		t.Errorf("stderr does not show progress:\n%s", stderr)
+	}
+	if !strings.Contains(stdout, "rows:") {
+		t.Errorf("stdout does not show the summary:\n%s", stdout)
+	}
+
+	// --quiet：进度没了，汇总还在。
+	code, stdout, stderr = runCLI(scanCSVArgs(cache, out, identity, "--timeout", "2s", "--quiet")...)
+	if code != ExitCodeOK {
+		t.Fatalf("quiet exit code = %d", code)
+	}
+	if strings.Contains(stderr, "probe completed") {
+		t.Errorf("--quiet still printed progress:\n%s", stderr)
+	}
+	if !strings.Contains(stdout, "rows:") {
+		t.Errorf("--quiet suppressed the summary too:\n%s", stdout)
+	}
+}
+
+// TestScanTimeoutIsRespected 验证 --timeout 生效，且失败结果被如实记录。
+//
+// 用文档保留网段（不会被路由）确保连接超时。
+func TestScanTimeoutIsRespected(t *testing.T) {
+	// 192.0.2.0/24 是 RFC 5737 的文档网段，不会被路由。
+	cache := writeScanCache(t, unroutableTargetJSON("192.0.2.1", 443))
+
+	dir := t.TempDir()
+	out := filepath.Join(dir, "results.csv")
+
+	start := time.Now()
+	code, _, stderr := runCLI(scanCSVArgs(cache, out,
+		filepath.Join(dir, "collector.json"), "--timeout", "1s", "--quiet")...)
+	elapsed := time.Since(start)
+
+	if code != ExitCodeOK {
+		t.Fatalf("exit code = %d (stderr=%q)", code, stderr)
+	}
+	if elapsed > 8*time.Second {
+		t.Errorf("scan took %s; --timeout 1s was not respected", elapsed)
+	}
+
+	records := readResultCSV(t, out)
+	if len(records) != 2 {
+		t.Fatalf("csv rows = %d, want 2", len(records))
+	}
+	if records[1][4] != "false" {
+		t.Errorf("success = %q, want false for an unroutable target", records[1][4])
+	}
+	// 失败时延迟必须留空而不是 0：两者在表格里含义完全不同。
+	if records[1][5] != "" {
+		t.Errorf("latency = %q, want empty for a failed measurement", records[1][5])
+	}
+}
+
+// closeAll 关闭测试用的监听。
+func closeAll(listeners []net.Listener) {
+	for _, listener := range listeners {
+		_ = listener.Close()
+	}
+}
+
+// unroutableTargetJSON 构造一份指向**不可路由**地址的目标列表。
+//
+// 用文档保留网段（RFC 5737 的 192.0.2.0/24）：它不会被路由，
+// 因此连接必然超时，可以稳定地测试超时与失败记录。
+func unroutableTargetJSON(ip string, port int) string {
+	return `{"generated_at":"2026-10-03T00:00:00","list":{"ips":1},"data":[` +
+		`{"ip":"` + ip + `","port":[` + itoaCLI(port) + `],` +
+		`"latitude":"0","longitude":"0","country":"US","city":"Chicago"}]}`
+}
+
+// readFileString 读取文本文件内容。
+//
+// 放在这里而不是各测试文件里：它与 readResultCSV 服务于同一批
+// "读回结果并断言"的测试。
 func readFileString(path string) (string, error) {
-	blob, err := osReadFile(path)
+	blob, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
 	return string(blob), nil
-}
-
-// TestScanLimitKeepsSourceOrder 验证 --limit 取的是源顺序的前 N 个。
-func TestScanLimitKeepsSourceOrder(t *testing.T) {
-	body, listeners := probeFixture(t, []int{0, 0, 0})
-	defer func() {
-		for _, l := range listeners {
-			_ = l.Close()
-		}
-	}()
-	cachePath := writeProbeCacheFrom(t, body)
-
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "results.db")
-
-	code, stdout, stderr := runCLI(scanArgs(cachePath, dbPath,
-		filepath.Join(dir, "collector.json"),
-		"--limit", "2", "--workers", "2", "--timeout", "2s", "--quiet")...)
-	if code != ExitCodeOK {
-		t.Fatalf("exit code = %d (stderr=%q)", code, stderr)
-	}
-	if !strings.Contains(stdout, "targets:     2 total, 2 to measure") {
-		t.Errorf("--limit 2 should scan exactly 2 targets:\n%s", stdout)
-	}
-
-	store, err := storage.Open(t.Context(), storage.Config{Path: dbPath})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = store.Close() }()
-
-	// 目标表里只会写入被扫描的那两个（scan 只登记本次要测的目标）。
-	targets, err := store.LoadTargets(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(targets) != 2 {
-		t.Errorf("targets = %d, want 2", len(targets))
-	}
-}
-
-// TestScanTimeoutIsRespected 验证 --timeout 被传下去（用一个必然超时的目标）。
-func TestScanTimeoutIsRespected(t *testing.T) {
-	// 192.0.2.0/24 是 TEST-NET-1，保证不可路由。
-	body := `{
-	  "generated_at": "2026-10-03T00:00:00",
-	  "list": {"ips": 1},
-	  "data": [{"ip": "192.0.2.1", "port": [443], "meta": {"country": "US", "city": "Chicago"}}]
-	}`
-	cachePath := writeProbeCacheFrom(t, body)
-
-	dir := t.TempDir()
-	start := time.Now()
-	code, stdout, stderr := runCLI(scanArgs(cachePath, filepath.Join(dir, "results.db"),
-		filepath.Join(dir, "collector.json"),
-		"--workers", "1", "--timeout", "400ms", "--quiet")...)
-	if code != ExitCodeOK {
-		t.Fatalf("exit code = %d (stderr=%q)", code, stderr)
-	}
-	elapsed := time.Since(start)
-
-	// 必须是非成功（要么超时要么不可达），且耗时接近 --timeout。
-	if strings.Contains(stdout, "Success:   1") {
-		t.Errorf("TEST-NET-1 target unexpectedly succeeded:\n%s", stdout)
-	}
-	if elapsed > 10*time.Second {
-		t.Errorf("scan took %s; --timeout 400ms was not respected", elapsed)
-	}
-	// 失败也要入库（需求第 39 条）。
-	if !strings.Contains(stdout, "stored:      1 measurement(s)") {
-		t.Errorf("a failed measurement must still be stored:\n%s", stdout)
-	}
 }

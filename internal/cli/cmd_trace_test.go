@@ -190,7 +190,7 @@ func TestScanTraceRejectsBadMode(t *testing.T) {
 		"--url", sourceDefaultURL(),
 		"--fallback-url", "",
 		"--source-retries", "0",
-		"--db", filepath.Join(dir, "r.db"),
+		"--out", filepath.Join(dir, "results.csv"),
 		"--identity", filepath.Join(dir, "c.json"),
 		"--trace", "--trace-mode", "gre",
 		"--quiet")
