@@ -223,6 +223,37 @@ func TestGitCommitOutsideRepoIsNotFatal(t *testing.T) {
 	}
 }
 
+// TestGUIBinaryNameOnlyForWindows 验证图形入口产物与命令行产物命名不冲突。
+//
+// 只有 Windows 需要 GUI 入口：那里的控制台程序双击启动会先弹出一个
+// 黑窗口。命名必须区分得开，否则两个产物会互相覆盖——
+// 而覆盖的结果是"缺少一个入口"，且构建本身不会报错。
+func TestGUIBinaryNameOnlyForWindows(t *testing.T) {
+	cli := BinaryName("0.1.0", Target{OS: "windows", Arch: "amd64"})
+	gui := GUIBinaryName("0.1.0", Target{OS: "windows", Arch: "amd64"})
+
+	if cli == gui {
+		t.Fatalf("the CLI and GUI artifacts share the name %q; they would overwrite each other", cli)
+	}
+	if !strings.Contains(gui, "-gui-") {
+		t.Errorf("GUI name %q does not mark itself as the GUI build", gui)
+	}
+	if !strings.HasSuffix(gui, ".exe") {
+		t.Errorf("GUI name %q should end in .exe on Windows", gui)
+	}
+
+	// 默认目标列表里恰好有两个 Windows 目标（amd64 + arm64）。
+	windows := 0
+	for _, target := range DefaultTargets() {
+		if target.OS == "windows" {
+			windows++
+		}
+	}
+	if windows != 2 {
+		t.Errorf("windows targets = %d, want 2 (amd64 + arm64)", windows)
+	}
+}
+
 // TestWriteJSONProducesValidManifest 验证清单可被解析且字段完整。
 func TestWriteJSONProducesValidManifest(t *testing.T) {
 	dir := t.TempDir()

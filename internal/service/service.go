@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cf-route-tester/cf-route-tester/internal/identity"
@@ -543,3 +544,139 @@ func IsNoTargets(err error) bool { return errors.Is(err, ErrNoTargets) }
 
 // IsNoSession 判断错误是否属于"没有可续测的会话"。
 func IsNoSession(err error) bool { return errors.Is(err, ErrNoSession) }
+
+// ---------------------------------------------------------------------------
+// 让进度回调可以被多个观察者订阅
+// ---------------------------------------------------------------------------
+
+// ProgressHub 把一次扫描的进度事件广播给多个订阅者。
+//
+// 为什么需要它：调度器的进度回调是**单个函数**，而图形界面可能
+// 同时有多个客户端（多个标签页、刷新后重连的页面）。
+// 直接把回调替换掉会让先连上的客户端永远停在旧进度。
+//
+// 语义要点：
+//
+//   - Publish 绝不阻塞：慢订阅者会**丢事件**而不是拖慢扫描。
+//     进度是"最新状态"，丢中间态无害；卡住扫描有害。
+//   - 每个订阅者收到的是一个带缓冲的通道，缓冲区满时丢弃最旧的事件。
+type ProgressHub struct {
+	mu   sync.Mutex
+	subs map[int]chan scheduler.ProgressEvent
+	next int
+
+	// last 保存最近一次事件，供后连上的订阅者立刻看到当前状态。
+	last    *scheduler.ProgressEvent
+	lastSet bool
+}
+
+// NewProgressHub 创建广播中心。
+func NewProgressHub() *ProgressHub {
+	return &ProgressHub{subs: make(map[int]chan scheduler.ProgressEvent)}
+}
+
+// Subscribe 订阅进度事件。
+//
+// 返回的通道会立刻收到一条"当前状态"的事件（如果已有的话），
+// 这样新连上的页面不会空白等待到下一次进度更新。
+// 调用方必须调用返回的 cancel 函数，否则订阅者会一直留在表里。
+func (h *ProgressHub) Subscribe() (<-chan scheduler.ProgressEvent, func()) {
+	if h == nil {
+		ch := make(chan scheduler.ProgressEvent)
+		close(ch)
+		return ch, func() {}
+	}
+
+	// 缓冲区小是刻意的：它是"来不及消费"的信号，
+	// 满了就丢事件，而不是让扫描等这个订阅者。
+	ch := make(chan scheduler.ProgressEvent, 16)
+
+	h.mu.Lock()
+	id := h.next
+	h.next++
+	h.subs[id] = ch
+	var snapshot *scheduler.ProgressEvent
+	if h.lastSet && h.last != nil {
+		event := *h.last
+		snapshot = &event
+	}
+	h.mu.Unlock()
+
+	if snapshot != nil {
+		select {
+		case ch <- *snapshot:
+		default:
+		}
+	}
+
+	cancel := func() {
+		h.mu.Lock()
+		if existing, ok := h.subs[id]; ok {
+			delete(h.subs, id)
+			close(existing)
+		}
+		h.mu.Unlock()
+	}
+	return ch, cancel
+}
+
+// Publish 广播一次进度。
+//
+// 它**不会阻塞**：这是刻意的。订阅者消费不过来时宁可丢事件，
+// 也不能让整个扫描停下来等一个慢客户端。
+func (h *ProgressHub) Publish(event scheduler.ProgressEvent) {
+	if h == nil {
+		return
+	}
+
+	h.mu.Lock()
+	h.last = &event
+	h.lastSet = true
+	// 复制一份订阅者列表再解锁发送：避免在持锁期间阻塞。
+	subs := make([]chan scheduler.ProgressEvent, 0, len(h.subs))
+	for _, ch := range h.subs {
+		subs = append(subs, ch)
+	}
+	h.mu.Unlock()
+
+	for _, ch := range subs {
+		select {
+		case ch <- event:
+		default:
+			// 订阅者满了：丢掉**最旧**的一条腾出位置，再放最新的。
+			// 保留最新状态比保留完整历史有用。
+			select {
+			case <-ch:
+			default:
+			}
+			select {
+			case ch <- event:
+			default:
+			}
+		}
+	}
+}
+
+// Last 返回最近一次进度事件。
+func (h *ProgressHub) Last() (scheduler.ProgressEvent, bool) {
+	if h == nil {
+		return scheduler.ProgressEvent{}, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.lastSet || h.last == nil {
+		return scheduler.ProgressEvent{}, false
+	}
+	return *h.last, true
+}
+
+// Reset 清空"最近一次进度"（新一轮扫描开始时调用）。
+func (h *ProgressHub) Reset() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.last = nil
+	h.lastSet = false
+	h.mu.Unlock()
+}

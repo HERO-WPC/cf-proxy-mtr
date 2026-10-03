@@ -32,12 +32,11 @@ func registerSourceFlags(fs *flag.FlagSet, p *sourceParams) {
 	fs.StringVar(&p.proxy, "proxy", "", "HTTP(S) 代理地址，例如 http://127.0.0.1:10808")
 }
 
-// loadTargets 按参数取得目标列表。
+// toConfig 把参数转成 source.Config。
 //
-// 行为与 fetch 一致：缓存新鲜则用缓存，否则联网下载并写缓存；
-// 网络失败时允许回退过期缓存。这样 probe / scan 的用户
-// 不需要先手工执行一次 fetch。
-func loadTargets(ctx context.Context, p sourceParams) (*source.Result, error) {
+// 抽出来是为了让所有子命令（包括 web）用同一套转换规则：
+// 各自手写一份迟早会出现"某个命令忘了传 proxy"这类漂移。
+func (p sourceParams) toConfig() source.Config {
 	cfg := source.DefaultConfig()
 	cfg.URL = p.url
 	cfg.FallbackURL = p.fallbackURL
@@ -47,8 +46,16 @@ func loadTargets(ctx context.Context, p sourceParams) (*source.Result, error) {
 	if p.timeout.set {
 		cfg.Timeout = p.timeout.d
 	}
+	return cfg
+}
 
-	loader, err := source.NewLoader(cfg)
+// loadTargets 按参数取得目标列表。
+//
+// 行为与 fetch 一致：缓存新鲜则用缓存，否则联网下载并写缓存；
+// 网络失败时允许回退过期缓存。这样 probe / scan 的用户
+// 不需要先手工执行一次 fetch。
+func loadTargets(ctx context.Context, p sourceParams) (*source.Result, error) {
+	loader, err := source.NewLoader(p.toConfig())
 	if err != nil {
 		// 配置错误属于全局错误：终止当前任务。
 		return nil, err

@@ -75,6 +75,36 @@ func BinaryName(version string, target Target) string {
 // 变得绕。下面 readSourceVersion 会直接从源码里读，保持一致。
 const clientName = "cf-route-tester"
 
+// GUIBinaryName 返回图形界面入口的产物文件名。
+//
+// 只在 Windows 上存在：其它平台没有"双击弹控制台"的问题。
+func GUIBinaryName(version string, target Target) string {
+	name := fmt.Sprintf("%s-gui-%s-%s-%s", clientName, version, target.OS, target.Arch)
+	if target.OS == "windows" {
+		name += ".exe"
+	}
+	return name
+}
+
+// describe 统计一个产物并生成清单条目。
+func describe(name string, target Target, path string) (ManifestEntry, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return ManifestEntry{}, fmt.Errorf("stat %s: %w", path, err)
+	}
+	sum, err := fileSHA256(path)
+	if err != nil {
+		return ManifestEntry{}, err
+	}
+	return ManifestEntry{
+		File:   name,
+		OS:     target.OS,
+		Arch:   target.Arch,
+		Bytes:  info.Size(),
+		SHA256: sum,
+	}, nil
+}
+
 // main 是入口。
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
@@ -181,34 +211,42 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}, " ")
 
 	targets := DefaultTargets()
-	entries := make([]ManifestEntry, 0, len(targets))
+	entries := make([]ManifestEntry, 0, len(targets)*2)
 
 	for _, target := range targets {
 		fmt.Fprintf(stdout, "==> 构建 %s/%s\n", target.OS, target.Arch)
 
+		// 1) 命令行入口。
 		name := BinaryName(opts.version, target)
 		path := filepath.Join(outDir, name)
-
-		if err := buildTarget(root, target, ldflags, path); err != nil {
+		if err := buildTarget(root, target, ldflags, "cf-route-tester", path, false); err != nil {
 			return err
 		}
-
-		info, err := os.Stat(path)
-		if err != nil {
-			return fmt.Errorf("stat %s: %w", path, err)
-		}
-		sum, err := fileSHA256(path)
+		entry, err := describe(name, target, path)
 		if err != nil {
 			return err
 		}
+		entries = append(entries, entry)
 
-		entries = append(entries, ManifestEntry{
-			File:   name,
-			OS:     target.OS,
-			Arch:   target.Arch,
-			Bytes:  info.Size(),
-			SHA256: sum,
-		})
+		// 2) 图形界面入口（无控制台窗口），仅 Windows。
+		//
+		// 只有 Windows 需要它：那里的控制台程序双击启动会先弹出一个
+		// 黑窗口，而图形界面的使用者不该看到它。
+		// 其它平台没有这个问题（.app / .desktop 启动器天然不显示终端），
+		// 也就不必多一份产物。
+		if target.OS == "windows" {
+			guiName := GUIBinaryName(opts.version, target)
+			guiPath := filepath.Join(outDir, guiName)
+			fmt.Fprintf(stdout, "    （图形界面入口，无控制台）\n")
+			if err := buildTarget(root, target, ldflags, "cf-route-tester-gui", guiPath, true); err != nil {
+				return err
+			}
+			guiEntry, err := describe(guiName, target, guiPath)
+			if err != nil {
+				return err
+			}
+			entries = append(entries, guiEntry)
+		}
 	}
 
 	// 校验和文件：每行 "hash  filename"，与 sha256sum / shasum -c 兼容。
@@ -286,15 +324,28 @@ func verify(root string, stdout io.Writer) error {
 }
 
 // buildTarget 交叉编译一个目标。
-func buildTarget(root string, target Target, ldflags, output string) error {
+//
+// gui 为真时用 -H=windowsgui 构建：产物不带控制台窗口，
+// 适合"双击启动图形界面"。它只对 Windows 有意义，
+// 在其它平台该标志会被忽略（因此调用方不会传 true）。
+func buildTarget(root string, target Target, ldflags, pkg, output string, gui bool) error {
+	linker := ldflags
+	if gui && target.OS == "windows" {
+		// -H windowsgui 让 PE 子系统是 GUI：双击时不会弹出控制台窗口。
+		//
+		// 代价是进程没有可用的 stdout/stderr，程序必须自己把
+		// 该说的话写进日志文件——见 internal/cli 的 Env.Detached。
+		linker = linker + " -H=windowsgui"
+	}
+
 	cmd := exec.Command("go", "build",
 		// -trimpath 去掉构建机器的绝对路径：
 		// 产物里不该出现 "D:\..." 或 "/home/..."，那既是隐私问题，
 		// 也让同一份源码在不同机器上构建出的二进制不一致。
 		"-trimpath",
-		"-ldflags", ldflags,
+		"-ldflags", linker,
 		"-o", output,
-		"./cmd/cf-route-tester",
+		"./cmd/"+pkg,
 	)
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(),

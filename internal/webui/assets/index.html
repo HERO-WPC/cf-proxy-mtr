@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cf-route-tester</title>
+<!--
+  这个页面刻意只用原生 HTML/CSS/JS，不用任何前端框架。
+
+  原因不是"框架不好"，而是：本项目的承诺是"clone 下来 go build 就能用"。
+  引入框架就意味着新贡献者必须先装 Node 才能构建，
+  而界面本身只做三件事——看统计、起扫描、看进度。
+-->
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1e222b;
+    --border: #2a2f3a;
+    --text: #e6e8ee;
+    --muted: #8b93a7;
+    --accent: #4c8dff;
+    --ok: #3ecf8e;
+    --warn: #f0b429;
+    --err: #f2545b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  header {
+    padding: 18px 24px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  }
+  header h1 { margin: 0; font-size: 17px; font-weight: 600; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  main { padding: 20px 24px 48px; max-width: 1180px; }
+  section { margin-bottom: 22px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+       color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 16px;
+  }
+  .card .label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+  .card .value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .card .value.small { font-size: 14px; font-weight: 500; word-break: break-all; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px;
+  }
+  label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 5px; }
+  input[type=number], input[type=text], select {
+    width: 100%; padding: 7px 9px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
+    font: inherit;
+  }
+  input:focus, select:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+  .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .check { display: flex; align-items: center; gap: 7px; color: var(--text); font-size: 13px; }
+  .check input { width: auto; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  button {
+    padding: 8px 16px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--panel-2); color: var(--text); font: inherit; cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.danger { border-color: var(--err); color: var(--err); }
+  .bar { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; margin: 12px 0 8px; }
+  .bar > div { height: 100%; background: var(--accent); width: 0; transition: width .25s; }
+  .stats-line { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .stats-line b { color: var(--text); font-weight: 600; }
+  pre {
+    margin: 0; padding: 12px 14px; background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 6px;
+    overflow: auto; max-height: 260px; font-size: 12px;
+    font-family: ui-monospace, Consolas, monospace;
+  }
+  .msg { padding: 10px 14px; border-radius: 6px; margin-bottom: 12px; font-size: 13px; }
+  .msg.err { background: rgba(242,84,91,.12); border: 1px solid var(--err); color: #ffb9bd; }
+  .msg.ok { background: rgba(62,207,142,.12); border: 1px solid var(--ok); color: #b6f0d4; }
+  .msg.warn { background: rgba(240,180,41,.12); border: 1px solid var(--warn); color: #ffe1a3; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 10px;
+          background: var(--panel-2); border: 1px solid var(--border);
+          font-size: 11px; color: var(--muted); }
+  .pill.live { background: rgba(76,141,255,.15); border-color: var(--accent); color: #bcd4ff; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; font-size: 13px; }
+  .kv .k { color: var(--muted); }
+  .kv .v { font-variant-numeric: tabular-nums; word-break: break-all; }
+</style>
+</head>
+<body>
+<header>
+  <h1>cf-route-tester</h1>
+  <span class="sub">本地线路测量 · 全部数据仅保存在这台机器上</span>
+  <span class="pill" id="conn">连接中…</span>
+</header>
+
+<main>
+  <div id="banner"></div>
+
+  <section>
+    <h2>本地数据库</h2>
+    <div class="grid" id="stats"></div>
+  </section>
+
+  <section>
+    <h2>开始扫描</h2>
+    <div class="panel">
+      <div class="fields">
+        <div>
+          <label for="workers">TCP 并发数</label>
+          <input type="number" id="workers" value="100" min="1" max="1000">
+        </div>
+        <div>
+          <label for="timeout">连接超时（毫秒）</label>
+          <input type="number" id="timeout" value="3000" min="100" step="100">
+        </div>
+        <div>
+          <label for="limit">只测前 N 个（0 = 全部）</label>
+          <input type="number" id="limit" value="0" min="0">
+        </div>
+        <div>
+          <label for="mode">扫描方式</label>
+          <select id="mode">
+            <option value="new">新会话</option>
+            <option value="resume">继续上次未完成的会话</option>
+          </select>
+        </div>
+      </div>
+
+      <div style="margin-top:14px">
+        <div class="check">
+          <input type="checkbox" id="trace">
+          <label for="trace" style="margin:0">同时做线路跟踪（需要 NextTrace）</label>
+        </div>
+        <div class="fields" id="traceFields" style="margin-top:10px; display:none">
+          <div>
+            <label for="traceBinary">NextTrace 路径（留空=从 PATH 查找）</label>
+            <input type="text" id="traceBinary" placeholder="nexttrace">
+          </div>
+          <div>
+            <label for="traceMode">跟踪模式</label>
+            <select id="traceMode">
+              <option value="tcp">tcp</option>
+              <option value="icmp">icmp（无需管理员权限）</option>
+              <option value="udp">udp</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:16px">
+        <button class="primary" id="startBtn">开始扫描</button>
+        <button class="danger" id="stopBtn" disabled>停止</button>
+      </div>
+      <div class="hint">
+        扫描结果只会写入本机的 SQLite 数据库。上传功能尚未实现，因此这里没有任何数据会离开这台机器。
+      </div>
+    </div>
+  </section>
+
+  <section id="progressSection" style="display:none">
+    <h2>进度</h2>
+    <div class="panel">
+      <div class="row" style="justify-content:space-between">
+        <span class="pill live" id="phase">—</span>
+        <span class="stats-line" id="progressText">—</span>
+      </div>
+      <div class="bar"><div id="barFill"></div></div>
+      <div class="stats-line" id="progressDetail"></div>
+    </div>
+  </section>
+
+  <section id="resultSection" style="display:none">
+    <h2>最近一次扫描</h2>
+    <div class="panel" id="resultBody"></div>
+  </section>
+</main>
+
+<script>
+'use strict';
+
+// ---------------------------------------------------------------------------
+// token
+// ---------------------------------------------------------------------------
+// 服务端在启动时生成一个进程级随机 token，所有 /api 请求都要带上。
+// 页面从 URL 的 ?token= 读一次，存进 sessionStorage，然后把 URL 里的
+// 那一份清掉——避免它留在浏览器历史里。
+const params = new URLSearchParams(location.search);
+const tokenFromURL = params.get('token');
+if (tokenFromURL) {
+  sessionStorage.setItem('token', tokenFromURL);
+  history.replaceState(null, '', location.pathname);
+}
+const token = sessionStorage.getItem('token') || '';
+
+function headers(extra) {
+  const h = Object.assign({ 'X-Auth-Token': token }, extra || {});
+  return h;
+}
+
+function banner(kind, text) {
+  const el = document.getElementById('banner');
+  el.innerHTML = '';
+  if (!text) return;
+  const div = document.createElement('div');
+  div.className = 'msg ' + kind;
+  div.textContent = text;
+  el.appendChild(div);
+}
+
+async function api(path, options) {
+  const opts = options || {};
+  opts.headers = headers(opts.headers);
+  const res = await fetch(path, opts);
+  const text = await res.text();
+  let body = null;
+  if (text) { try { body = JSON.parse(text); } catch (_) { body = { error: text }; } }
+  if (!res.ok) {
+    const err = new Error((body && body.error) || res.statusText);
+    err.status = res.status;
+    throw err;
+  }
+  return body;
+}
+
+// ---------------------------------------------------------------------------
+// 统计
+// ---------------------------------------------------------------------------
+const TABLE_LABELS = {
+  targets: '目标（IP:Port）',
+  measurements: '测量记录',
+  traces: '线路跟踪记录',
+  collectors: '采集者',
+  scan_sessions: '扫描会话',
+};
+
+function card(label, value, small) {
+  const div = document.createElement('div');
+  div.className = 'card';
+  const l = document.createElement('div');
+  l.className = 'label';
+  l.textContent = label;
+  const v = document.createElement('div');
+  v.className = 'value' + (small ? ' small' : '');
+  v.textContent = value;
+  div.appendChild(l);
+  div.appendChild(v);
+  return div;
+}
+
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i === 0 ? 0 : 2) + ' ' + units[i];
+}
+
+function fmtTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d)) return '—';
+  return d.toLocaleString();
+}
+
+async function loadStats() {
+  let data;
+  try {
+    data = await api('/api/stats');
+  } catch (e) {
+    if (e.status === 401) {
+      banner('err', '访问令牌无效。请使用启动时打印的完整地址重新打开页面（地址里带有 token）。');
+    } else {
+      banner('err', '读取数据库状态失败：' + e.message);
+    }
+    return;
+  }
+
+  const s = data;
+  const box = document.getElementById('stats');
+  box.innerHTML = '';
+
+  const tables = (s.Storage && s.Storage.Tables) || {};
+  box.appendChild(card('目标（IP:Port）', tables.targets || 0));
+  box.appendChild(card('测量记录', tables.measurements || 0));
+  box.appendChild(card('线路跟踪记录', tables.traces || 0));
+  box.appendChild(card('数据库大小', fmtBytes(s.Storage && s.Storage.SizeBytes)));
+  box.appendChild(card('schema 版本', (s.Storage && s.Storage.SchemaVersion) || 0));
+
+  const schema = document.createElement('div');
+  schema.className = 'card';
+  const sl = document.createElement('div');
+  sl.className = 'label';
+  sl.textContent = '数据库文件';
+  const sv = document.createElement('div');
+  sv.className = 'value small';
+  sv.textContent = (s.Storage && s.Storage.Path) || '—';
+  schema.appendChild(sl);
+  schema.appendChild(sv);
+  box.appendChild(schema);
+
+  // 最近会话
+  if (s.LatestSession) {
+    const ls = s.LatestSession;
+    box.appendChild(card('最近会话', ls.id || ls.ID || '—', true));
+    box.appendChild(card('最近测量时间', fmtTime(s.Storage && s.Storage.LastMeasurement)));
+  } else {
+    box.appendChild(card('最近会话', '（还没有扫描过）', true));
+  }
+
+  banner('', '');
+  renderOutcome(s.last_scan);
+}
+
+// ---------------------------------------------------------------------------
+// 扫描控制
+// ---------------------------------------------------------------------------
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const traceBox = document.getElementById('trace');
+const traceFields = document.getElementById('traceFields');
+
+traceBox.addEventListener('change', () => {
+  traceFields.style.display = traceBox.checked ? 'grid' : 'none';
+});
+
+function setBusy(busy) {
+  startBtn.disabled = busy;
+  stopBtn.disabled = !busy;
+  document.getElementById('progressSection').style.display = busy ? 'block' : 'none';
+}
+
+startBtn.addEventListener('click', async () => {
+  const mode = document.getElementById('mode').value;
+  const body = {
+    workers: parseInt(document.getElementById('workers').value, 10) || 0,
+    timeout_ms: parseInt(document.getElementById('timeout').value, 10) || 0,
+    limit: parseInt(document.getElementById('limit').value, 10) || 0,
+    resume: mode === 'resume',
+    trace: traceBox.checked,
+    trace_binary: document.getElementById('traceBinary').value.trim(),
+    trace_mode: document.getElementById('traceMode').value,
+  };
+
+  banner('', '');
+  setBusy(true);
+  resetProgress();
+
+  try {
+    await api('/api/scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    setBusy(false);
+    if (e.status === 409) {
+      banner('warn', '已经有一个扫描在跑了。');
+    } else {
+      banner('err', '无法启动扫描：' + e.message);
+    }
+  }
+});
+
+stopBtn.addEventListener('click', async () => {
+  stopBtn.disabled = true;
+  try {
+    await api('/api/scan/stop', { method: 'POST' });
+    banner('warn', '已请求停止。正在等待当前批次落库后结束…');
+  } catch (e) {
+    banner('err', '停止失败：' + e.message);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 进度（SSE）
+// ---------------------------------------------------------------------------
+const PHASE_LABELS = { probe: 'TCP 探测', trace: '线路跟踪' };
+
+function resetProgress() {
+  document.getElementById('barFill').style.width = '0%';
+  document.getElementById('phase').textContent = '准备中…';
+  document.getElementById('progressText').textContent = '—';
+  document.getElementById('progressDetail').textContent = '';
+}
+
+function renderProgress(p) {
+  if (!p) return;
+  document.getElementById('progressSection').style.display = 'block';
+
+  const phase = PHASE_LABELS[p.phase] || p.phase || '—';
+  document.getElementById('phase').textContent = phase;
+
+  // ProgressEvent 没有"结束"标志：阶段跑完的信号是 completed == total。
+  const pct = p.total > 0 ? Math.min(100, (p.completed / p.total) * 100) : 0;
+  document.getElementById('barFill').style.width = pct.toFixed(1) + '%';
+  document.getElementById('progressText').textContent =
+    p.completed + ' / ' + (p.total || '?') + '  （' + pct.toFixed(0) + '%）';
+  document.getElementById('progressDetail').textContent =
+    '成功 ' + p.success + ' · 失败 ' + p.failed;
+}
+
+function connectEvents() {
+  const es = new EventSource('/api/events?token=' + encodeURIComponent(token));
+
+  es.addEventListener('open', () => {
+    document.getElementById('conn').textContent = '已连接';
+    document.getElementById('conn').className = 'pill live';
+  });
+
+  es.addEventListener('progress', (ev) => {
+    try { renderProgress(JSON.parse(ev.data)); } catch (_) {}
+  });
+
+  es.addEventListener('error', () => {
+    document.getElementById('conn').textContent = '重连中…';
+    document.getElementById('conn').className = 'pill';
+    // EventSource 会自己重连，这里不额外处理。
+  });
+}
+
+// 扫描结束后刷新统计：这是"数据真的落库了"的可视证据。
+let wasScanning = false;
+async function pollStatus() {
+  try {
+    const s = await api('/api/scan/status');
+    if (s.scanning) {
+      wasScanning = true;
+      setBusy(true);
+      renderProgress(s.progress);
+    } else {
+      setBusy(false);
+      if (wasScanning) {
+        wasScanning = false;
+        renderOutcome(s.last);
+        loadStats();
+      } else {
+        renderOutcome(s.last);
+      }
+    }
+  } catch (_) {
+    // 忽略：下一次轮询会重试。
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 结果
+// ---------------------------------------------------------------------------
+function kv(pairs) {
+  const wrap = document.createElement('div');
+  wrap.className = 'kv';
+  pairs.forEach(([k, v]) => {
+    const kd = document.createElement('div');
+    kd.className = 'k';
+    kd.textContent = k;
+    const vd = document.createElement('div');
+    vd.className = 'v';
+    vd.textContent = v;
+    wrap.appendChild(kd);
+    wrap.appendChild(vd);
+  });
+  return wrap;
+}
+
+function renderOutcome(last) {
+  const section = document.getElementById('resultSection');
+  const body = document.getElementById('resultBody');
+
+  if (!last) { section.style.display = 'none'; return; }
+  section.style.display = 'block';
+  body.innerHTML = '';
+
+  if (last.error) {
+    const div = document.createElement('div');
+    div.className = 'msg err';
+    div.textContent = '扫描失败：' + last.error;
+    body.appendChild(div);
+
+    const hints = {
+      usage: '参数有问题，请检查上面的设置。',
+      no_targets: '数据源返回了空的目标列表。可能是上游数据源暂时不可用，或本地缓存为空。',
+      no_session: '没有可以继续的会话。请改用「新会话」，或先跑一次完整扫描。',
+      canceled: '扫描已被停止。已测量的部分已经落库，可以用「继续上次未完成的会话」接着测。',
+    };
+    if (hints[last.kind]) {
+      const h = document.createElement('div');
+      h.className = 'hint';
+      h.textContent = hints[last.kind];
+      body.appendChild(h);
+    }
+    return;
+  }
+
+  const s = last.summary || {};
+  body.appendChild(kv([
+    ['会话', s.session_id || '—'],
+    ['来源', (s.source_url || '—') + (s.source_from_cache ? '（本地缓存）' : '（网络）')],
+    ['耗时', (s.elapsed_seconds || 0).toFixed(1) + ' 秒'],
+    ['测量目标', (s.targets_pending || 0) + ' 个（共考虑 ' + (s.targets_total || 0) + ' 个）'],
+    ['探测成功', (s.probe_success || 0) + ' 个'],
+    ['探测失败', (s.probe_failed || 0) + ' 个'],
+    ['落库测量', (s.stored || 0) + ' 条'],
+    ['落库跟踪', (s.trace_stored || 0) + ' 条'],
+    ['会话状态', s.session_finished ? '已结束' : '未结束（可继续）'],
+  ]));
+
+  if (s.interrupted) {
+    const div = document.createElement('div');
+    div.className = 'msg warn';
+    div.style.marginTop = '12px';
+    div.textContent = '扫描被中断：结果不完整，但已测量的部分已保存。可以继续这个会话。';
+    body.appendChild(div);
+  }
+  if (s.trace_skipped) {
+    const div = document.createElement('div');
+    div.className = 'msg warn';
+    div.style.marginTop = '12px';
+    div.textContent = '线路跟踪被跳过：' + (s.trace_unavailable || '跟踪引擎不可用') +
+      '（TCP 测量结果仍然有效）';
+    body.appendChild(div);
+  }
+  if (s.last_session_saved === false) {
+    const div = document.createElement('div');
+    div.className = 'msg warn';
+    div.style.marginTop = '12px';
+    div.textContent = '警告：无法记住本次会话，下次「继续上次会话」可能找不到它。原因：' +
+      (s.last_session_error || '未知');
+    body.appendChild(div);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 启动
+// ---------------------------------------------------------------------------
+if (!token) {
+  banner('err', '这个页面缺少访问令牌，无法工作。请使用启动时打印的完整地址打开页面。');
+} else {
+  connectEvents();
+  loadStats();
+  pollStatus();
+  setInterval(pollStatus, 2000);
+}
+</script>
+</body>
+</html>

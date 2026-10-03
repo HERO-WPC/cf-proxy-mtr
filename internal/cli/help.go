@@ -11,7 +11,7 @@ import (
 // helpOrder 固定顶层帮助中“当前可用命令”的显示顺序。
 //
 // 显式列出顺序，而不是遍历 map，保证帮助输出稳定、可测试。
-var helpOrder = []string{"help", "fetch", "detect", "probe", "scan", "trace", "export", "aggregate", "query", "db", "version"}
+var helpOrder = []string{"help", "web", "fetch", "detect", "probe", "scan", "trace", "export", "aggregate", "query", "db", "version"}
 
 // roadmapOrder 固定“规划中命令”的显示顺序，方便用户理解路线图。
 //

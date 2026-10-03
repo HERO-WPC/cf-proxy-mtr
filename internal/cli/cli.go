@@ -86,6 +86,16 @@ type Env struct {
 
 	// Info 是当前二进制的版本信息。
 	Info version.Info
+
+	// Detached 表示当前进程**没有可用的控制台**。
+	//
+	// 由入口设置：Windows 上以 -H=windowsgui 构建的图形入口双击启动时
+	// 就是这种情况（os.Stdout / os.Stderr 指向无效句柄，写进去会丢失）。
+	//
+	// 它的作用只有一个：让 web 命令不要在无控制台时假装能打印，
+	// 而是把该说的都写进日志文件。这个区分是踩过坑之后加的——
+	// GUI 入口启动后日志文件里一条记录都没有，只剩端口在监听。
+	Detached bool
 }
 
 // NewEnv 使用真实进程环境构造 Env。
@@ -224,6 +234,7 @@ func newCommands() map[string]Command {
 		newAggregateCommand(),
 		newQueryCommand(),
 		newDBCommand(),
+		newWebCommand(),
 		{
 			Name:    "version",
 			Summary: "显示版本信息（--verbose 显示构建细节）",
