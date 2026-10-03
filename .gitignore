@@ -1,0 +1,50 @@
+# Build output / 编译产物
+/bin/
+/dist/
+cf-route-tester
+cf-route-tester.exe
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Local data (never commit local databases or downloads) / 本地数据，禁止提交
+/data/all.json
+/data/all.txt
+/data/results.db
+/data/results.db-journal
+/data/results.db-wal
+/data/results.db-shm
+/data/bin/
+/data/raw/
+/data/aggregate/
+data/**/*.db
+data/**/*.db-journal
+
+# Export output / 导出产物
+/output/
+
+# Config with local overrides / 本地配置覆盖
+configs/local.yaml
+configs/local.yml
+*.local.yaml
+*.local.yml
+
+# Secrets: GitHub token etc. / 密钥，永远不要提交
+.env
+.env.*
+*.token
+gh_token.txt
+
+# Test / coverage artifacts
+*.out
+coverage.txt
+coverage.html
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db

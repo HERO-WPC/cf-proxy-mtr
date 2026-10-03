@@ -1,0 +1,19 @@
+# 统一换行符，避免 Windows 检出时把 LF 换成 CRLF 造成无意义的 diff
+# 以及 shell 脚本在 Linux/macOS 上无法执行的问题。
+* text=auto eol=lf
+
+# 二进制文件不要做任何换行转换。
+*.exe binary
+*.db binary
+*.gz binary
+*.zst binary
+*.png binary
+*.jpg binary
+*.ico binary
+
+# GitHub Actions 工作流必须是 LF。
+.github/workflows/*.yml text eol=lf
+
+# Windows 批处理脚本需要 CRLF。
+*.bat text eol=crlf
+*.cmd text eol=crlf
