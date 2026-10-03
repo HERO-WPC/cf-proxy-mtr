@@ -16,6 +16,7 @@ import (
 	"github.com/cf-route-tester/cf-route-tester/internal/scheduler"
 	"github.com/cf-route-tester/cf-route-tester/internal/source"
 	"github.com/cf-route-tester/cf-route-tester/internal/storage"
+	"github.com/cf-route-tester/cf-route-tester/internal/trace"
 	"github.com/cf-route-tester/cf-route-tester/internal/version"
 )
 
@@ -36,6 +37,12 @@ type scanParams struct {
 	sessionID  string
 
 	trace bool
+
+	// 第二级（线路跟踪）参数，仅在 --trace 时生效。
+	traceBinary  string
+	traceMode    string
+	traceWorkers int
+	traceTimeout durationFlag
 
 	// 采集者画像覆盖项。
 	collectorCountry   string
@@ -91,8 +98,14 @@ func scanFlagSet(p *scanParams) *flag.FlagSet {
 	fs.BoolVar(&p.newSession, "new", false, "强制开始一个新会话（默认）")
 	fs.StringVar(&p.sessionID, "session", "", "指定会话 ID（与 --resume 或 --new 配合）")
 
-	fs.BoolVar(&p.trace, "trace", false, "对目标执行线路跟踪（需要 NextTrace，Phase 7 起可用）")
-	fs.BoolVar(&p.trace, "trace-all", false, "同 --trace（全量跟踪；与 --trace 互为别名）")
+	fs.BoolVar(&p.trace, "trace", false, "对**探测成功**的目标执行线路跟踪（需要 NextTrace）")
+	fs.StringVar(&p.traceBinary, "trace-binary", trace.DefaultBinary,
+		"nexttrace 可执行文件路径或名字（--trace 时使用）")
+	fs.StringVar(&p.traceMode, "trace-mode", string(trace.ModeTCP),
+		"跟踪模式：tcp / icmp / udp（--trace 时使用）")
+	fs.IntVar(&p.traceWorkers, "trace-workers", trace.DefaultWorkers,
+		"跟踪并发数（上限 "+itoa(trace.MaxWorkers)+"；每 worker 启动一个进程）")
+	fs.Var(&p.traceTimeout, "trace-timeout", "单个跟踪超时（默认 "+trace.DefaultTimeout.String()+"）")
 
 	fs.StringVar(&p.collectorCountry, "country", "", "采集者国家代码（覆盖本地标识）")
 	fs.StringVar(&p.collectorProvince, "province", "", "采集者省份（覆盖本地标识）")
@@ -104,6 +117,58 @@ func scanFlagSet(p *scanParams) *flag.FlagSet {
 	fs.BoolVar(&p.verbose, "verbose", false, "显示每个目标的测量结果")
 	fs.BoolVar(&p.quiet, "quiet", false, "只输出汇总，不输出进度")
 	return fs
+}
+
+// describeProfile 把采集者画像渲染成人类可读的一行。
+//
+// 刻意不用 GroupKey()：那个键固定包含 6 个字段，画像还没检测过时会
+// 显示成 "|||||"（分隔符之间全是空），既不美观也看不出问题所在。
+// 聚合键必须保持固定形状（那正是它可比的原因），因此这里只改展示。
+func describeProfile(profile model.CollectorProfile) string {
+	profile.Normalize()
+
+	parts := make([]string, 0, 6)
+	for _, value := range []string{
+		profile.Country, profile.Province, profile.City,
+		profile.ISP, profile.ASN, string(profile.IPVersion),
+	} {
+		if strings.TrimSpace(value) != "" {
+			parts = append(parts, value)
+		}
+	}
+	if len(parts) == 0 {
+		return "(未检测：请先运行 '" + ClientName + " detect --write')"
+	}
+	return strings.Join(parts, " / ")
+}
+
+// buildScanTraceEngine 构造扫描用的线路跟踪引擎。
+//
+// 与 `trace` 命令共用同一套 EngineOptions，因此行为一致
+// （模式校验、超时、版本查询）。
+func buildScanTraceEngine(ctx context.Context, p scanParams) (*trace.NextTraceEngine, error) {
+	mode, err := trace.Mode(p.traceMode).Normalize()
+	if err != nil {
+		return nil, err
+	}
+
+	opts := trace.EngineOptions{
+		BinaryPath: p.traceBinary,
+		Mode:       mode,
+	}
+	if p.traceTimeout.set {
+		opts.Timeout = p.traceTimeout.d
+	}
+	return trace.NewNextTraceEngine(ctx, opts)
+}
+
+// indentBlock 给多行文本的每一行加上前缀（用于把错误信息嵌进缩进输出）。
+func indentBlock(text, prefix string) string {
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	for i, line := range lines {
+		lines[i] = prefix + line
+	}
+	return strings.Join(lines, "\n")
 }
 
 // collectorOverrides 把命令行给出的画像整理成覆盖表（只含非空项）。
@@ -204,6 +269,23 @@ func runScan(env *Env, args []string) error {
 		cfg.Probe.Timeout = p.timeout.d
 	}
 
+	// 第二级引擎：只有用户要求 --trace 时才构造。
+	//
+	// 刻意**不**在引擎不可用时直接报错终止：TCP 测量本身仍然有价值，
+	// 而"用户机器上没装 nexttrace"是最常见的情况之一。
+	// 这里明确告知"跟踪被跳过"（result.TraceSkipped），
+	// 由汇总输出如实展示——既不静默省略，也不让整个扫描白跑。
+	traceNote := ""
+	if p.trace {
+		engine, engineErr := buildScanTraceEngine(ctx, p)
+		if engineErr != nil {
+			cfg.TraceEngine = nil
+			traceNote = engineErr.Error()
+		} else {
+			cfg.TraceEngine = engine
+		}
+	}
+
 	sched, err := scheduler.New(store, cfg)
 	if err != nil {
 		return err
@@ -217,12 +299,16 @@ func runScan(env *Env, args []string) error {
 
 	if !p.quiet {
 		printScanHeader(env.Stderr, res, targets, sched, p, sessionID, resume, local)
+		if traceNote != "" {
+			fmt.Fprintf(env.Stderr, "\ntrace:       UNAVAILABLE\n%s\n", indentBlock(traceNote, "             "))
+			fmt.Fprintf(env.Stderr, "             TCP 测量继续进行；未指定 --binary 时默认从 PATH 查找 nexttrace。\n\n")
+		}
 	}
 
 	printer := newScanProgressPrinter(env.Stderr, p.quiet)
 	sched.SetProgress(printer.onEvent)
 
-	result, err := sched.Run(ctx, targets, version.Version, nil)
+	result, err := sched.Run(ctx, targets, version.Version)
 	if err != nil {
 		if resume && scheduler.LooksLikeResumeError(err) {
 			return fmt.Errorf("%w\n提示：用 --new 开始一次新扫描，或查看 'db stats' 确认会话状态", err)
@@ -300,12 +386,12 @@ func printScanHeader(w io.Writer, res *source.Result, targets []model.Target,
 	fmt.Fprintf(w, "source:     %s (%s, %s)\n", res.Meta.URL, origin, res.Meta.Format)
 	fmt.Fprintf(w, "targets:    %d\n", len(targets))
 	fmt.Fprintf(w, "database:   %s\n", p.db)
-	fmt.Fprintf(w, "collector:  %s  %s\n", shortCollectorID(p.identityPath), local.Profile.ToModel().GroupKey())
+	fmt.Fprintf(w, "collector:  %s  %s\n", shortCollectorID(p.identityPath), describeProfile(local.Profile.ToModel()))
 	fmt.Fprintf(w, "session:    %s (%s)\n", sessionID, mode)
 	fmt.Fprintf(w, "concurrency: %d workers, timeout %s\n", p.workers, probeTimeout(p))
 	if p.trace {
-		fmt.Fprintf(w, "trace:      requested (scan 内的两级跟踪在 Phase 8 接入；\n")
-		fmt.Fprintf(w, "            现在可用 `%s trace --target IP:PORT` 手动跟踪)\n", ClientName)
+		fmt.Fprintf(w, "trace:      enabled (mode %s, %d workers) — 只跟踪 TCP 探测成功的目标\n",
+			p.traceMode, clampTraceWorkers(p.traceWorkers))
 	}
 	if res.Stale {
 		fmt.Fprintf(w, "warning:    using STALE target list\n")
@@ -405,11 +491,40 @@ func printScanSummary(w io.Writer, r *scheduler.Result, p scanParams) {
 	fmt.Fprintf(w, "session progress: %d measured (%d ok, %d failed)\n",
 		r.Progress.Measured, r.Progress.Success, r.Progress.Failed)
 
+	// 第二级：两级测量必须分别汇报，否则"跟踪成功率"会被
+	// 误读成"整条线路的可用率"。
 	if r.TraceSkipped {
-		fmt.Fprintf(w, "\ntrace:       SKIPPED (scan 内的两级跟踪在 Phase 8 接入；\n")
-		fmt.Fprintf(w, "             现在可用 `%s trace --target IP:PORT` 手动跟踪)\n", ClientName)
-	} else if r.TraceAttempted > 0 {
-		fmt.Fprintf(w, "trace:       %d target(s) attempted\n", r.TraceAttempted)
+		fmt.Fprintf(w, "\ntrace:       SKIPPED (no NextTrace engine available;\n")
+		fmt.Fprintf(w, "             TCP measurements above are still valid)\n")
+	} else if r.TraceAttempted > 0 || r.TracePending > 0 {
+		fmt.Fprintf(w, "\n--- Level 2: route trace (only TCP-successful targets) ---\n")
+		fmt.Fprintf(w, "candidates:  %d TCP-successful target(s)\n", r.TracePending+r.TraceAlreadyDone)
+		if r.TraceAlreadyDone > 0 {
+			fmt.Fprintf(w, "already done:%d target(s) traced in this session, skipped\n", r.TraceAlreadyDone)
+		}
+		fmt.Fprintf(w, "to trace:    %d\n", r.TracePending)
+		if r.Trace.Completed > 0 {
+			fmt.Fprintf(w, "Completed:   %d / %d\n", r.Trace.Completed, r.TracePending)
+			fmt.Fprintf(w, "Success:     %d\n", r.Trace.Success)
+			fmt.Fprintf(w, "Failed:      %d\n", r.Trace.Failed)
+			fmt.Fprintf(w, "Success %%:   %.1f%%\n", r.Trace.SuccessRate()*100)
+			if r.Trace.Success > 0 {
+				fmt.Fprintf(w, "Avg hops:    %.1f\n", r.Trace.AverageHops())
+			}
+		}
+		if len(r.Trace.ErrorCounts) > 0 {
+			fmt.Fprintf(w, "\ntrace failures by type:\n")
+			for _, line := range formatTraceErrorCountLines(r.Trace.ErrorCounts, p.verbose) {
+				fmt.Fprintf(w, "  %s\n", line)
+			}
+		}
+		fmt.Fprintf(w, "\nstored:      %d trace(s)\n", r.TraceStored)
+		if r.TraceDuplicates > 0 {
+			fmt.Fprintf(w, "duplicates:  %d trace row(s) already present, skipped\n", r.TraceDuplicates)
+		}
+		if r.TraceStoreFailures > 0 {
+			fmt.Fprintf(w, "warning:     %d trace storage failure(s)\n", r.TraceStoreFailures)
+		}
 	}
 
 	if r.Interrupted {

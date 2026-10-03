@@ -417,6 +417,119 @@ func (s *Store) completedTargetIDs(ctx context.Context, collectorPK int64, sessi
 	return out, nil
 }
 
+// PendingTraceTargets 返回在指定 (采集者, 会话) 下**还没有跟踪结果**且
+// **第一级 TCP 测量成功**的目标。
+//
+// 三个条件缺一不可，各有理由：
+//
+//  1. 还没有跟踪结果 —— 第二级也有断点续测。否则一次被中断的扫描重跑时
+//     会把这些目标的线路重跑一遍，而每次 traceroute 要几十秒。
+//  2. TCP 测量成功 —— 跟踪一个连不上的目标没有意义：路径大概率在
+//     中途断掉或根本不到目标。这是需求第 38 条"两级测量"的实质。
+//  3. 属于本会话 —— 与第一级同样的三元组判据。
+//
+// 返回顺序与传入顺序一致（保持源顺序）。
+func (s *Store) PendingTraceTargets(ctx context.Context, targets []model.Target, collectorPK int64, sessionID string) ([]model.Target, error) {
+	if len(targets) == 0 {
+		return nil, nil
+	}
+	if collectorPK <= 0 {
+		return nil, fmt.Errorf("%w: pending trace query needs a collector", ErrInvalidInput)
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, fmt.Errorf("%w: pending trace query needs a session id", ErrInvalidInput)
+	}
+
+	// 1) 第一级成功的目标集合。
+	succeeded, err := s.successfulTargetIDs(ctx, collectorPK, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2) 已经跟踪过的目标集合。
+	traced, err := s.tracedTargetIDs(ctx, collectorPK, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	pending := make([]model.Target, 0, len(targets))
+	for _, target := range targets {
+		if _, ok := succeeded[target.ID]; !ok {
+			continue
+		}
+		if _, ok := traced[target.ID]; ok {
+			continue
+		}
+		pending = append(pending, target)
+	}
+	return pending, nil
+}
+
+// successfulTargetIDs 返回某会话中 TCP 测量成功的目标集合。
+func (s *Store) successfulTargetIDs(ctx context.Context, collectorPK int64, sessionID string) (map[string]struct{}, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT target_id FROM measurements
+		WHERE collector_id = ? AND session_id = ? AND success = 1
+	`, collectorPK, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("query successful targets: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan successful target: %w", err)
+		}
+		out[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate successful targets: %w", err)
+	}
+	return out, nil
+}
+
+// tracedTargetIDs 返回某会话中已有跟踪结果的目标集合。
+func (s *Store) tracedTargetIDs(ctx context.Context, collectorPK int64, sessionID string) (map[string]struct{}, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT target_id FROM traces
+		WHERE collector_id = ? AND session_id = ?
+	`, collectorPK, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("query traced targets: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan traced target: %w", err)
+		}
+		out[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate traced targets: %w", err)
+	}
+	return out, nil
+}
+
+// CountSuccessfulTargets 返回某会话中 TCP 测量成功的目标数。
+func (s *Store) CountSuccessfulTargets(ctx context.Context, collectorPK int64, sessionID string) (int, error) {
+	if collectorPK <= 0 || strings.TrimSpace(sessionID) == "" {
+		return 0, fmt.Errorf("%w: count needs a collector and a session id", ErrInvalidInput)
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT target_id) FROM measurements
+		WHERE collector_id = ? AND session_id = ? AND success = 1
+	`, collectorPK, sessionID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count successful targets: %w", err)
+	}
+	return n, nil
+}
+
 // SessionProgress 统计某会话的完成情况。
 type SessionProgress struct {
 	// Measured 是该会话已有测量的目标数。

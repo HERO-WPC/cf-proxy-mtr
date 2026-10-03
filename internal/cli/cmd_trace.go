@@ -462,6 +462,12 @@ func formatTraceErrorCounts(counts map[trace.ErrorType]int, verbose bool) []stri
 	return out
 }
 
+// formatTraceErrorCountLines 是 formatTraceErrorCounts 的通用入口，
+// 供 scan 的两级汇总复用（避免两处各写一份排序与截断逻辑）。
+func formatTraceErrorCountLines(counts map[trace.ErrorType]int, verbose bool) []string {
+	return formatTraceErrorCounts(counts, verbose)
+}
+
 // truncateForDisplay 截断过长的展示文本。
 func truncateForDisplay(s string, n int) string {
 	if len(s) <= n {

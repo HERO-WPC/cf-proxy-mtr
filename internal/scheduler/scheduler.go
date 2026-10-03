@@ -23,6 +23,7 @@ import (
 	"github.com/cf-route-tester/cf-route-tester/internal/model"
 	"github.com/cf-route-tester/cf-route-tester/internal/probe"
 	"github.com/cf-route-tester/cf-route-tester/internal/storage"
+	"github.com/cf-route-tester/cf-route-tester/internal/trace"
 )
 
 // 默认参数。
@@ -46,6 +47,16 @@ const (
 
 	// DefaultProgressInterval 是两次进度回调之间的最小间隔。
 	DefaultProgressInterval = 2 * time.Second
+
+	// DefaultTraceBatchSize 是跟踪结果的落库批大小。
+	//
+	// 刻意远小于测量的 500：一次 traceroute 要几秒到几十秒，
+	// 攒够 500 条可能要等几小时。而每条跟踪结果都很珍贵
+	// （代价高），因此宁可频繁写。
+	DefaultTraceBatchSize = 20
+
+	// DefaultTraceFlushInterval 是跟踪结果落库的时间上限。
+	DefaultTraceFlushInterval = 5 * time.Second
 )
 
 // Phase 表示当前处于哪一级测量。
@@ -75,12 +86,29 @@ type Config struct {
 	// Resume 为真表示继续一个已有会话，只测量尚未完成的目标。
 	Resume bool
 
-	// Trace 为真时，在探测成功后对成功目标执行线路跟踪。
+	// Trace 为真时，在探测成功后对**探测成功**的目标执行线路跟踪。
 	//
-	// 注意：Phase 7 才会实现 NextTrace 引擎。这里只建立顺序与
-	// 接口位置，TraceFn 为空时该阶段会被跳过并在结果中如实标记，
-	// 绝不会假装跟踪过。
+	// 两级测量的实质就在这里（需求第 38 条）：连 TCP 都不通的目标
+	// 不值得花几十秒去跑 traceroute——路径大概率中途就断了。
+	//
+	// 引擎为 nil 时该阶段会被跳过并在结果中如实标记（TraceSkipped），
+	// 绝不假装跟踪过。
 	Trace bool
+
+	// TraceEngine 是线路跟踪引擎（例如 *trace.NextTraceEngine）。
+	//
+	// 用接口而不是具体类型：调度器只关心"跟踪一个目标并给我结果"，
+	// 这样测试可以注入假引擎，而 CLI 不必把引擎的内部细节传进来。
+	TraceEngine TraceEngine
+
+	// TraceBatchSize 是跟踪结果的落库批大小（<=0 时使用 DefaultTraceBatchSize）。
+	//
+	// 比测量的批小得多：跟踪很慢（每次几秒到几十秒），
+	// 攒 500 条要等很久，而每条都很珍贵。
+	TraceBatchSize int
+
+	// TraceFlushInterval 是跟踪结果落库的时间上限。
+	TraceFlushInterval time.Duration
 
 	// BatchSize 是落库批大小（<=0 时使用 DefaultBatchSize）。
 	BatchSize int
@@ -125,12 +153,29 @@ type Result struct {
 	// StoreFailures 是落库失败的批次数。
 	StoreFailures int
 
-	// TraceAttempted 是尝试跟踪的目标数（Phase 7 之前恒为 0）。
+	// TracePending 是第二级需要跟踪的目标数
+	// （探测成功、且本会话尚未跟踪过）。
+	TracePending int
+
+	// TraceAlreadyDone 是续测时被跳过的"已跟踪"目标数。
+	TraceAlreadyDone int
+
+	// Trace 是跟踪阶段统计。
+	Trace trace.Stats
+
+	// TraceStored / TraceDuplicates 是落库的跟踪行数与幂等跳过数。
+	TraceStored     int
+	TraceDuplicates int
+
+	// TraceStoreFailures 是跟踪结果落库失败的次数。
+	TraceStoreFailures int
+
+	// TraceAttempted 是尝试跟踪的目标数。
 	TraceAttempted int
 
-	// TraceSkipped 表示"用户要求跟踪但当前无法跟踪"。
+	// TraceSkipped 表示"用户要求跟踪但当前无法跟踪"（引擎为 nil）。
 	//
-	// 这个字段存在的意义是**不撒谎**：--trace 在 Phase 7 之前
+	// 这个字段存在的意义是**不撒谎**：--trace 在没有引擎时
 	// 无法生效，必须明确告知，而不是静默跳过让用户以为做了。
 	TraceSkipped bool
 
@@ -169,11 +214,19 @@ type ProgressEvent struct {
 // 同一个 goroutine 里被调用）。
 type ProgressFunc func(ProgressEvent)
 
-// TraceFunc 执行一次线路跟踪并写入数据库。
+// TraceEngine 是线路跟踪引擎。
 //
-// Phase 7 会提供真正的实现；在那之前为 nil，scheduler 会跳过该阶段
-// 并把 TraceSkipped 置为真。
-type TraceFunc func(ctx context.Context, target model.Target) error
+// 刻意在 scheduler 自己的包里定义（而不是直接用 trace.TraceEngine）：
+// 调度器只需要"跟踪一个目标并返回结果"这一个能力，
+// 这样就**不会**把 trace 包的全部表面积变成调度器的依赖，
+// 测试里注入一个三行的假引擎即可。
+//
+// 形状与 trace.TraceEngine 一致，因此 *trace.NextTraceEngine
+// 可以直接传进来。
+type TraceEngine interface {
+	Trace(ctx context.Context, target model.Target) (*trace.TraceResult, error)
+	Name() string
+}
 
 // Scheduler 编排一次扫描。
 type Scheduler struct {
@@ -205,6 +258,12 @@ func New(store *storage.Store, cfg Config) (*Scheduler, error) {
 	if cfg.ProgressInterval <= 0 {
 		cfg.ProgressInterval = DefaultProgressInterval
 	}
+	if cfg.TraceBatchSize <= 0 {
+		cfg.TraceBatchSize = DefaultTraceBatchSize
+	}
+	if cfg.TraceFlushInterval <= 0 {
+		cfg.TraceFlushInterval = DefaultTraceFlushInterval
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -230,7 +289,7 @@ func (s *Scheduler) SetProgress(fn ProgressFunc) { s.progress = fn }
 //
 // 返回 error 的情形限于**全局错误**：会话不可用、数据库不可写。
 // 单个目标测量失败只是结果，不会中断扫描。
-func (s *Scheduler) Run(ctx context.Context, targets []model.Target, clientVersion string, traceFn TraceFunc) (*Result, error) {
+func (s *Scheduler) Run(ctx context.Context, targets []model.Target, clientVersion string) (*Result, error) {
 	result := &Result{
 		TargetsTotal: len(targets),
 		StartedAt:    s.cfg.Now().UTC(),
@@ -260,10 +319,29 @@ func (s *Scheduler) Run(ctx context.Context, targets []model.Target, clientVersi
 	}
 	result.TargetsPending = len(pending)
 
-	// 续测时可能所有目标都已经测过：那就直接结束会话，
+	// 续测时可能所有目标都已经测过：那就**什么都不做**，
 	// 而不是假装"扫了一遍"。
+	//
+	// 这里刻意不复用 finish()：finish 会把会话标记为已结束，
+	// 而"没有待测目标"的常见原因是**上一次已经把这个会话跑完了**。
+	// 对已结束的会话再调 finish 虽然无害，但会掩盖一个真实场景：
+	// 用户对着一个已完成的会话反复执行 --resume，应当稳定地
+	// 得到"没有要测的"这一结论，而不是第一次成功、第二次报错
+	// （会话已结束）。
 	if len(pending) == 0 {
-		return s.finish(ctx, result)
+		return s.reportNothingToDo(ctx, result)
+	}
+
+	// 走到这里说明确实还有目标要测。如果会话却已被标记结束，
+	// 那是一个真实的数据问题（会话被提前结束），必须报错而不是
+	// 往一个"已完成"的会话里继续追加数据。
+	if resumed {
+		if state, err := s.store.LoadSession(ctx, sessionID); err == nil && state.Finished() {
+			return nil, fmt.Errorf(
+				"session %q is already finished but %d target(s) are still unmeasured; "+
+					"the session was closed prematurely — start a new scan with --new",
+				sessionID, len(pending))
+		}
 	}
 
 	// -----------------------------------------------------------------
@@ -281,13 +359,13 @@ func (s *Scheduler) Run(ctx context.Context, targets []model.Target, clientVersi
 	}
 
 	// -----------------------------------------------------------------
-	// 4) Level 2：Trace（Phase 7 之前无法执行）
+	// 4) Level 2：只对**探测成功**的目标做线路跟踪
 	// -----------------------------------------------------------------
 	if s.cfg.Trace {
-		if traceFn == nil {
+		if s.cfg.TraceEngine == nil {
 			// 明确标记"要求了但做不到"，绝不静默跳过。
 			result.TraceSkipped = true
-		} else if err := s.tracePhase(ctx, pending, traceFn, result); err != nil {
+		} else if err := s.tracePhase(ctx, pending, sessionID, result); err != nil {
 			return nil, err
 		}
 	}
@@ -319,9 +397,12 @@ func (s *Scheduler) prepareSession(ctx context.Context, targetCount int, clientV
 			// 会话属于另一个采集者：续测它会把两个节点的数据混在一起。
 			return "", false, fmt.Errorf("session %q belongs to another collector", s.cfg.SessionID)
 		}
-		if state.Finished() {
-			return "", false, fmt.Errorf("session %q is already finished; start a new scan instead", s.cfg.SessionID)
-		}
+		// 会话已结束时**不在这里报错**，而是先看还剩多少目标没测：
+		//   - 一个已完成的会话被再次 --resume，是用户的正常操作
+		//     （"我上次是不是跑完了？"），应当稳定地回答"没有要测的"，
+		//     而不是报错；
+		//   - 但如果它已结束却还有未测目标，那才是真问题
+		//     （会话被提前标记结束），由 Run 在算出待测列表后报错。
 		return state.ID, true, nil
 	}
 
@@ -406,25 +487,155 @@ func (s *Scheduler) flush(ctx context.Context, batch *[]storage.Measurement, res
 	_ = s.store.UpdateSessionProgress(ctx, sessionID, completed)
 }
 
-// tracePhase 执行线路跟踪。
-func (s *Scheduler) tracePhase(ctx context.Context, targets []model.Target, traceFn TraceFunc, result *Result) error {
-	var completed int
-	for _, target := range targets {
-		if ctx.Err() != nil {
-			return nil
-		}
-		// 注意：这里对**所有待测目标**尝试跟踪，是否真的跟踪
-		// 由 traceFn 决定（Phase 8 会只跟踪 TCP 成功的目标）。
-		if err := traceFn(ctx, target); err != nil {
-			// 单个目标的跟踪失败不能中断整体。
-			result.StoreFailures++
-		}
-		completed++
-		result.TraceAttempted++
-		s.emitProgress(PhaseTrace, completed, len(targets), 0, 0, false)
+// tracePhase 执行第二级：对**探测成功**的目标做线路跟踪并落库。
+//
+// 三个刻意的决定：
+//
+//  1. **只跟踪 TCP 成功的目标**（需求第 38 条）。连不上的目标去跑
+//     traceroute 是浪费：路径大概率中途就断了，而且每次要几十秒。
+//     判定直接查数据库（PendingTraceTargets），而不是靠内存里记的
+//     success 列表——这样续测时同样正确。
+//  2. **第二级也有断点续测**：已经跟踪过的目标被跳过。否则中断重跑
+//     要把线路全部重跑一遍。
+//  3. **一条目标一个事务**（按批）：跟踪很慢且代价高，
+//     攒够一批再写会让中断丢掉大量已完成的工作。因此批很小
+//     （默认 20）且有 5 秒时间上限。
+func (s *Scheduler) tracePhase(ctx context.Context, pending []model.Target, sessionID string, result *Result) error {
+	// 只保留"探测成功且尚未跟踪"的目标。
+	candidates, err := s.store.PendingTraceTargets(ctx, pending, s.cfg.CollectorPK, sessionID)
+	if err != nil {
+		return err
 	}
-	s.emitProgress(PhaseTrace, completed, len(targets), 0, 0, true)
+
+	// 如实汇报"第一级成功了多少、其中已经跟踪过多少"。
+	successfulCount, err := s.store.CountSuccessfulTargets(ctx, s.cfg.CollectorPK, sessionID)
+	if err != nil {
+		return err
+	}
+	result.TraceAlreadyDone = successfulCount - len(candidates)
+	result.TracePending = len(candidates)
+
+	if len(candidates) == 0 {
+		s.emitProgress(PhaseTrace, 0, 0, 0, 0, true)
+		return nil
+	}
+
+	batch := make([]storage.Trace, 0, s.cfg.TraceBatchSize)
+	var (
+		completed int
+		success   int
+		failed    int
+		lastFlush = s.cfg.Now()
+	)
+
+	for _, target := range candidates {
+		if ctx.Err() != nil {
+			break
+		}
+
+		traceResult, traceErr := s.cfg.TraceEngine.Trace(ctx, target)
+		if traceErr != nil {
+			// 引擎层面的失败（不是"这个目标跟踪失败"）。
+			// 计入统计并继续下一个目标：一个目标的问题不该终止整批。
+			result.TraceStoreFailures++
+			completed++
+			failed++
+			result.Trace.Add(&trace.TraceResult{
+				TargetID:     target.String(),
+				IP:           target.IP,
+				Port:         target.Port,
+				Engine:       s.cfg.TraceEngine.Name(),
+				ErrorType:    trace.ErrorTypeOther,
+				ErrorMessage: traceErr.Error(),
+				Timestamp:    s.cfg.Now().UTC(),
+			})
+			result.TraceAttempted++
+			s.emitProgress(PhaseTrace, completed, len(candidates), success, failed, false)
+			continue
+		}
+
+		completed++
+		if traceResult.Success {
+			success++
+		} else {
+			failed++
+		}
+		result.Trace.Add(traceResult)
+		result.TraceAttempted++
+
+		batch = append(batch, storage.NewTrace(s.cfg.CollectorPK, sessionID, traceResult))
+
+		if len(batch) >= s.cfg.TraceBatchSize || s.cfg.Now().Sub(lastFlush) >= s.cfg.TraceFlushInterval {
+			s.flushTraces(context.WithoutCancel(ctx), &batch, result)
+			lastFlush = s.cfg.Now()
+		}
+
+		s.emitProgress(PhaseTrace, completed, len(candidates), success, failed, false)
+	}
+
+	// 最后一批同样用未被取消的 context。
+	s.flushTraces(context.WithoutCancel(ctx), &batch, result)
+	s.emitProgress(PhaseTrace, completed, len(candidates), success, failed, true)
+
 	return nil
+}
+
+// flushTraces 写入当前跟踪批次并清空缓冲。
+func (s *Scheduler) flushTraces(ctx context.Context, batch *[]storage.Trace, result *Result) {
+	if len(*batch) == 0 {
+		return
+	}
+
+	saved, skipped, err := s.store.SaveTraces(ctx, *batch)
+	result.TraceStored += saved
+	result.TraceDuplicates += skipped
+	if err != nil {
+		// 与测量一致：落库失败不让整次扫描崩掉，计数并如实汇报。
+		result.TraceStoreFailures++
+	}
+	*batch = (*batch)[:0]
+}
+
+// reportNothingToDo 在"没有待测目标"时收尾。
+//
+// 语义刻意做成**幂等**的：
+//
+//   - 会话还开着（例如上次被 Ctrl+C 打断，但实际数据已经齐了）
+//     -> 标记为已结束，这样会话状态与数据事实一致；
+//   - 会话已经结束（用户对同一个已完成的会话再次 --resume）
+//     -> 什么都不做，稳定地报告"没有要测的"，而不是报错。
+//
+// 这两种情况对用户是同一个问题（"还有要测的吗？"），
+// 因此不该表现为"第一次成功、第二次报错"。
+// 只在数据库不可读时返回错误。
+func (s *Scheduler) reportNothingToDo(ctx context.Context, result *Result) (*Result, error) {
+	// 数据库操作一律用未被取消的 context：被 Ctrl+C 时正是
+	// 最需要把会话状态写对的时刻。
+	pctx := context.WithoutCancel(ctx)
+
+	progress, err := s.store.LoadSessionProgress(pctx, s.cfg.CollectorPK, result.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	result.Progress = progress
+
+	state, err := s.store.LoadSession(pctx, result.SessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	if state.Finished() {
+		// 已经是结束状态：不重复写，也不报错。
+		result.SessionFinished = true
+	} else {
+		if err := s.store.FinishSession(pctx, result.SessionID, int(progress.Measured), s.cfg.Now().UTC()); err != nil {
+			return nil, err
+		}
+		result.SessionFinished = true
+	}
+
+	result.FinishedAt = s.cfg.Now().UTC()
+	return result, nil
 }
 
 // finish 结束会话并汇总结果。

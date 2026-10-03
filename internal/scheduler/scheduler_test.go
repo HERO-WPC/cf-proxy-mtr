@@ -13,6 +13,7 @@ import (
 	"github.com/cf-route-tester/cf-route-tester/internal/model"
 	"github.com/cf-route-tester/cf-route-tester/internal/probe"
 	"github.com/cf-route-tester/cf-route-tester/internal/storage"
+	"github.com/cf-route-tester/cf-route-tester/internal/trace"
 )
 
 // ---------------------------------------------------------------------------
@@ -137,7 +138,7 @@ func TestScanProbesAndStoresAllTargets(t *testing.T) {
 	var events []ProgressEvent
 	sched.SetProgress(func(ev ProgressEvent) { events = append(events, ev) })
 
-	result, err := sched.Run(ctx, targets, "0.1.0", nil)
+	result, err := sched.Run(ctx, targets, "0.1.0")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -259,7 +260,7 @@ func TestScanResumeSkipsAlreadyMeasuredTargets(t *testing.T) {
 	}
 
 	sched := newScheduler(t, store, pk, Config{SessionID: sessionID, Resume: true})
-	result, err := sched.Run(ctx, targets, "0.1.0", nil)
+	result, err := sched.Run(ctx, targets, "0.1.0")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -343,7 +344,7 @@ func TestScanResumeWhenEverythingIsDone(t *testing.T) {
 	}
 
 	sched := newScheduler(t, store, pk, Config{SessionID: sessionID, Resume: true})
-	result, err := sched.Run(ctx, targets, "0.1.0", nil)
+	result, err := sched.Run(ctx, targets, "0.1.0")
 	if err != nil {
 		t.Fatalf("resume Run: %v", err)
 	}
@@ -382,7 +383,7 @@ func TestScanResumeErrorsAreActionable(t *testing.T) {
 
 	t.Run("missing session", func(t *testing.T) {
 		sched := newScheduler(t, store, pk, Config{SessionID: "20260101T000000Z-00000000", Resume: true})
-		_, err := sched.Run(ctx, targets, "0.1.0", nil)
+		_, err := sched.Run(ctx, targets, "0.1.0")
 		if err == nil {
 			t.Fatal("Run succeeded for a missing session")
 		}
@@ -393,25 +394,37 @@ func TestScanResumeErrorsAreActionable(t *testing.T) {
 
 	t.Run("resume without session id", func(t *testing.T) {
 		sched := newScheduler(t, store, pk, Config{Resume: true})
-		if _, err := sched.Run(ctx, targets, "0.1.0", nil); err == nil {
+		if _, err := sched.Run(ctx, targets, "0.1.0"); err == nil {
 			t.Fatal("Run succeeded without a session id")
 		}
 	})
 
-	t.Run("finished session", func(t *testing.T) {
+	t.Run("session closed while targets remain", func(t *testing.T) {
+		// 一个"被提前标记结束、但还有目标没测"的会话是真问题：
+		// 往一个已完成会话里继续追加数据会让会话状态与数据事实矛盾。
+		//
+		// 注意与另一种情况的区别：对一个**已经全部测完**的会话再次
+		// --resume 不是错误（那是用户的正常操作，见
+		// TestScanResumeWhenEverythingIsDone）。
 		sessionID := newSessionID(t)
-		sched := newScheduler(t, store, pk, Config{SessionID: sessionID})
-		if _, err := sched.Run(ctx, targets, "0.1.0", nil); err != nil {
-			t.Fatalf("initial Run: %v", err)
+		if err := store.DefineSession(ctx, sessionID, pk, len(targets), "0.1.0", time.Now().UTC()); err != nil {
+			t.Fatalf("DefineSession: %v", err)
+		}
+		// 一个目标都没测，却把会话关掉。
+		if err := store.FinishSession(ctx, sessionID, 0, time.Now().UTC()); err != nil {
+			t.Fatalf("FinishSession: %v", err)
 		}
 
 		resume := newScheduler(t, store, pk, Config{SessionID: sessionID, Resume: true})
-		_, err := resume.Run(ctx, targets, "0.1.0", nil)
+		_, err := resume.Run(ctx, targets, "0.1.0")
 		if err == nil {
-			t.Fatal("Run succeeded for a finished session")
+			t.Fatal("Run succeeded for a session that was closed while targets remained")
 		}
 		if !strings.Contains(err.Error(), "already finished") {
 			t.Errorf("error = %v, want 'already finished'", err)
+		}
+		if !strings.Contains(err.Error(), "prematurely") {
+			t.Errorf("error = %v, want it to explain that the session was closed early", err)
 		}
 	})
 
@@ -429,7 +442,7 @@ func TestScanResumeErrorsAreActionable(t *testing.T) {
 		// 否则两个节点的数据会混进同一次会话，
 		// "从哪条线路测的"这个维度就毁了。
 		mine := newScheduler(t, store, pk, Config{SessionID: sessionID, Resume: true})
-		_, err := mine.Run(ctx, targets, "0.1.0", nil)
+		_, err := mine.Run(ctx, targets, "0.1.0")
 		if err == nil {
 			t.Fatal("Run succeeded for another collector's session")
 		}
@@ -524,7 +537,7 @@ func TestScanDifferentSessionsDoNotBlockEachOther(t *testing.T) {
 	}
 
 	first := newScheduler(t, store, pk, Config{SessionID: newSessionID(t)})
-	r1, err := first.Run(ctx, targets, "0.1.0", nil)
+	r1, err := first.Run(ctx, targets, "0.1.0")
 	if err != nil {
 		t.Fatalf("first Run: %v", err)
 	}
@@ -534,7 +547,7 @@ func TestScanDifferentSessionsDoNotBlockEachOther(t *testing.T) {
 
 	// 第二次扫描：全新会话，必须仍然测全部目标。
 	second := newScheduler(t, store, pk, Config{SessionID: newSessionID(t)})
-	r2, err := second.Run(ctx, targets, "0.1.0", nil)
+	r2, err := second.Run(ctx, targets, "0.1.0")
 	if err != nil {
 		t.Fatalf("second Run: %v", err)
 	}
@@ -608,7 +621,7 @@ func TestScanFlushesOnTimeNotJustOnBatchSize(t *testing.T) {
 	// 在扫描进行到一半时（阻塞 dialer 之后）检查库里的行数。
 	//
 	// 做法：先跑一次完整扫描，确认结果都被写入（说明 flush 生效）。
-	result, err := sched.Run(ctx, targets, "0.1.0", nil)
+	result, err := sched.Run(ctx, targets, "0.1.0")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -650,7 +663,7 @@ func TestScanFlushesOnTimeNotJustOnBatchSize(t *testing.T) {
 	sched2 := newScheduler(t, store, pk, cfg2)
 
 	small := targets[:20]
-	res2, err := sched2.Run(ctx, small, "0.1.0", nil)
+	res2, err := sched2.Run(ctx, small, "0.1.0")
 	if err != nil {
 		t.Fatalf("second Run: %v", err)
 	}
@@ -724,7 +737,7 @@ func TestScanInterruptedLeavesSessionOpen(t *testing.T) {
 		cancel()
 	}()
 
-	result, err := sched.Run(ctx, targets, "0.1.0", nil)
+	result, err := sched.Run(ctx, targets, "0.1.0")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -759,7 +772,7 @@ func TestScanReportsStorageFailures(t *testing.T) {
 
 	sched := newScheduler(t, store, pk, Config{SessionID: newSessionID(t), BatchSize: 1})
 
-	result, err := sched.Run(ctx, targets, "0.1.0", nil)
+	result, err := sched.Run(ctx, targets, "0.1.0")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -776,10 +789,342 @@ func TestScanReportsStorageFailures(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// 两级测量（Level 1 TCP Probe -> Level 2 route trace）
+// ---------------------------------------------------------------------------
+
+// mustTargetOf 构造一个测试目标。
+func mustTargetOf(t *testing.T, ip string, port int) model.Target {
+	t.Helper()
+	target, err := model.NewTargetFromStrings(ip, port)
+	if err != nil {
+		t.Fatalf("NewTargetFromStrings(%q, %d): %v", ip, port, err)
+	}
+	return target
+}
+
+// fakeTraceEngine 是一个可编程的跟踪引擎。
+//
+// 用假引擎而不是真的调 nexttrace：这一层要验证的是**编排规则**
+// （只跟踪成功目标、续测跳过、失败不中断、目录落库），
+// 真引擎的行为已经在 internal/trace 里用自己的测试与真实输出夹具覆盖了。
+type fakeTraceEngine struct {
+	calls  []string
+	result func(target model.Target) *trace.TraceResult
+	err    error
+	delay  time.Duration
+}
+
+func (f *fakeTraceEngine) Name() string { return "fake-nexttrace" }
+
+func (f *fakeTraceEngine) Trace(ctx context.Context, target model.Target) (*trace.TraceResult, error) {
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	f.calls = append(f.calls, target.ID)
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.result != nil {
+		return f.result(target), nil
+	}
+	return &trace.TraceResult{
+		TargetID:      target.String(),
+		IP:            target.IP,
+		Port:          target.Port,
+		Engine:        f.Name(),
+		EngineVersion: "9.9.9",
+		Mode:          trace.ModeTCP,
+		Protocol:      "tcp",
+		Success:       true,
+		DurationMS:    120,
+		Hops: []trace.Hop{
+			{TTL: 1, IP: "192.168.1.1", RTTMS: []float64{1.2}},
+			{TTL: 2, IP: target.IP, RTTMS: []float64{8.4}},
+		},
+		Timestamp: time.Now().UTC(),
+	}, nil
+}
+
+// recordSuccess 直接往数据库里写一条"探测成功"的事实。
+//
+// 为什么不跑一次真实探测：我们需要**精确控制**哪些目标成功、
+// 哪些失败，才能验证"只跟踪成功目标"这条规则。
+// 靠真实扫描来碰运气地得到成功/失败组合是不可靠的。
+func recordSuccess(t *testing.T, store *storage.Store, collectorPK int64, sessionID string, target model.Target) {
+	t.Helper()
+	upsertTarget(t, store, target)
+	_, _, err := store.SaveMeasurements(context.Background(), []storage.Measurement{
+		storage.NewMeasurement(collectorPK, sessionID, probe.ProbeResult{
+			TargetID:  target.String(),
+			IP:        target.IP,
+			Port:      target.Port,
+			Success:   true,
+			LatencyMS: 12.5,
+			Timestamp: time.Now().UTC(),
+		}),
+	})
+	if err != nil {
+		t.Fatalf("SaveMeasurements (success): %v", err)
+	}
+}
+
+// upsertTarget 先写目标行：测量有外键指向 targets，
+// 直接写测量会得到 FOREIGN KEY constraint failed。
+func upsertTarget(t *testing.T, store *storage.Store, target model.Target) {
+	t.Helper()
+	if _, err := store.UpsertTargets(context.Background(), []model.Target{target}, time.Now().UTC()); err != nil {
+		t.Fatalf("UpsertTargets(%s): %v", target.ID, err)
+	}
+}
+
+// recordFailure 直接往数据库里写一条"探测失败"的事实。
+func recordFailure(t *testing.T, store *storage.Store, collectorPK int64, sessionID string, target model.Target) {
+	t.Helper()
+	upsertTarget(t, store, target)
+	_, _, err := store.SaveMeasurements(context.Background(), []storage.Measurement{
+		storage.NewMeasurement(collectorPK, sessionID, probe.ProbeResult{
+			TargetID:  target.String(),
+			IP:        target.IP,
+			Port:      target.Port,
+			Success:   false,
+			ErrorType: probe.ErrorTypeTimeout,
+			Timestamp: time.Now().UTC(),
+		}),
+	})
+	if err != nil {
+		t.Fatalf("SaveMeasurements (failure): %v", err)
+	}
+}
+
+// defineSession 建立一个会话（第二级查询需要它存在）。
+func defineSession(t *testing.T, store *storage.Store, collectorPK int64, sessionID string, targetCount int) {
+	t.Helper()
+	if err := store.DefineSession(context.Background(), sessionID, collectorPK, targetCount, "0.1.0", time.Now().UTC()); err != nil {
+		t.Fatalf("DefineSession: %v", err)
+	}
+}
+
+// TestTracePhaseOnlyTracesProbeSuccesses 是 Phase 8 的核心测试。
+//
+// 两级测量的实质：连 TCP 都不通的目标不值得花几十秒跑 traceroute。
+func TestTracePhaseOnlyTracesProbeSuccesses(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	pk := collector(t, store, "c-two-level")
+	sessionID := newSessionID(t)
+
+	// 三个目标：两个探测成功，一个探测失败。
+	success1 := mustTargetOf(t, "10.1.1.1", 443)
+	success2 := mustTargetOf(t, "10.1.1.2", 2053)
+	failure := mustTargetOf(t, "10.1.1.3", 8443)
+
+	defineSession(t, store, pk, sessionID, 3)
+	recordSuccess(t, store, pk, sessionID, success1)
+	recordSuccess(t, store, pk, sessionID, success2)
+	recordFailure(t, store, pk, sessionID, failure)
+
+	engine := &fakeTraceEngine{}
+	sched := newScheduler(t, store, pk, Config{
+		SessionID:   sessionID,
+		Trace:       true,
+		TraceEngine: engine,
+	})
+
+	result := &Result{}
+	if err := sched.tracePhase(ctx, []model.Target{success1, success2, failure}, sessionID, result); err != nil {
+		t.Fatalf("tracePhase: %v", err)
+	}
+
+	// 只应该跟踪那两个成功的目标。
+	if result.TracePending != 2 {
+		t.Errorf("TracePending = %d, want 2 (only TCP-successful targets)", result.TracePending)
+	}
+	if len(engine.calls) != 2 {
+		t.Fatalf("engine called %d times, want 2 (calls=%v)", len(engine.calls), engine.calls)
+	}
+	for _, id := range engine.calls {
+		if id == failure.ID {
+			t.Errorf("engine was called for the FAILED target %s; it must be skipped", id)
+		}
+	}
+	if result.TraceAttempted != 2 || result.TraceStored != 2 {
+		t.Errorf("TraceAttempted = %d, TraceStored = %d, want 2 attempted and 2 stored",
+			result.TraceAttempted, result.TraceStored)
+	}
+	if result.TraceStored != 2 {
+		t.Errorf("TraceStored = %d, want 2", result.TraceStored)
+	}
+	if result.Trace.Success != 2 {
+		t.Errorf("Trace.Success = %d, want 2", result.Trace.Success)
+	}
+	if result.Trace.AverageHops() != 2 {
+		t.Errorf("AverageHops() = %v, want 2", result.Trace.AverageHops())
+	}
+}
+
+// TestTracePhaseResumesWithoutRetracing 验证第二级也有断点续测。
+//
+// 一次 traceroute 要几十秒，中断重跑时把这些目标重跑一遍代价很高。
+func TestTracePhaseResumesWithoutRetracing(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	pk := collector(t, store, "c-trace-resume")
+	sessionID := newSessionID(t)
+
+	targets := []model.Target{
+		mustTargetOf(t, "10.2.2.1", 443),
+		mustTargetOf(t, "10.2.2.2", 443),
+		mustTargetOf(t, "10.2.2.3", 443),
+	}
+
+	defineSession(t, store, pk, sessionID, len(targets))
+	for _, target := range targets {
+		recordSuccess(t, store, pk, sessionID, target)
+	}
+
+	// 第一次：全部跟踪。
+	first := &fakeTraceEngine{}
+	sched := newScheduler(t, store, pk, Config{SessionID: sessionID, Trace: true, TraceEngine: first})
+	result1 := &Result{}
+	if err := sched.tracePhase(ctx, targets, sessionID, result1); err != nil {
+		t.Fatalf("first tracePhase: %v", err)
+	}
+	if len(first.calls) != 3 || result1.TraceStored != 3 {
+		t.Fatalf("first pass: calls=%d stored=%d, want 3/3", len(first.calls), result1.TraceStored)
+	}
+
+	// 第二次：同一会话重跑，应该全部跳过。
+	second := &fakeTraceEngine{}
+	sched2 := newScheduler(t, store, pk, Config{SessionID: sessionID, Trace: true, TraceEngine: second})
+	result2 := &Result{}
+	if err := sched2.tracePhase(ctx, targets, sessionID, result2); err != nil {
+		t.Fatalf("second tracePhase: %v", err)
+	}
+
+	if len(second.calls) != 0 {
+		t.Errorf("engine called %d times on resume, want 0 (already traced)", len(second.calls))
+	}
+	if result2.TracePending != 0 {
+		t.Errorf("TracePending = %d, want 0", result2.TracePending)
+	}
+	if result2.TraceAlreadyDone != 3 {
+		t.Errorf("TraceAlreadyDone = %d, want 3", result2.TraceAlreadyDone)
+	}
+	if result2.TraceStored != 0 {
+		t.Errorf("TraceStored = %d, want 0", result2.TraceStored)
+	}
+}
+
+// TestTracePhaseEngineErrorDoesNotAbort 验证引擎层面的失败不中断整批。
+func TestTracePhaseEngineErrorDoesNotAbort(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	pk := collector(t, store, "c-trace-engine-err")
+	sessionID := newSessionID(t)
+
+	targets := []model.Target{
+		mustTargetOf(t, "10.3.3.1", 443),
+		mustTargetOf(t, "10.3.3.2", 443),
+	}
+	defineSession(t, store, pk, sessionID, len(targets))
+	for _, target := range targets {
+		recordSuccess(t, store, pk, sessionID, target)
+	}
+
+	engine := &fakeTraceEngine{err: errors.New("engine exploded")}
+	sched := newScheduler(t, store, pk, Config{SessionID: sessionID, Trace: true, TraceEngine: engine})
+
+	result := &Result{}
+	if err := sched.tracePhase(ctx, targets, sessionID, result); err != nil {
+		t.Fatalf("tracePhase returned error: %v (engine failures must not abort)", err)
+	}
+
+	// 每个目标都尝试过，失败被如实计入。
+	if result.TraceAttempted != 2 {
+		t.Errorf("TraceAttempted = %d, want 2", result.TraceAttempted)
+	}
+	if result.Trace.Failed != 2 {
+		t.Errorf("Trace.Failed = %d, want 2", result.Trace.Failed)
+	}
+	if result.Trace.Success != 0 {
+		t.Errorf("Trace.Success = %d, want 0", result.Trace.Success)
+	}
+	if result.TraceStoreFailures != 2 {
+		t.Errorf("TraceStoreFailures = %d, want 2 (engine errors are counted)", result.TraceStoreFailures)
+	}
+	if result.TraceStored != 0 {
+		t.Errorf("TraceStored = %d, want 0 (nothing successful to store)", result.TraceStored)
+	}
+}
+
+// TestTracePhaseStoresFailuresToo 验证跟踪失败的结果也会入库。
+//
+// 与第一级同理："这个目标的路径断在第 5 跳"是线路信息，
+// 不该因为 success=false 就被丢掉。
+func TestTracePhaseStoresFailuresToo(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	pk := collector(t, store, "c-trace-store-fail")
+	sessionID := newSessionID(t)
+
+	target := mustTargetOf(t, "10.4.4.1", 443)
+	defineSession(t, store, pk, sessionID, 1)
+	recordSuccess(t, store, pk, sessionID, target)
+
+	engine := &fakeTraceEngine{
+		result: func(target model.Target) *trace.TraceResult {
+			return &trace.TraceResult{
+				TargetID:     target.String(),
+				IP:           target.IP,
+				Port:         target.Port,
+				Engine:       "fake-nexttrace",
+				Mode:         trace.ModeTCP,
+				Success:      false,
+				ErrorType:    trace.ErrorTypeExitCode,
+				ErrorMessage: "process exited with code 1",
+				Timestamp:    time.Now().UTC(),
+			}
+		},
+	}
+
+	sched := newScheduler(t, store, pk, Config{SessionID: sessionID, Trace: true, TraceEngine: engine})
+	result := &Result{}
+	if err := sched.tracePhase(ctx, []model.Target{target}, sessionID, result); err != nil {
+		t.Fatalf("tracePhase: %v", err)
+	}
+
+	if result.TraceStored != 1 {
+		t.Errorf("TraceStored = %d, want 1 (failed traces are also route information)", result.TraceStored)
+	}
+	if result.Trace.Failed != 1 {
+		t.Errorf("Trace.Failed = %d, want 1", result.Trace.Failed)
+	}
+
+	// 数据库里确实有一行失败记录，且带有分类。
+	views, err := store.QueryTraces(ctx, target.ID, 10)
+	if err != nil {
+		t.Fatalf("QueryTraces: %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("stored traces = %d, want 1", len(views))
+	}
+	if views[0].Success {
+		t.Error("stored trace reports success, want failure")
+	}
+	if views[0].ErrorType != string(trace.ErrorTypeExitCode) {
+		t.Errorf("stored error type = %q, want %q", views[0].ErrorType, trace.ErrorTypeExitCode)
+	}
+}
+
 // TestScanTraceWithoutEngineIsReportedNotFaked 是一条"不撒谎"的测试。
 //
-// --trace 在 Phase 7 之前无法执行。此时必须把 TraceSkipped 置为真，
-// 让用户明确知道"跟踪没做"，而不是静默跳过、让汇总看起来像做了。
+// 没有引擎时必须把 TraceSkipped 置为真，让用户明确知道"跟踪没做"，
+// 而不是静默跳过、让汇总看起来像做了。
 func TestScanTraceWithoutEngineIsReportedNotFaked(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
@@ -790,7 +1135,7 @@ func TestScanTraceWithoutEngineIsReportedNotFaked(t *testing.T) {
 	}
 
 	sched := newScheduler(t, store, pk, Config{SessionID: newSessionID(t), Trace: true})
-	result, err := sched.Run(ctx, targets, "0.1.0", nil)
+	result, err := sched.Run(ctx, targets, "0.1.0")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -801,68 +1146,180 @@ func TestScanTraceWithoutEngineIsReportedNotFaked(t *testing.T) {
 	if result.TraceAttempted != 0 {
 		t.Errorf("TraceAttempted = %d, want 0 (nothing may be reported as traced)", result.TraceAttempted)
 	}
+	if result.TraceStored != 0 {
+		t.Errorf("TraceStored = %d, want 0", result.TraceStored)
+	}
 }
 
-// TestScanTraceInvokesProvidedEngine 验证提供 traceFn 时它会被调用。
-func TestScanTraceInvokesProvidedEngine(t *testing.T) {
+// TestScanFullTwoLevelFlow 验证完整的两级流程（真实 TCP 探测 + 假跟踪引擎）。
+//
+// 这里第一级是**真实**的本机监听探测，第二级是假引擎——
+// 因此它同时验证了"探测结果确实被用来筛选跟踪目标"这条连接。
+func TestScanFullTwoLevelFlow(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
-	pk := collector(t, store, "c-scan-trace-fn")
+	pk := collector(t, store, "c-two-level-e2e")
 	targets := liveTargets(t, 3)
 	if _, err := store.UpsertTargets(ctx, targets, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 
-	var traced []string
-	traceFn := func(ctx context.Context, target model.Target) error {
-		traced = append(traced, target.ID)
-		return nil
-	}
+	engine := &fakeTraceEngine{}
+	sched := newScheduler(t, store, pk, Config{
+		SessionID:   newSessionID(t),
+		Trace:       true,
+		TraceEngine: engine,
+	})
 
-	sched := newScheduler(t, store, pk, Config{SessionID: newSessionID(t), Trace: true})
-	result, err := sched.Run(ctx, targets, "0.1.0", traceFn)
+	result, err := sched.Run(ctx, targets, "0.1.0")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
 	if result.TraceSkipped {
-		t.Error("TraceSkipped = true, want false when an engine is provided")
+		t.Fatal("TraceSkipped = true, want false when an engine is provided")
 	}
-	if result.TraceAttempted != 3 {
-		t.Errorf("TraceAttempted = %d, want 3", result.TraceAttempted)
+	// 本机监听都能连上，因此第一级应当全部成功。
+	if result.Probe.Success != 3 {
+		t.Fatalf("Probe.Success = %d, want 3 (local listeners must connect)", result.Probe.Success)
 	}
-	if len(traced) != 3 {
-		t.Errorf("engine called %d times, want 3", len(traced))
+	// 第二级应当为每个成功目标各调用一次。
+	if len(engine.calls) != 3 {
+		t.Errorf("engine called %d times, want 3", len(engine.calls))
+	}
+	if result.TracePending != 3 {
+		t.Errorf("TracePending = %d, want 3", result.TracePending)
+	}
+	if result.TraceStored != 3 {
+		t.Errorf("TraceStored = %d, want 3", result.TraceStored)
+	}
+	if !result.SessionFinished {
+		t.Error("SessionFinished = false, want true")
+	}
+
+	// 数据库里三条跟踪记录都在。
+	total, err := store.CountTraces(ctx)
+	if err != nil {
+		t.Fatalf("CountTraces: %v", err)
+	}
+	if total != 3 {
+		t.Errorf("traces in db = %d, want 3", total)
 	}
 }
 
-// TestScanTraceFailuresDoNotAbort 验证单个跟踪失败不中断整体。
-func TestScanTraceFailuresDoNotAbort(t *testing.T) {
+// TestScanTraceResumeSkipsAlreadyTracedTargets 验证通过 Run 走完整流程时的续测。
+func TestScanTraceResumeSkipsAlreadyTracedTargets(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
-	pk := collector(t, store, "c-scan-trace-err")
-	targets := liveTargets(t, 3)
+	pk := collector(t, store, "c-two-level-resume")
+	targets := liveTargets(t, 2)
 	if _, err := store.UpsertTargets(ctx, targets, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 
-	var calls int
-	traceFn := func(ctx context.Context, target model.Target) error {
-		calls++
-		return errors.New("engine exploded")
+	sessionID := newSessionID(t)
+
+	// 第一次完整跑完。
+	first := &fakeTraceEngine{}
+	sched := newScheduler(t, store, pk, Config{SessionID: sessionID, Trace: true, TraceEngine: first})
+	if _, err := sched.Run(ctx, targets, "0.1.0"); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if len(first.calls) != 2 {
+		t.Fatalf("first pass engine calls = %d, want 2", len(first.calls))
 	}
 
-	sched := newScheduler(t, store, pk, Config{SessionID: newSessionID(t), Trace: true})
-	result, err := sched.Run(ctx, targets, "0.1.0", traceFn)
+	// 续测：第一级已经全部测过，因此 pending 为空，直接收尾，
+	// 第二级也不该被调用。
+	second := &fakeTraceEngine{}
+	resumeSched := newScheduler(t, store, pk, Config{
+		SessionID: sessionID, Resume: true, Trace: true, TraceEngine: second,
+	})
+	result, err := resumeSched.Run(ctx, targets, "0.1.0")
 	if err != nil {
-		t.Fatalf("Run returned error: %v (a single trace failure must not abort the scan)", err)
+		t.Fatalf("resume Run: %v", err)
 	}
-	if calls != 3 {
-		t.Errorf("engine called %d times, want 3 (failures must not stop the loop)", calls)
+
+	if result.AlreadyDone != 2 {
+		t.Errorf("AlreadyDone = %d, want 2", result.AlreadyDone)
 	}
-	if result.TraceAttempted != 3 {
-		t.Errorf("TraceAttempted = %d, want 3", result.TraceAttempted)
+	if len(second.calls) != 0 {
+		t.Errorf("engine called %d times on resume, want 0", len(second.calls))
 	}
+	// 跟踪记录没有翻倍。
+	total, err := store.CountTraces(ctx)
+	if err != nil {
+		t.Fatalf("CountTraces: %v", err)
+	}
+	if total != 2 {
+		t.Errorf("traces in db = %d, want 2 (no duplicates)", total)
+	}
+}
+
+// TestTraceDuplicatesAreSkippedByIdempotentInsert 验证重复写入是幂等的。
+//
+// 与第一级同理：dedup_key 让同一个 batch 重复导入变成空操作。
+func TestTraceDuplicatesAreSkippedByIdempotentInsert(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	pk := collector(t, store, "c-trace-dedup")
+	sessionID := newSessionID(t)
+
+	target := mustTargetOf(t, "10.5.5.1", 443)
+	defineSession(t, store, pk, sessionID, 1)
+	recordSuccess(t, store, pk, sessionID, target)
+
+	// 固定时间戳，保证两次生成的 dedup_key 相同。
+	at := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	engine := &fakeTraceEngine{
+		result: func(target model.Target) *trace.TraceResult {
+			return &trace.TraceResult{
+				TargetID:   target.String(),
+				IP:         target.IP,
+				Port:       target.Port,
+				Engine:     "fake-nexttrace",
+				Mode:       trace.ModeTCP,
+				Success:    true,
+				DurationMS: 100,
+				Hops:       []trace.Hop{{TTL: 1, IP: "10.0.0.1", RTTMS: []float64{1}}},
+				Timestamp:  at,
+			}
+		},
+	}
+
+	// 第一遍写入。
+	batch1 := []storage.Trace{storage.NewTrace(pk, sessionID, engine.resultFor(target))}
+	saved1, _, err := store.SaveTraces(ctx, batch1)
+	if err != nil {
+		t.Fatalf("SaveTraces #1: %v", err)
+	}
+	if saved1 != 1 {
+		t.Fatalf("saved #1 = %d, want 1", saved1)
+	}
+
+	// 第二遍写同样的行：应当被幂等跳过。
+	batch2 := []storage.Trace{storage.NewTrace(pk, sessionID, engine.resultFor(target))}
+	saved2, skipped2, err := store.SaveTraces(ctx, batch2)
+	if err != nil {
+		t.Fatalf("SaveTraces #2: %v", err)
+	}
+	if saved2 != 0 || skipped2 != 1 {
+		t.Errorf("saved/skipped = %d/%d, want 0/1", saved2, skipped2)
+	}
+
+	total, err := store.CountTraces(ctx)
+	if err != nil {
+		t.Fatalf("CountTraces: %v", err)
+	}
+	if total != 1 {
+		t.Errorf("traces in db = %d, want 1", total)
+	}
+}
+
+// resultFor 是给幂等测试用的便捷封装。
+func (f *fakeTraceEngine) resultFor(target model.Target) *trace.TraceResult {
+	result, _ := f.Trace(context.Background(), target)
+	return result
 }
 
 // ---------------------------------------------------------------------------
@@ -890,7 +1347,7 @@ func TestNewValidatesConfig(t *testing.T) {
 	}
 	empty := newScheduler(t, store, pk, Config{SessionID: sessionID})
 
-	result, err := empty.Run(context.Background(), nil, "0.1.0", nil)
+	result, err := empty.Run(context.Background(), nil, "0.1.0")
 	if err != nil {
 		t.Fatalf("Run with no targets: %v", err)
 	}
@@ -900,7 +1357,7 @@ func TestNewValidatesConfig(t *testing.T) {
 
 	// 新建会话却没有会话 ID 是编程错误，必须报错而不是静默生成一个。
 	broken := newScheduler(t, store, pk, Config{})
-	if _, err := broken.Run(context.Background(), nil, "0.1.0", nil); err == nil {
+	if _, err := broken.Run(context.Background(), nil, "0.1.0"); err == nil {
 		t.Error("Run succeeded without a session id")
 	}
 }

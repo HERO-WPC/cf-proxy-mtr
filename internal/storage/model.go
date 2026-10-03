@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/cf-route-tester/cf-route-tester/internal/model"
 	"github.com/cf-route-tester/cf-route-tester/internal/probe"
+	"github.com/cf-route-tester/cf-route-tester/internal/trace"
+	"github.com/cf-route-tester/cf-route-tester/internal/version"
 )
 
 // ErrNotFound 表示查询的目标 / 采集者 / 会话不存在。
@@ -140,6 +143,54 @@ func (t Trace) DurationUS() int64 {
 		return 0
 	}
 	return int64(t.DurationMS*1000 + 0.5)
+}
+
+// NewTrace 把一个引擎的跟踪结果转换成可入库的 Trace 行。
+//
+// 放在 storage 而不是 scheduler：字段映射（尤其"归一化后的内部 Trace
+// 存哪一列"）是存储层的知识，换引擎时不该动调度器。
+//
+// TraceJSON 里存的是**归一化后的跳列表**，不是引擎原始输出：
+// 业务查询只依赖前者。RawJSON 另存一列供诊断，
+// 但不参与任何判断——上游格式变化不会让历史数据失去意义。
+func NewTrace(collectorPK int64, sessionID string, r *trace.TraceResult) Trace {
+	if r == nil {
+		return Trace{}
+	}
+
+	// 序列化归一化跳列表。失败时留空而不是写入半截 JSON：
+	//   - 行本身仍然有效（hop_count / success 等列不受影响）；
+	//   - 空值明确表示"这一列的序列化失败了"，而不是"路径为空"。
+	traceJSON := ""
+	if blob, err := json.Marshal(r.Hops); err == nil {
+		traceJSON = string(blob)
+	}
+
+	return Trace{
+		TargetID:      r.TargetID,
+		CollectorID:   collectorPK,
+		SessionID:     sessionID,
+		Timestamp:     r.Timestamp,
+		Engine:        r.Engine,
+		EngineVersion: r.EngineVersion,
+		Mode:          string(r.Mode),
+		Protocol:      r.Protocol,
+		Port:          r.Port,
+		Success:       r.Success,
+		DurationMS:    r.DurationMS,
+		HopCount:      r.HopCount(),
+		TraceJSON:     traceJSON,
+		RawJSON:       r.RawJSON,
+		ErrorType:     string(r.ErrorType),
+		ErrorMessage:  r.ErrorMessage,
+
+		// 本地库不做隐私过滤：本地地址要保留下来供用户自己诊断。
+		// 过滤发生在导出层（Phase 9）。
+		LocalFiltered: false,
+
+		SchemaVersion: version.SchemaVersion,
+		ClientVersion: version.Version,
+	}
 }
 
 // Validate 检查该 trace 是否可以入库。

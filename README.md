@@ -37,7 +37,7 @@ Phase 4  ✅ SQLite（storage 包：迁移、只追加时间序列、db 命令�
 Phase 5  ✅ 全量扫描 + Resume（scheduler 包：测量会话、断点续测、scan 命令）
 Phase 6  ✅ 本机地区 / 运营商信息（detect 包：可解释的检测源、手动优先）
 Phase 7  ✅ NextTrace 集成（trace 包：外部进程、真实 JSON 解析、trace 命令）
-Phase 8  ⏳ TCP Probe + NextTrace 两级测量
+Phase 8  ✅ TCP Probe + NextTrace 两级测量（只跟踪探测成功的目标，可续测）
 Phase 9  ⏳ 结果导出
 Phase 10 ⏳ GitHub 上传（按用户要求暂缓，等确定方案后再做）
 Phase 11 ⏳ GitHub 数据聚合
@@ -56,7 +56,8 @@ cf-route-tester probe          # 对全部 IP:Port 做 TCP 连通性与延迟测
 cf-route-tester probe --db data/results.db   # 同上，并把结果写入本地 SQLite
 cf-route-tester scan           # 全量扫描：测量 + 会话记录，写入数据库
 cf-route-tester scan --resume  # 继续上次未完成的扫描，只测没测过的目标
-cf-route-tester trace --target 1.1.1.1:443   # 用 NextTrace 做线路跟踪
+cf-route-tester scan --trace   # 扫描后对**探测成功**的目标做线路跟踪
+cf-route-tester trace --target 1.1.1.1:443   # 单独跟踪一个目标
 cf-route-tester db stats       # 查看本地数据库状态
 cf-route-tester db migrate     # 应用数据库迁移
 cf-route-tester db vacuum      # 整理数据库文件
@@ -444,6 +445,117 @@ trace:       SKIPPED (--trace 需要 NextTrace，Phase 7 起可用)
 ```
 
 宁可明确告知跳过，也不静默略过——否则汇总看起来像是跟踪过了。
+
+#### 两级测量：只跟踪探测成功的目标
+
+`scan --trace` 在 TCP 测量**之后再**执行线路跟踪，且**只对探测成功的目标**跟踪：
+
+```bash
+cf-route-tester scan --trace
+cf-route-tester scan --trace --trace-binary "data/bin/nexttrace.exe" --trace-mode icmp
+cf-route-tester scan --trace --trace-workers 4 --trace-timeout 25s
+```
+
+```
+--- Level 2: route trace (only TCP-successful targets) ---
+candidates:  10 TCP-successful target(s)
+to trace:    10
+Completed:   10 / 10
+Success:     10
+Failed:      0
+Success %:   100.0%
+Avg hops:    23.3
+
+stored:      10 trace(s)
+```
+
+为什么必须这样分级（需求第 38 条）：连 TCP 都连不上的目标，跑 traceroute
+大概率在中途就断了。为它们花几十秒既得不到有效路径，又拖慢整次扫描。
+
+真实运行（12 个目标 / ICMP 模式 / 真实 NextTrace v1.7.3）：
+
+```text
+Completed: 12 / 12          <- Level 1: TCP
+Success:   10
+Failed:    2                 (timeout)
+Success %: 83.3%
+
+--- Level 2: route trace (only TCP-successful targets) ---
+candidates:  10 TCP-successful target(s)   <- 12 - 2 个超时
+to trace:    10
+Success %:   100.0%
+Avg hops:    23.3
+stored:      10 trace(s)
+```
+
+注意两级是**分别汇报**的。"跟踪成功率 100%"指的是"能连上的目标里，
+全部成功拿到了路径"，与"整体可用率 83.3%"是两个不同的量——
+混在一起会让人以为线路质量比实际更好。
+
+#### 第二级也有断点续测
+
+不只看第一级。已经跟踪过的目标在 `--resume` 时会被跳过：
+
+```text
+--- Level 2: route trace (only TCP-successful targets) ---
+candidates:  10 TCP-successful target(s)
+already done:10 target(s) traced in this session, skipped
+to trace:    0
+```
+
+理由同样是代价：一次 traceroute 要几秒到几十秒（上面实测平均 17 秒），
+中断重跑时把这些重跑一遍代价很高。
+
+幂等性也做了实测：
+
+```text
+$ scan --trace --limit 12 ...          # 第一次
+measurements=12 traces=10
+
+$ scan --trace --resume ...            # 再跑一次
+mode:        resume (skipped 12 already-measured target(s))
+targets:     12 total, 0 to measure
+session:     finished
+
+$ 再次统计
+measurements=12 traces=10              # 没有翻倍
+```
+
+#### 会话状态与数据事实必须一致
+
+有一个容易忽略的边界：对一个**已经跑完**的会话再执行 `--resume`。
+
+这不该报错——那是用户的正常疑问（"我上次跑完了吗？"）——
+但也不该往一个已结束的会话里继续追加数据。现在的语义是：
+
+| 情况 | 行为 |
+| --- | --- |
+| 会话还开着，但数据已经齐了 | 正常收尾，标记会话结束（幂等） |
+| 会话已结束，再次 `--resume` | 稳定报告"没有要测的"，**不报错、不重复测量** |
+| 会话已结束，**却还有目标没测** | 报错。这是真问题：会话被提前关闭，状态与数据矛盾 |
+
+第三种情况以前会被伪装成"你续测了一个已结束的会话，请用 --new"，
+让人以为是操作问题；现在的错误信息直说会话是被提前关闭的：
+
+```text
+session "..." is already finished but 3 target(s) are still unmeasured;
+the session was closed prematurely — start a new scan with --new
+```
+
+#### 跟踪结果的落库批更小
+
+| 级别 | 批大小 | 时间上限 | 理由 |
+| --- | --- | --- | --- |
+| measurements | 500 | 2 秒 | 快（毫秒级），攒大点省 fsync |
+| traces | **20** | **5 秒** | 慢（十几秒一条），攒 500 条要几小时 |
+
+跟踪结果里同时保存两样东西，用途完全不同：
+
+- `trace_json`：**归一化后**的跳列表（业务查询只依赖它）；
+- `raw_json`：引擎原始输出（仅诊断；上游改格式不会让历史数据失去意义）。
+
+本地库**不做隐私过滤**：`LocalFiltered` 为 false，内网地址原样保留，
+供用户自己诊断路径。过滤属于导出层（Phase 9）。
 
 ### trace：使用 NextTrace 做线路跟踪
 
@@ -953,8 +1065,9 @@ cf-route-tester/
 │   │   ├── source_local.go       离线源：只推断出口 IP 版本
 │   │   └── source_geoip.go       联网源：可配置的 geo-IP API + 宽松解析
 │   ├── identity/                 本地匿名标识 collector_id（已实现）
-│   ├── scheduler/                扫描编排与断点续测（已实现）
-│   │   └── scheduler.go          会话 -> 待测目标 -> Probe -> 落库 -> 收尾
+│   ├── scheduler/                扫描编排、断点续测与两级测量（已实现）
+│   │   └── scheduler.go          会话 -> 待测目标 -> Probe -> 落库
+│   │                             -> 只对成功目标 Trace -> 落库 -> 收尾
 │   ├── storage/                  本地 SQLite（已实现）
 │   │   ├── sqlite.go             打开 / PRAGMA / 迁移 / 统计
 │   │   ├── migrations.go         版本化迁移（表结构的唯一来源）
