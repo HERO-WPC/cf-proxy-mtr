@@ -55,7 +55,7 @@ func TestSessionIDIsTimezoneStable(t *testing.T) {
 }
 
 func TestIsSessionID(t *testing.T) {
-	valid := "20260101T000000Z-00000000"
+	valid := "20261003T100000Z-3f9a1c2d"
 	if !IsSessionID(valid) {
 		t.Errorf("IsSessionID(%q) = false, want true", valid)
 	}
@@ -63,11 +63,11 @@ func TestIsSessionID(t *testing.T) {
 	invalid := map[string]string{
 		"empty":            "",
 		"no separator":     "20261003T100000Z3f9a1c2d",
-		"too many dashes":  "20260101T000000Z-00000000-extra",
-		"bad time":         "20260101T000000Z-00000000", // 13 月
+		"too many dashes":  "20261003T100000Z-3f9a1c2d-extra",
+		"bad time":         "20261303T100000Z-3f9a1c2d", // 13 月
 		"short time":       "20261003T1000Z-3f9a1c2d",
 		"short suffix":     "20261003T100000Z-3f9a",
-		"long suffix":      "20260101T000000Z-0000000000",
+		"long suffix":      "20261003T100000Z-3f9a1c2d00",
 		"uppercase suffix": "20261003T100000Z-3F9A1C2D",
 		"non hex suffix":   "20261003T100000Z-3f9a1c2g",
 		"not a date":       "helloworld1234567-3f9a1c2d",

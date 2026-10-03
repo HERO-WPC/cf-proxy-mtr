@@ -97,6 +97,32 @@
   .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; font-size: 13px; }
   .kv .k { color: var(--muted); }
   .kv .v { font-variant-numeric: tabular-nums; word-break: break-all; }
+
+  /* ---- 实时日志面板 ---- */
+  .logbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+            justify-content: space-between; margin-bottom: 8px; }
+  .logbar .left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .now {
+    font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+    padding: 3px 9px; border-radius: 5px;
+    background: var(--panel-2); border: 1px solid var(--border);
+    color: var(--muted); max-width: 46ch; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
+  .now.active { color: #bcd4ff; border-color: var(--accent); }
+  #logBox {
+    background: #0b0d11; border: 1px solid var(--border); border-radius: 6px;
+    height: 260px; overflow-y: auto; padding: 8px 10px;
+    font-family: ui-monospace, Consolas, monospace; font-size: 12px; line-height: 1.7;
+  }
+  .logline { display: flex; gap: 9px; white-space: pre-wrap; word-break: break-all; }
+  .logline .t { color: #5b6377; flex: 0 0 auto; }
+  .logline .m { flex: 1 1 auto; }
+  .logline.info  .m { color: #c3cad9; }
+  .logline.good  .m { color: #6fe0ab; }
+  .logline.warn  .m { color: #ffcf70; }
+  .logline.error .m { color: #ff8f95; }
+  #logBox .empty { color: #5b6377; }
 </style>
 </head>
 <body>
@@ -185,6 +211,24 @@
   <section id="resultSection" style="display:none">
     <h2>最近一次扫描</h2>
     <div class="panel" id="resultBody"></div>
+  </section>
+
+  <section>
+    <h2>实时日志</h2>
+    <div class="logbar">
+      <div class="left">
+        <span class="pill" id="logConn">未连接</span>
+        <span class="now" id="nowTarget">当前目标：—</span>
+      </div>
+      <div class="left">
+        <label class="check" style="margin:0">
+          <input type="checkbox" id="autoScroll" checked>
+          <span>自动滚动</span>
+        </label>
+        <button id="clearLog">清空</button>
+      </div>
+    </div>
+    <div id="logBox"><div class="empty">等待事件…（启动扫描后会在这里显示过程）</div></div>
   </section>
 </main>
 
@@ -440,6 +484,12 @@ async function pollStatus() {
       wasScanning = true;
       setBusy(true);
       renderProgress(s.progress);
+      // 用服务端的当前目标兜底：日志流的历史可能已被裁剪，
+      // 刷新页面后单靠它可能拿不到"正在测哪个"。
+      if (s.current_target) {
+        nowTargetEl.textContent = '当前目标：' + s.current_target;
+        nowTargetEl.classList.add('active');
+      }
     } else {
       setBusy(false);
       if (wasScanning) {
@@ -542,12 +592,116 @@ function renderOutcome(last) {
 }
 
 // ---------------------------------------------------------------------------
+// 实时日志面板
+// ---------------------------------------------------------------------------
+const logBox = document.getElementById('logBox');
+const autoScrollBox = document.getElementById('autoScroll');
+const nowTargetEl = document.getElementById('nowTarget');
+const logConnEl = document.getElementById('logConn');
+
+// 与后端 defaultHistoryLimit 保持一致：旧的丢弃，避免长时间运行后
+// DOM 无限增长（几千行之后滚动会明显变卡）。
+const LOG_LIMIT = 500;
+let logCount = 0;
+
+// 后端会重发历史事件（页面刷新、SSE 重连），用序号去重，
+// 否则重连一次面板里就会出现重复内容。
+const seenSeq = new Set();
+let maxSeq = 0;
+
+function fmtClock(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return '--:--:--';
+  return d.toLocaleTimeString('zh-CN', { hour12: false });
+}
+
+function appendLog(ev) {
+  if (!ev || typeof ev.text !== 'string') return;
+  if (typeof ev.seq === 'number' && ev.seq > 0) {
+    if (seenSeq.has(ev.seq)) return;
+    seenSeq.add(ev.seq);
+    if (ev.seq > maxSeq) maxSeq = ev.seq;
+    // 集合也要裁剪，否则它自己就成了新的泄漏点。
+    if (seenSeq.size > LOG_LIMIT * 2) {
+      for (const s of seenSeq) {
+        if (s <= maxSeq - LOG_LIMIT) seenSeq.delete(s);
+      }
+    }
+  }
+
+  const empty = logBox.querySelector('.empty');
+  if (empty) empty.remove();
+
+  const line = document.createElement('div');
+  line.className = 'logline ' + (ev.level || 'info');
+
+  const t = document.createElement('span');
+  t.className = 't';
+  t.textContent = fmtClock(ev.time);
+
+  const m = document.createElement('span');
+  m.className = 'm';
+  m.textContent = ev.text;
+
+  line.appendChild(t);
+  line.appendChild(m);
+  logBox.appendChild(line);
+
+  logCount++;
+  while (logCount > LOG_LIMIT && logBox.firstChild) {
+    logBox.removeChild(logBox.firstChild);
+    logCount--;
+  }
+
+  // 只有用户没取消自动滚动时才跟随（否则会打断他往回翻）。
+  if (autoScrollBox.checked) {
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  // 顺手把"正在测 X"更新一下：它比进度条更能说明现在在干什么。
+  const match = /^正在测量 (.+)$/.exec(ev.text);
+  if (match) {
+    nowTargetEl.textContent = '当前目标：' + match[1];
+    nowTargetEl.classList.add('active');
+  } else if (/^(TCP 探测|线路跟踪)(完成|失败)/.test(ev.text) || /测量完成|测量失败/.test(ev.text)) {
+    nowTargetEl.textContent = '当前目标：—';
+    nowTargetEl.classList.remove('active');
+  }
+}
+
+document.getElementById('clearLog').addEventListener('click', () => {
+  logBox.innerHTML = '<div class="empty">已清空。后续事件仍会显示。</div>';
+  logCount = 0;
+  seenSeq.clear();
+});
+
+function connectLog() {
+  const es = new EventSource('/api/events/log?token=' + encodeURIComponent(token));
+
+  es.addEventListener('open', () => {
+    logConnEl.textContent = '已连接';
+    logConnEl.className = 'pill live';
+  });
+
+  es.addEventListener('log', (ev) => {
+    try { appendLog(JSON.parse(ev.data)); } catch (_) {}
+  });
+
+  es.addEventListener('error', () => {
+    logConnEl.textContent = '重连中…';
+    logConnEl.className = 'pill';
+    // EventSource 自动重连；序号去重保证不会重复显示。
+  });
+}
+
+// ---------------------------------------------------------------------------
 // 启动
 // ---------------------------------------------------------------------------
 if (!token) {
   banner('err', '这个页面缺少访问令牌，无法工作。请使用启动时打印的完整地址打开页面。');
 } else {
   connectEvents();
+  connectLog();
   loadStats();
   pollStatus();
   setInterval(pollStatus, 2000);

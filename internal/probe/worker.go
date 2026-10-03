@@ -71,6 +71,15 @@ type RunnerConfig struct {
 
 	// QueueSize 是 job 队列大小。<=0 时使用 workers*2。
 	QueueSize int
+
+	// OnTarget 在每个目标**开始**被探测时调用（可为 nil）。
+	//
+	// 存在的意义是让界面能显示"正在测哪个 IP"：只靠结果回调
+	// 只能看到已经测完的目标，看不到当前这一个。
+	//
+	// 它会被多个 worker **并发**调用，实现必须自己保证线程安全，
+	// 并且必须尽快返回——它就处在探测的热路径上。
+	OnTarget func(target model.Target)
 }
 
 // Handle 是一次正在运行的批处理的句柄。
@@ -175,8 +184,9 @@ func (b *batchStats) snapshot() Stats {
 
 // Runner 并发探测一批目标。
 type Runner struct {
-	prober *Prober
-	queue  int
+	prober   *Prober
+	queue    int
+	onTarget func(target model.Target)
 }
 
 // NewRunner 创建 Runner。
@@ -188,7 +198,7 @@ func NewRunner(cfg RunnerConfig) *Runner {
 		queue = prober.Config().Workers * 2
 	}
 
-	return &Runner{prober: prober, queue: queue}
+	return &Runner{prober: prober, queue: queue, onTarget: cfg.OnTarget}
 }
 
 // Prober 返回底层探测器。
@@ -235,6 +245,15 @@ func (r *Runner) Start(ctx context.Context, targets []model.Target) *Handle {
 				return sent
 			},
 			func(ctx context.Context, target model.Target, emit func(ProbeResult)) error {
+				// 通知"开始测这个目标"。放在 Probe 之前，
+				// 这样界面看到的就是**正在测**的 IP，而不是已经测完的。
+				//
+				// 回调由调用方保证线程安全（多个 worker 会并发进入这里），
+				// 而且必须很快返回——它挡在真正探测之前。
+				if r.onTarget != nil {
+					r.onTarget(target)
+				}
+
 				// 单个目标的任何失败都不会返回 error：
 				// 失败本身就是结果。因此这里永远返回 nil。
 				emit(r.prober.Probe(ctx, target))

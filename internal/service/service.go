@@ -121,6 +121,14 @@ type ScanOptions struct {
 	//
 	// 回调会在消费测量结果的 goroutine 上被调用，实现必须尽快返回。
 	Progress func(scheduler.ProgressEvent)
+
+	// OnTarget 在每个目标**开始**探测时调用（nil 表示不关心）。
+	//
+	// 与 Progress 的分工：Progress 回答"完成多少"，
+	// OnTarget 回答"现在在测哪个"。界面需要后者才能显示当前目标。
+	//
+	// 它会被多个 worker **并发**调用，实现必须线程安全且尽快返回。
+	OnTarget func(target model.Target)
 }
 
 // TraceOptions 是线路跟踪的配置。
@@ -247,6 +255,7 @@ func (s *Service) RunScan(ctx context.Context, opts ScanOptions) (*ScanResult, e
 		SessionID:   sessionID,
 		Resume:      resume,
 		Trace:       opts.Trace,
+		OnTarget:    opts.OnTarget,
 	}
 	if opts.Workers > 0 {
 		cfg.Probe.Workers = opts.Workers

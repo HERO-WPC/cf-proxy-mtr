@@ -91,12 +91,21 @@ type Server struct {
 	token string
 	hub   *service.ProgressHub
 
+	// events 是界面日志面板的事件流（与 hub 分工见 events.go）。
+	events *eventBroker
+
 	// 单次扫描约束：本工具一次跑满 CPU/网络，并发跑两次毫无意义，
 	// 而且会让本地数据库出现两个同时写入的会话。
 	scanMu     sync.Mutex
 	scanCancel context.CancelFunc
 	scanBusy   bool
 	lastResult *scanOutcome
+
+	// currentTarget 是当前正在探测的目标（供页面刷新后恢复显示）。
+	currentMu     sync.Mutex
+	currentTarget string
+	// currentPhase 是当前阶段。
+	currentPhase string
 
 	httpServer *http.Server
 	listener   net.Listener
@@ -169,9 +178,10 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	return &Server{
-		cfg:   cfg,
-		token: token,
-		hub:   service.NewProgressHub(),
+		cfg:    cfg,
+		token:  token,
+		hub:    service.NewProgressHub(),
+		events: newEventBroker(),
 		// done 必须在这里创建。
 		//
 		// 漏掉这一行的后果不是"关闭通知失效"，而是**服务启动后立刻退出**：
@@ -226,6 +236,8 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/scan/stop", s.handleStop)
 	mux.HandleFunc("/api/scan/status", s.handleStatus)
 	mux.HandleFunc("/api/events", s.handleEvents)
+	mux.HandleFunc("/api/events/log", s.handleEventsLog)
+	mux.HandleFunc("/api/log", s.handleLog)
 
 	s.httpServer = &http.Server{
 		Handler:           s.withSecurityHeaders(mux),
@@ -487,6 +499,7 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 
 	s.cfg.Logger.Info("webui: scan requested",
 		"workers", req.Workers, "limit", req.Limit, "resume", req.Resume, "trace", req.Trace)
+	s.emitScanStart(req)
 
 	go s.runScan(ctx, req, cancel)
 
@@ -511,7 +524,10 @@ func (s *Server) runScan(ctx context.Context, req scanRequest, cancel context.Ca
 			Timeout: durationSeconds(req.TraceTimeoutS),
 		},
 		Collector: collectorFrom(req),
-		Progress:  s.hub.Publish,
+		// Progress 既推给进度条，也翻译成日志行（阶段完成时才写一条）。
+		Progress: s.emitProgressEvent,
+		// OnTarget 让日志面板显示"正在测哪个 IP"。
+		OnTarget: s.emitTarget,
 	}
 
 	started := time.Now().UTC()
@@ -528,13 +544,25 @@ func (s *Server) runScan(ctx context.Context, req scanRequest, cancel context.Ca
 		outcome.Summary = &summary
 		s.cfg.Logger.Info("webui: scan finished",
 			"session", summary.SessionID, "stored", summary.Stored, "traces", summary.TraceStored)
+
+		// 先报"这次实际测了多少、来自哪里"，再报完成。
+		// 顺序反了读起来像"先宣布结束、再补充开始"。
+		s.emitLoadResult(result)
 	}
+
+	s.emitScanEnd(outcome)
 
 	s.scanMu.Lock()
 	s.lastResult = outcome
 	s.scanBusy = false
 	s.scanCancel = nil
 	s.scanMu.Unlock()
+
+	// 清掉"当前目标"：扫描结束后它已经没有意义，
+	// 留着会让页面显示一个早已测完的 IP。
+	s.currentMu.Lock()
+	s.currentTarget = ""
+	s.currentMu.Unlock()
 }
 
 // handleStop 请求停止当前扫描。
@@ -561,10 +589,18 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	last, ok := s.hub.Last()
+
+	// 当前目标也一并返回：页面刷新后日志流的"正在测量 X"可能已经
+	// 被历史裁剪掉，靠这条恢复显示。
+	s.currentMu.Lock()
+	current := s.currentTarget
+	s.currentMu.Unlock()
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"scanning": s.isScanning(),
-		"last":     s.lastOutcome(),
-		"progress": progressPayload(last, ok),
+		"scanning":       s.isScanning(),
+		"last":           s.lastOutcome(),
+		"progress":       progressPayload(last, ok),
+		"current_target": current,
 	})
 }
 

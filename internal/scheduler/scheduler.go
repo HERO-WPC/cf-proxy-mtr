@@ -122,6 +122,14 @@ type Config struct {
 	// ProgressInterval 是进度回调间隔（<=0 时使用默认值）。
 	ProgressInterval time.Duration
 
+	// OnTarget 在每个目标**开始**探测时调用（可为 nil）。
+	//
+	// Progress 回调只报告"完成了多少"，看不到当前在处理哪个目标；
+	// 图形界面需要后者才能显示"正在测 1.1.1.1:443"。
+	//
+	// 它会被多个 worker **并发**调用，实现必须线程安全且尽快返回。
+	OnTarget func(target model.Target)
+
 	// Now 允许注入当前时间（测试用）。
 	Now func() time.Time
 }
@@ -271,7 +279,7 @@ func New(store *storage.Store, cfg Config) (*Scheduler, error) {
 	return &Scheduler{
 		store:  store,
 		cfg:    cfg,
-		runner: probe.NewRunner(probe.RunnerConfig{Probe: cfg.Probe}),
+		runner: probe.NewRunner(probe.RunnerConfig{Probe: cfg.Probe, OnTarget: cfg.OnTarget}),
 	}, nil
 }
 
