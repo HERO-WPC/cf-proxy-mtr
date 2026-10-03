@@ -14,10 +14,11 @@
 //	internal/source    all.json / all.txt 的下载、容错解析与本地缓存
 //	internal/probe     TCP 探测、错误分类与有界 worker pool
 //	internal/storage   本地 SQLite：迁移、只追加时间序列、查询
+//	internal/scheduler 扫描编排：测量会话、断点续测、两级测量顺序
 //	internal/identity  本地匿名标识 collector_id（随机生成，非硬件指纹）
 //
-// 后续阶段的包（trace / storage 扩展 / export / privacy /
-// upload / aggregate / detect / scheduler）会随对应 Phase 逐步加入。
+// 后续阶段的包（trace / export / privacy / upload / aggregate /
+// detect）会随对应 Phase 逐步加入。
 //
 // 本地验证要求（每个 Phase 都必须通过）：
 //

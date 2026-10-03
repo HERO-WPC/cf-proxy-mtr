@@ -34,12 +34,12 @@ Phase 1  ✅ all.json 获取与解析（source 包 + fetch 命令 + 缓存）
 Phase 2  ✅ Target 数据模型（model 包：不变量、归一化、去重、隐私边界）
 Phase 3  ✅ TCP Probe（probe 包：错误分类、worker pool、probe 命令）
 Phase 4  ✅ SQLite（storage 包：迁移、只追加时间序列、db 命令、probe --db）
-Phase 5  ⏳ 全量扫描 + Resume
+Phase 5  ✅ 全量扫描 + Resume（scheduler 包：测量会话、断点续测、scan 命令）
 Phase 6  ⏳ 本机地区 / 运营商信息
 Phase 7  ⏳ NextTrace 集成
 Phase 8  ⏳ TCP Probe + NextTrace 两级测量
 Phase 9  ⏳ 结果导出
-Phase 10 ⏳ GitHub 上传
+Phase 10 ⏳ GitHub 上传（按用户要求暂缓，等确定方案后再做）
 Phase 11 ⏳ GitHub 数据聚合
 Phase 12 ⏳ 查询与统计
 Phase 13 ⏳ 跨平台打包与发布
@@ -53,13 +53,15 @@ cf-route-tester version
 cf-route-tester fetch          # 下载 / 缓存 / 解析 all.json，输出目标数量
 cf-route-tester probe          # 对全部 IP:Port 做 TCP 连通性与延迟测量
 cf-route-tester probe --db data/results.db   # 同上，并把结果写入本地 SQLite
+cf-route-tester scan           # 全量扫描：测量 + 会话记录，写入数据库
+cf-route-tester scan --resume  # 继续上次未完成的扫描，只测没测过的目标
 cf-route-tester db stats       # 查看本地数据库状态
 cf-route-tester db migrate     # 应用数据库迁移
 cf-route-tester db vacuum      # 整理数据库文件
 ```
 
 尚未实现（执行时明确报 `not implemented yet`，退出码 2）：
-`detect`、`scan`、`trace`、`export`、`upload`、`aggregate`、`query`。
+`detect`、`trace`、`export`、`upload`、`aggregate`、`query`。
 
 ---
 
@@ -244,6 +246,100 @@ failures by type:
 Unix 用 POSIX errno（`ECONNREFUSED` = 111），而且 Go 在 Windows 上
 还会把部分 WSA 错误归一化成伪 errno。两套数字都注册在案，
 因此同一个网络现象在 Windows 与 Linux 上得到同一个分类。
+
+### scan：全量扫描与断点续测
+
+```bash
+cf-route-tester scan                       # 全部目标测一遍，写入 data/results.db
+cf-route-tester scan --limit 300           # 只扫前 300 个（先验证链路是否通）
+cf-route-tester scan --resume              # 继续上次未完成的扫描
+cf-route-tester scan --resume --session 20260101T000000Z-00000000   # 指定会话
+cf-route-tester scan --new                 # 强制开始新会话（默认行为）
+cf-route-tester scan --country cn --province Zhejiang --city Hangzhou \
+                    --isp "China Mobile" --asn 9808
+```
+
+输出示例（真实运行结果，600 个目标）：
+
+```text
+mode:        resume (skipped 156 already-measured target(s))
+session:     20260101T000000Z-00000000
+targets:     600 total, 444 to measure
+
+Completed: 444 / 444
+Success:   300
+Failed:    144
+Rate:      89.7/s
+Success %: 67.6%
+
+failures by type:
+  timeout:               144
+
+stored:      444 measurement(s)
+session progress: 600 measured (411 ok, 189 failed)
+session:     finished
+```
+
+#### 断点续测的判据（本阶段的核心）
+
+判断"某个目标是否已经测过"，依据的是：
+
+```text
+目标 × 采集者 × 测量会话
+```
+
+而**不是**"数据库里有没有这个目标的历史结果"。后者会让同一个节点
+永远无法重新测量全部目标——而定期重测正是本项目数据的来源。
+
+因此：
+
+- `scan`（默认）= 新会话 → 全部目标都测，历史数据继续累积（时间序列）；
+- `scan --resume` = 继续指定会话 → 只测该会话里**还没有测量结果**的目标；
+- 失败结果也算"已测"：超时、连接被拒同样是线路信息，
+  重跑时不该被当成"还没测过"。
+
+真实中断测试（1500 个目标跑到第 6 秒被强杀）：
+
+```text
+$ kill <pid>                                  # 模拟 Ctrl+C / 崩溃
+$ db stats
+  scan_sessions:   1       <- 会话保持"未结束"
+  measurements:    N       <- 已经测到的部分留在库里
+
+$ scan --resume                               # 只测剩下的
+mode:        resume (skipped N already-measured target(s))
+```
+
+会话状态存在数据库里，`--resume` 不指定会话时用身份文件里记住的
+上一个会话（`data/collector.json` 的 `last_session_id`），
+再退一步则取数据库里最近一个未结束的会话。
+
+#### 落库策略：条数 + 时间双触发
+
+测量结果按批写入，触发条件是**两者之一**：
+
+```text
+攒够 500 条            -> 写库（保证吞吐）
+或距上次写库超过 2 秒   -> 写库（保证安全）
+```
+
+只用条数是不够的：大量目标超时时（每个都要占满 timeout），
+一批可能要等好几分钟才满。实测 600 个目标 / 1s 超时 / 50 并发时，
+第一批 500 条要到第 6 秒才写下去——在那之前被 Ctrl+C，
+数据库里**一条都没有**，整段时间白测。加了时间上限之后，
+无论快慢都至少每 2 秒落一次盘。
+
+另外，落库与收尾一律使用 **未被取消的 context**：Ctrl+C 之后
+正是最需要把已测结果保存下来的时刻，用已取消的 ctx 会直接失败。
+
+#### `--trace` 在 Phase 7 之前会明确说明"没做"
+
+```text
+$ cf-route-tester scan --trace
+trace:       SKIPPED (--trace 需要 NextTrace，Phase 7 起可用)
+```
+
+宁可明确告知跳过，也不静默略过——否则汇总看起来像是跟踪过了。
 
 ### db：本地 SQLite 数据库
 
@@ -574,7 +670,8 @@ cf-route-tester/
 │   ├── trace/                    Trace 引擎接口、NextTrace 调用与解析（Phase 7）
 │   ├── detect/                   本机地区 / 运营商检测（Phase 6）
 │   ├── identity/                 本地匿名标识 collector_id（已实现）
-│   ├── scheduler/                任务编排与断点续测（Phase 5）
+│   ├── scheduler/                扫描编排与断点续测（已实现）
+│   │   └── scheduler.go          会话 -> 待测目标 -> Probe -> 落库 -> 收尾
 │   ├── storage/                  本地 SQLite（已实现）
 │   │   ├── sqlite.go             打开 / PRAGMA / 迁移 / 统计
 │   │   ├── migrations.go         版本化迁移（表结构的唯一来源）

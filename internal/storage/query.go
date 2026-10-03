@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/cf-route-tester/cf-route-tester/internal/model"
 	"github.com/cf-route-tester/cf-route-tester/internal/probe"
 )
 
@@ -344,6 +346,157 @@ func (s *Store) LoadCollectors(ctx context.Context) ([]CollectorView, error) {
 // GroupProfile 返回采集者的分组画像（用于聚合分组）。
 func (v CollectorView) GroupProfile() string {
 	return v.Country + "/" + v.Province + "/" + v.City + "/" + v.ISP + "/" + v.ASN
+}
+
+// PendingTargets 返回在指定 (采集者, 会话) 下**还没有测量结果**的目标。
+//
+// 这是断点续测的判据（需求第 20 条），必须是三元组而不是"数据库里有没有
+// 这个目标的历史结果"——否则同一个采集者永远无法重新测量全部目标，
+// 而"每天重测一次"正是项目的数据来源。
+//
+// 判定依据是 measurements 里是否存在 (target_id, collector_id, session_id)
+// 的行，与 success / 失败分类无关：**测过就是测过**，
+// 包括"超时""连接被拒"这些失败结果。失败也是线路信息，
+// 重跑时不该被当成"还没测"。
+//
+// targets 为空时返回空切片（而不是报错）：调用方可能只是没有目标。
+func (s *Store) PendingTargets(ctx context.Context, targets []model.Target, collectorPK int64, sessionID string) ([]model.Target, error) {
+	if len(targets) == 0 {
+		return nil, nil
+	}
+	if collectorPK <= 0 {
+		return nil, fmt.Errorf("%w: pending query needs a collector", ErrInvalidInput)
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, fmt.Errorf("%w: pending query needs a session id", ErrInvalidInput)
+	}
+
+	// 一次性把本会话已完成的目标读进内存，再与给定列表比对。
+	//
+	// 为什么不用 "WHERE id NOT IN (子查询)" 直接查 targets：
+	// 目标列表来自 all.json，可能包含数据库里还没有的新目标；
+	// 而且我们需要保持**源顺序**，用 SQL 排序反而会丢掉它。
+	// 逐个 EXISTS 查询在 1.5 万个目标上会产生 1.5 万次查询，太慢。
+	done, err := s.completedTargetIDs(ctx, collectorPK, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	pending := make([]model.Target, 0, len(targets))
+	for _, target := range targets {
+		if _, ok := done[target.ID]; ok {
+			continue
+		}
+		pending = append(pending, target)
+	}
+	return pending, nil
+}
+
+// completedTargetIDs 返回某会话中已有测量的目标集合。
+func (s *Store) completedTargetIDs(ctx context.Context, collectorPK int64, sessionID string) (map[string]struct{}, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT target_id FROM measurements
+		WHERE collector_id = ? AND session_id = ?
+	`, collectorPK, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("query completed targets: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan completed target: %w", err)
+		}
+		out[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate completed targets: %w", err)
+	}
+	return out, nil
+}
+
+// SessionProgress 统计某会话的完成情况。
+type SessionProgress struct {
+	// Measured 是该会话已有测量的目标数。
+	Measured int64
+
+	// Success / Failed 是其中成功与失败的目标数。
+	Success int64
+	Failed  int64
+}
+
+// LoadSessionProgress 读取会话的实际进度。
+//
+// 与 scan_sessions.completed_count 的区别：那个字段是程序写入的
+// "我记得我做了多少"，这里是**从测量数据反推**出来的事实。
+// 断点续测以事实为准更安全：即使计数因为崩溃而没更新，
+// 也不会重复测量或漏测。
+func (s *Store) LoadSessionProgress(ctx context.Context, collectorPK int64, sessionID string) (SessionProgress, error) {
+	var out SessionProgress
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT
+			COUNT(DISTINCT target_id),
+			COUNT(DISTINCT CASE WHEN success = 1 THEN target_id END),
+			COUNT(DISTINCT CASE WHEN success = 0 THEN target_id END)
+		FROM measurements
+		WHERE collector_id = ? AND session_id = ?
+	`, collectorPK, sessionID).Scan(&out.Measured, &out.Success, &out.Failed); err != nil {
+		return out, fmt.Errorf("load session progress: %w", err)
+	}
+	return out, nil
+}
+
+// UpdateSessionProgress 更新会话的完成计数（不改动 finished_at）。
+//
+// 断点续测需要在扫描过程中周期性记录进度，这样即使进程被杀，
+// 用户下次 `db stats` / 查询会话也能看到"上次跑到哪了"。
+// 真正的完成状态由 FinishSession 标记（设置 finished_at）。
+func (s *Store) UpdateSessionProgress(ctx context.Context, sessionID string, completedCount int) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE scan_sessions SET completed_count = ? WHERE id = ?
+	`, completedCount, sessionID)
+	if err != nil {
+		return fmt.Errorf("update session progress %q: %w", sessionID, err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("%w: session %q", ErrNotFound, sessionID)
+	}
+	return nil
+}
+
+// LatestOpenSession 返回某采集者最近一个**尚未结束**的会话。
+//
+// 用于 `scan --resume` 不指定会话 ID 时找到"上次没跑完的那次扫描"。
+// 找不到时返回 ErrNotFound。
+func (s *Store) LatestOpenSession(ctx context.Context, collectorPK int64) (SessionState, error) {
+	var (
+		out        SessionState
+		startedAt  int64
+		finishedAt sql.NullInt64
+	)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, collector_id, started_at, finished_at,
+		       target_count, completed_count, client_version
+		FROM scan_sessions
+		WHERE collector_id = ? AND finished_at IS NULL
+		ORDER BY started_at DESC
+		LIMIT 1
+	`, collectorPK).Scan(&out.ID, &out.CollectorPK, &startedAt, &finishedAt,
+		&out.TargetCount, &out.CompletedCount, &out.ClientVersion)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return SessionState{}, fmt.Errorf("%w: no unfinished scan session for this collector", ErrNotFound)
+	case err != nil:
+		return SessionState{}, fmt.Errorf("load latest open session: %w", err)
+	}
+
+	out.StartedAt = time.UnixMilli(startedAt).UTC()
+	if finishedAt.Valid {
+		out.FinishedAt = time.UnixMilli(finishedAt.Int64).UTC()
+	}
+	return out, nil
 }
 
 // microsecondsToMilliseconds 把库里的整数微秒换算成毫秒。

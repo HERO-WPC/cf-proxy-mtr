@@ -46,6 +46,15 @@ type Local struct {
 	// 用户也可以手工改正）：公网 ASN 不一定等于用户实际感知的
 	// 接入线路，因此手动配置优先。
 	Profile Profile `json:"profile"`
+
+	// LastSessionID 是最近一次扫描会话的 ID（可能为空）。
+	//
+	// 它让 `scan --resume` 不必每次手工指定会话 ID。
+	// 记在身份文件里而不是只存在数据库里是刻意的：
+	// 身份文件与数据库是同一条本地数据链，一起备份、一起删除。
+	//
+	// 它不承载任何可识别信息，只是"我上次跑到哪一次扫描"。
+	LastSessionID string `json:"last_session_id,omitempty"`
 }
 
 // Profile 是持久化的采集者画像。
@@ -123,7 +132,24 @@ func decode(path string, blob []byte) (*Local, error) {
 		return nil, fmt.Errorf("identity file %q has an invalid collector_id %q (删除该文件会生成新的匿名标识)",
 			path, local.CollectorID)
 	}
+	local.LastSessionID = strings.TrimSpace(local.LastSessionID)
 	return &local, nil
+}
+
+// SetLastSession 记住最近一次扫描会话。
+//
+// 它只是给 `--resume` 提供一个默认值，因此写失败不应影响扫描本身：
+// 调用方可以选择忽略错误，但这里仍然如实返回，让调用方决定。
+func SetLastSession(path, sessionID string) error {
+	local, err := Load(path)
+	if err != nil {
+		return err
+	}
+	if local.LastSessionID == sessionID {
+		return nil
+	}
+	local.LastSessionID = sessionID
+	return Save(path, local)
 }
 
 // create 生成新的身份文件。
