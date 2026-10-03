@@ -38,8 +38,8 @@ import (
 //	        "Geo": {                 <- 可为 null
 //	          "ip": "", "asnumber": "64500",
 //	          "country": "中国", "country_en": "China",
-//	          "prov": "Sample Province", "prov_en": "Zhejiang",
-//	          "city": "Sample City", "city_en": "Hangzhou",
+//	          "prov": "示例省", "prov_en": "Zhejiang",
+//	          "city": "示例市", "city_en": "Hangzhou",
 //	          "owner": "example.net ", "isp": "移动",
 //	          "whois": "RFC1918", "lat": 30.29, "lng": 120.16,
 //	          "prefix": "", "router": {}, "source": ""

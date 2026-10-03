@@ -144,7 +144,7 @@ var migrations = []migration{
 			// 读出时再换算成毫秒。
 			//
 			// 失败结果同样入库（error_type != ''）：失败也是线路信息，
-			// 例如"Sample Province移动对该目标成功率 12%"本身就有价值。
+			// 例如"示例省移动对该目标成功率 12%"本身就有价值。
 			//
 			// dedup_key 是 (collector,session,target,timestamp) 的内容哈希，
 			// 用于让"同一个 batch 被重复导入"变成幂等操作而不会让统计翻倍。

@@ -12,8 +12,8 @@
 
 ```text
 某个 IP:Port
-  从Sample Province移动访问怎么样？
-  从Sample Province电信访问怎么样？
+  从示例省移动访问怎么样？
+  从示例省电信访问怎么样？
   从广东移动访问怎么样？
   从北京联通访问怎么样？
   从日本访问怎么样？
@@ -318,7 +318,7 @@ cache:        data/all.json (written)
 cf-route-tester detect                       # 检测并显示（不写入）
 cf-route-tester detect --write               # 检测并写入 data/collector.json
 cf-route-tester detect --source local        # 只用离线源，不联系任何外部服务
-cf-route-tester detect --isp "China Mobile Zhejiang" --province Zhejiang --write
+cf-route-tester detect --isp "China Mobile" --province Sample Province --write
 cf-route-tester detect --json                # 机器可读输出
 ```
 
@@ -335,7 +335,7 @@ detection sources:
 source results:
   local  OK      (no fields)  (1ms)
   geoip  OK      country=CN province=Shanghai city=Shanghai \
-                 isp=Example Telecom asn=AS64500 ip_version=ipv4  (1.699s)
+                 isp=China Mobile asn=AS56046 ip_version=ipv4  (1.699s)
 
 field sources:
   country:    geoip
@@ -349,8 +349,8 @@ collector profile:
   country:    CN
   province:   Shanghai
   city:       Shanghai
-  isp:        Example Telecom
-  asn:        AS64500
+  isp:        China Mobile
+  asn:        AS56046
   ip_version: ipv4
 ```
 
@@ -383,20 +383,20 @@ DNS 服务商（Cloudflare / Google）的 ASN。把它写进采集者画像就�
 手动填写的值（命令行或已有配置文件）  >  自动检测结果
 ```
 
-真实示例：检测给出 `province=Shanghai, isp=Example Telecom`，
-用户在自己机器上改成 `--province Zhejiang --city Hangzhou --isp "China Mobile Zhejiang"`：
+真实示例：检测给出 `province=Shanghai, isp=China Mobile`，
+用户在自己机器上改成 `--province Sample Province --city Sample City --isp "China Mobile"`：
 
 ```text
-$ detect --isp "China Mobile Zhejiang" --province Zhejiang --city Hangzhou --write
+$ detect --isp "China Mobile" --province Sample Province --city Sample City --write
 $ cat data/collector.json
 {
   "collector_id": "c-0b720f1207df74114840f2be949d229b",
   "profile": {
     "country": "CN",
-    "province": "Zhejiang",          <- 手动值保持
-    "city": "Hangzhou",              <- 手动值保持
-    "isp": "China Mobile Zhejiang",  <- 手动值保持
-    "asn": "AS64500",               <- 未被手填，仍是检测结果
+    "province": "Sample Province",          <- 手动值保持
+    "city": "Sample City",              <- 手动值保持
+    "isp": "China Mobile",  <- 手动值保持
+    "asn": "AS56046",               <- 未被手填，仍是检测结果
     "ip_version": "ipv4"
   }
 }
@@ -493,7 +493,7 @@ cf-route-tester scan --limit 300           # 只扫前 300 个（先验证链路
 cf-route-tester scan --resume              # 继续上次未完成的扫描
 cf-route-tester scan --resume --session 20260101T000000Z-00000000   # 指定会话
 cf-route-tester scan --new                 # 强制开始新会话（默认行为）
-cf-route-tester scan --country cn --province Zhejiang --city Hangzhou \
+cf-route-tester scan --country cn --province Sample Province --city Sample City \
                     --isp "China Mobile" --asn 9808
 ```
 
@@ -619,7 +619,7 @@ cf-route-tester scan --trace --trace-workers 4 --trace-timeout 25s
 source:     https://zip.cm.edu.kg/all.json (cache, json)
 targets:    3
 database:   /path/to/results.db
-collector:  c-00000000...  CN/Zhejiang/Hangzhou/China Mobile/AS9808
+collector:  c-00000000...  CN/Sample Province/Sample City/China Mobile/AS9808
 session:    20260101T000000Z-00000000 (new session)
 concurrency: 100 workers, timeout 1s
 trace:      enabled (mode tcp, 10 workers) — 只跟踪 TCP 探测成功的目标
@@ -748,8 +748,8 @@ cf-route-tester trace --target 1.1.1.1:443 --verbose        # 打印完整跳表
    1  192.168.1.1                                 0.75 ms
    2  192.168.1.1                                 1.23 ms
    3  *
-   4  203.0.113.4                               3.45 ms  AS64500  example.net
-   5  203.0.113.5                              3.97 ms  AS64500  example.net
+   4  203.0.113.4                               3.45 ms  AS56046  example.net
+   5  203.0.113.5                              3.97 ms  AS56046  example.net
    6  *
    ...
   30  *
@@ -843,8 +843,8 @@ note: "permission_denied" means the trace could not be performed
         "Geo": {
           "asnumber": "64500",
           "country": "中国", "country_en": "China",
-          "prov": "Sample Province", "prov_en": "Zhejiang",
-          "city": "Sample City", "city_en": "Hangzhou",
+          "prov": "示例省", "prov_en": "Sample Province",
+          "city": "示例市", "city_en": "Sample City",
           "owner": "example.net ", "isp": "移动",
           "lat": 30.29, "lng": 120.16
         }
@@ -1009,7 +1009,7 @@ IDENTICAL — export is reproducible
   "timestamp_utc": "2026-10-03T13:17:30.295Z",
   "session_id": "20260101T000000Z-00000000",
   "collector_id": "c-00000000000000000000000000000000",
-  "collector": { "country": "CN", "province": "Zhejiang", "city": "Hangzhou",
+  "collector": { "country": "CN", "province": "Sample Province", "city": "Sample City",
                  "isp": "China Mobile", "asn": "AS9808", "ip_version": "ipv4" },
   "target_meta": {
     "country": "US", "cca2": "US", "region": "Illinois", "city": "Chicago",
@@ -1080,7 +1080,7 @@ cf-route-tester aggregate --input data/batches --min-samples 5 --top-groups 100
 ```
 
 必须这样分组，因为「1.1.1.1:443 的延迟是多少」**没有唯一答案**——
-只有「从某地某运营商看是多少」。同一个 IP 从Sample Province移动和从德国电信看过去
+只有「从某地某运营商看是多少」。同一个 IP 从示例省移动和从德国电信看过去
 是完全不同的线路。
 
 真实运行结果（两个节点的批次，各 10 个目标）：
@@ -1098,7 +1098,7 @@ totals:
 
 by region / ISP:
   REGION                                 TARGETS     PROBES      OK%   P50 ms
-  CN/Zhejiang/Hangzhou/China Mobile/AS9808      10         10    90.0%    321.3
+  CN/Sample Province/Sample City/China Mobile/AS9808      10         10    90.0%    321.3
   US/California/Los Angeles/Vultr/AS204…      10         10   100.0%    276.6
 
 top targets by cross-region coverage:
@@ -1108,7 +1108,7 @@ top targets by cross-region coverage:
 
 groups (target x region x ISP):
   TARGET                     REGION/ISP              PROBES      OK%   P50 ms
-  121.127.34.119:443         CN/Zhejiang/Hangzhou/Ch…       1   100.0%    305.6
+  121.127.34.119:443         CN/Sample Province/Sample City/Ch…       1   100.0%    305.6
   121.127.34.119:443         US/California/Los Ang…       1   100.0%    250.2
 ```
 
@@ -1215,23 +1215,23 @@ cf-route-tester query 1.1.1.1:443 --db x.db --format json     # 机器可读
 
   by region / ISP:
     REGION                                          PROBES      OK      OK%    P50ms
-    CN/Zhejiang/Hangzhou/China Mobile/AS9808               2       1    50.0%    300.5
+    CN/Sample Province/Sample City/China Mobile/AS9808               2       1    50.0%    300.5
     US/California/Los Angeles/Vultr/AS20473              1       1   100.0%    250.2
 
-  AS path (CN/Zhejiang/Hangzhou/China Mobile/AS9808):
-    AS64500-AS20473                                              1
+  AS path (CN/Sample Province/Sample City/China Mobile/AS9808):
+    AS56046-AS20473                                              1
 ```
 
 `--hops` 会额外给出逐跳延迟与超时情况（按 TTL 聚合，而不是按 IP——
 同一个 TTL 在不同时间可能由不同的等价路由器应答）：
 
 ```text
-  hops (CN/Zhejiang/Hangzhou/China Mobile/AS9808):
+  hops (CN/Sample Province/Sample City/China Mobile/AS9808):
     TTL  IP                             ASN           TO     P50ms     MAXms
       1  192.168.1.1                                   0      1.31      6.25
       2  192.168.1.1                                   0      1.19      1.22
       3  *                                             1      0.00      0.00
-      4  203.0.113.24                  AS64500        0      4.58     16.54
+      4  203.0.113.24                  AS56046        0      4.58     16.54
       6  203.0.113.6                 AS9808         0     10.34     10.71
       9  203.0.113.9                  AS58453        0    195.12    196.45
 ```
@@ -1274,8 +1274,8 @@ JSON 输出里带 `percentiles_approx: true`。**极值与平均值是精确的*
 
 ```bash
 cf-route-tester probe --db data/results.db                 # 测量并把结果落库
-cf-route-tester probe --db data/results.db --country cn --province Zhejiang \
-                     --city Hangzhou --isp "China Mobile" --asn 9808
+cf-route-tester probe --db data/results.db --country cn --province Sample Province \
+                     --city Sample City --isp "China Mobile" --asn 9808
 cf-route-tester db stats                                   # 行数、覆盖率、时间范围
 cf-route-tester db migrate                                 # 幂等，可安全重复执行
 cf-route-tester db vacuum                                  # 整理数据库文件
@@ -1503,7 +1503,7 @@ NextTrace  → 去这个 IP:Port 的路径经过哪里？
 因为对众测数据库来说：
 
 ```text
-Sample Province移动 / 1.2.3.4:443 / 成功率 12%
+示例省移动 / 1.2.3.4:443 / 成功率 12%
 ```
 
 本身就是非常有价值的事实。
@@ -2092,7 +2092,7 @@ linux/darwin/windows × amd64/arm64 交叉编译
                          │
           ┌──────────────┼──────────────┐
           ▼              ▼              ▼
-       Sample Province移动        Sample Province电信        广东移动
+       示例省移动        示例省电信        广东移动
           │              │              │
           └──────────────┼──────────────┘
                          ▼

@@ -386,6 +386,9 @@ func TestExportSessionFilter(t *testing.T) {
 	t.Run("bogus session yields nothing and says so", func(t *testing.T) {
 		code, stdout, stderr := runCLI("export",
 			"--db", dbPath, "--identity", identityPath,
+			// 这个 ID 必须**不存在于**数据库里：测试的是"筛选出空结果"
+			// 的行为。早先清理脚本把它替换成了 dbPath 里真正使用的
+			// exportTestSessionID，于是"空结果"变成了"有结果"，测试失败。
 			"--session", "20260101T000000Z-00000000", "--dry-run", "--quiet")
 		if code != ExitCodeOK {
 			t.Fatalf("exit code = %d (stderr=%q)", code, stderr)

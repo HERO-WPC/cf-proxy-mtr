@@ -55,7 +55,7 @@ const (
 //
 // 分类是给后续分析用的：数据库里保存的是"哪一种失败"，
 // 而不是一段无法聚合的报错文本。
-// 例如"Sample Province移动对 1.2.3.4:443 的 connection_refused 占 88%"
+// 例如"示例省移动对 1.2.3.4:443 的 connection_refused 占 88%"
 // 本身就是有价值的线路信息。
 type ErrorType string
 
