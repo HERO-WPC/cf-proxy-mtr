@@ -43,6 +43,11 @@ type scanParams struct {
 	traceWorkers int
 	traceTimeout durationFlag
 
+	// 数据源相关：分别决定 ASN/地区从哪儿来、
+	// 以及 NextTrace API 的 PoW 令牌从哪儿取。
+	traceDataProvider string
+	tracePowProvider  string
+
 	// 采集者画像覆盖项。
 	collectorCountry   string
 	collectorProvince  string
@@ -97,6 +102,10 @@ func scanFlagSet(p *scanParams) *flag.FlagSet {
 		"nexttrace 可执行文件路径或名字（--trace 时使用）")
 	fs.StringVar(&p.traceMode, "trace-mode", string(trace.ModeTCP),
 		"跟踪模式：tcp / icmp / udp（--trace 时使用）")
+	fs.StringVar(&p.traceDataProvider, "trace-data-provider", string(trace.DefaultDataProvider),
+		"线路跟踪的 GeoIP 数据源（ASN/运营商/地区的来源），可选："+providerList())
+	fs.StringVar(&p.tracePowProvider, "trace-pow-provider", "",
+		"线路跟踪的 PoW 令牌源（仅 --data-provider NextTrace-API 时生效），可选："+powProviderList())
 	fs.IntVar(&p.traceWorkers, "trace-workers", trace.DefaultWorkers,
 		"跟踪并发数（上限 "+itoa(trace.MaxWorkers)+"；每 worker 启动一个进程）")
 	fs.Var(&p.traceTimeout, "trace-timeout", "单个跟踪超时（默认 "+trace.DefaultTimeout.String()+"）")
@@ -210,6 +219,17 @@ func runScan(env *Env, args []string) error {
 		if _, err := trace.Mode(p.traceMode).Normalize(); err != nil {
 			return usageError("%v", err)
 		}
+		// 数据源也在这里校验。
+		//
+		// 少了这一步，写错数据源名的后果是"跟踪被跳过"——
+		// 而那看起来像是引擎没装，排查方向完全错。
+		// 真正的问题是参数写错，就该现在说。
+		if _, err := trace.DataProvider(p.traceDataProvider).Normalize(); err != nil {
+			return usageError("%v", err)
+		}
+		if _, err := trace.PowProvider(p.tracePowProvider).Normalize(); err != nil {
+			return usageError("%v", err)
+		}
 	}
 
 	if !p.quiet {
@@ -228,8 +248,10 @@ func runScan(env *Env, args []string) error {
 		Limit:      p.limit,
 		Trace:      p.trace,
 		TraceConfig: service.TraceOptions{
-			Binary: p.traceBinary,
-			Mode:   p.traceMode,
+			Binary:       p.traceBinary,
+			Mode:         p.traceMode,
+			DataProvider: p.traceDataProvider,
+			PowProvider:  p.tracePowProvider,
 		},
 	}
 

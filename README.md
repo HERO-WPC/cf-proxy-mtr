@@ -753,6 +753,8 @@ cf-route-tester trace --target 1.1.1.1 --mode icmp          # 无需管理员权
 cf-route-tester trace --binary "C:/Tools/nexttrace.exe" --target 1.1.1.1:443
 cf-route-tester trace --limit 20 --workers 10 --json        # 从目标列表批量跟踪
 cf-route-tester trace --target 1.1.1.1:443 --verbose        # 打印完整跳表
+cf-route-tester trace --target 1.1.1.1:443 --data-provider IPInfo   # 换 GeoIP 数据源
+cf-route-tester trace --target 1.1.1.1:443 --pow-provider sakura    # 换 PoW 令牌源
 ```
 
 输出示例（真实运行结果，NextTrace v1.7.3，ICMP 模式）：
@@ -913,6 +915,67 @@ trace   默认 10 并发，上限 64（每个 worker 会启动一个 nexttrace �
 
 两者共用同一个有界 worker pool（`internal/worker`），
 因此并发与取消语义只有一份实现；区别只在"每个 job 做什么"。
+
+#### 数据源可选（GeoIP / ASN / 地区从哪儿来）
+
+`NextTrace-API`、`IP.SB`、`IPInfo`、`IPInsight`、`IP-API.com`、
+`IPInfoLocal`、`ipdb.one`、`chunzhen`、`disable-geoip`
+—— 清单与本地 nexttrace 的 `--help` 一致，有测试钉住。
+
+```bash
+cf-route-tester trace --target 1.1.1.1:443 --data-provider IPInfo
+cf-route-tester scan --trace --trace-data-provider IPInfo
+cf-route-tester scan --trace --trace-data-provider NextTrace-API --trace-pow-provider sakura
+cf-route-tester scan --trace --trace-data-provider disable-geoip   # 不查地区，最快
+```
+
+图形界面里是跟踪选项下的两个下拉框（数据源、PoW 令牌源）。
+
+**为什么默认是 `NextTrace-API`**：它的 ASN 覆盖与线路命名最完整，
+也就是本项目输出 `CMNET(AS9808) > CMI(AS58453)` 这种信息的来源。
+
+**但它也是唯一与 PoW 令牌绑定的源。** 令牌拿不到时整次跟踪会失败，
+而不是降级成"没有 ASN 的路径"：
+
+```text
+线路 45.63.67.144:443 跟踪失败：pow token fetch failed: RetToken failed
+after 3 attempts (host=api.nxtrace.org): too many requests
+```
+
+撞上这个时有两个办法：
+
+| 办法 | 说明 |
+| --- | --- |
+| 换第三方源 | `--data-provider IPInfo` 等，完全绕开 PoW |
+| 换 PoW 源 | `--pow-provider sakura` —— nexttrace 帮助里写明"For China mainland users, please use sakura" |
+
+`--pow-provider` **只在数据源是 `NextTrace-API` 时才传给 nexttrace**：
+用第三方源时这个参数没有意义，传了只会让命令行更难读。
+
+**`disable-geoip` 的代价要说清楚**：不做地区查询，因此 `as_path` 与
+落地地区必然为空。选它意味着只要路径、不要归属，不是"跟踪坏了"。
+
+#### 数据源名字写错会被挡住，而不是静默换源
+
+这是必须做成受校验类型（而不是透传字符串）的原因：
+**nexttrace 拿到不认识的数据源名时不报错，而是换一个源继续跑。**
+那意味着"我以为在用 IPInfo，实际在用别的"——从结果上完全看不出来。
+
+因此校验发生在**构造引擎时**，也发生在任何副作用之前：
+
+```text
+$ cf-route-tester scan --trace --trace-data-provider nope --out data/x.csv
+Error: usage error: unknown data provider "nope" (choose one of
+IP-API.com, IP.SB, IPInfo, IPInfoLocal, IPInsight, NextTrace-API,
+chunzhen, disable-geoip, ipdb.one)
+```
+
+目标是**一个字节都不该测**：结果文件不会被创建，目标列表也不会去下载。
+放到跟踪阶段才校验的话，后果是"先测完所有目标、写好 CSV，然后报跟踪被
+跳过"——那看起来像引擎没装，排查方向完全错。
+
+顺带一提：拼错的名字里带点的写法也会被规范化，`ipinfo`、`ipapi`、
+`leomoeapi`、`local`、`none` 这类简写都能用（大小写不敏感）。
 
 ### export：导出可公开的 JSONL
 
@@ -1841,10 +1904,12 @@ cf-route-tester/
 | 文件 | 作用 |
 | --- | --- |
 | `engine.go` | `TraceEngine` 接口、`Hop` / `TraceResult`、失败分类（含"引擎不存在""权限不足"这类**环境问题**，它们不算线路质量）。 |
-| `ntrace.go` | 外部进程调用：路径解析（PATH / 绝对路径 / 补 `.exe`）、参数构造、超时、版本查询。 |
+| `ntrace.go` | 外部进程调用：路径解析（PATH / 绝对路径 / 补 `.exe`）、参数构造（含数据源与 PoW 源）、超时、版本查询。 |
+| `provider.go` | 两个「源」选项：`DataProvider`（9 个 GeoIP 源）与 `PowProvider`（NextTrace API v3 的令牌源）。做成受校验类型而不是透传字符串，因为 **nexttrace 拿到不认识的源名不报错、而是换一个源继续跑**——那会让人以为在用 IPInfo 而实际不是，从结果上看不出来。含大小写不敏感与常见简写（`ipinfo` / `ipapi` / `leomoeapi` / `none` …）。 |
 | `parser.go` | NextTrace JSON → `TraceResult` 的归一化。**含纳秒→毫秒换算**、二维 `Hops` 聚合、乱码 `*_en` 字段优先。 |
 | `testdata/nexttrace_v1.7.3_icmp.json` | **真实** NextTrace v1.7.3 输出夹具。解析契约的依据；有测试断言它没被手工改过。 |
 | `trace_test.go` | 用真实夹具锁定解析契约、参数构造（端口必须用目标自己的）、失败分类、超时、假二进制端到端。 |
+| `provider_test.go` | 数据源与 PoW 源：规范值/别名/大小写、空值走默认、**拼错必须被拒绝且错误里列出可选值**、`disable-geoip` 不查地区、参数里带上 `--data-provider`、PoW 源只在 NextTrace-API 时才传、构造期挡住非法源、以及**可选值清单与 nexttrace `--help` 一致**（外部契约，不能随手改）。 |
 | `exec_windows.go` | 启动 NextTrace 子进程时加 `CREATE_NO_WINDOW` + `HideWindow`：它是控制台程序，在无控制台的宿主里启动会让每个目标都弹出一个黑框。 |
 | `exec_unix.go` | 非 Windows 的同名空操作（Unix 下启动子进程本来就不会开终端窗口）。 |
 
@@ -1949,8 +2014,9 @@ cf-route-tester/
 | 文件 | 命令 | 作用 |
 | --- | --- | --- |
 | `cmd_probe.go` | `probe` | TCP 探测，支持 `--db` 落库、`--json` 输出 JSONL、失败分类汇总。 |
-| `cmd_scan.go` | `scan` | 全量扫描：结果实时写入 CSV（`--out` / `--append`）、进度、两级测量汇总。 |
-| `cmd_trace.go` | `trace` | 单个/批量线路跟踪，`--hops` 逐跳表、`--json` JSONL。 |
+| `cmd_scan.go` | `scan` | 全量扫描：结果实时写入 CSV（`--out` / `--append`）、进度、两级测量汇总、`--verbose` 逐条输出、`--trace-data-provider` / `--trace-pow-provider`。上线前先校验用法类参数（模式、数据源、PoW 源），确保写错时**一个字节都不测**。 |
+| `cmd_trace.go` | `trace` | 单个/批量线路跟踪，`--hops` 逐跳表、`--json` JSONL、`--data-provider` / `--pow-provider`。 |
+| `providers.go` | 从 `trace.DataProviders()` / `PowProviders()` 生成 `--help` 里的可选值列表。手工维护的列表迟早与真正接受的值漂移，而「帮助里列了但用不了」最烦人。 |
 | `cmd_detect.go` | `detect` | 检测本机地区/运营商，写入标识文件；发起请求**之前**打印"谁会看到你的 IP"。 |
 | `cmd_db.go` | `db` | `db stats` / `migrate` / `vacuum`。 |
 | `cmd_export.go` | `export` | 导出公开 JSONL，含 `--dry-run`、`--list-sessions`、格式与隐私报告。 |

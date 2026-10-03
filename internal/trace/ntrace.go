@@ -247,6 +247,18 @@ type NextTraceEngine struct {
 	// Mode 是跟踪模式（默认 tcp）。
 	Mode Mode
 
+	// DataProvider 是 GeoIP 数据源（默认 NextTrace-API）。
+	//
+	// 影响每一跳的 ASN / 运营商 / 地理位置从哪儿来。
+	// 它是本项目里**唯一**与 PoW 令牌绑定的选项：
+	// 用 NextTrace-API 时令牌拿不到会整体失败。
+	DataProvider DataProvider
+
+	// PowProvider 是 NextTrace API v3 的 PoW 令牌来源（空表示不指定）。
+	//
+	// 中国大陆用户常用 sakura 避开默认源的限流。
+	PowProvider PowProvider
+
 	// resolvedPath 是解析后的绝对路径（构造时解析一次）。
 	resolvedPath string
 
@@ -272,6 +284,12 @@ type EngineOptions struct {
 	// Mode 是跟踪模式（空表示 tcp）。
 	Mode Mode
 
+	// DataProvider 是 GeoIP 数据源（空表示默认）。
+	DataProvider DataProvider
+
+	// PowProvider 是 PoW 令牌来源（空表示不显式指定）。
+	PowProvider PowProvider
+
 	// RunCommand 允许注入命令执行（测试用）。
 	RunCommand func(ctx context.Context, path string, args []string) ([]byte, []byte, error)
 
@@ -293,16 +311,32 @@ func NewNextTraceEngine(ctx context.Context, opts EngineOptions) (*NextTraceEngi
 		return nil, err
 	}
 
+	// 数据源与 PoW 源在这里就校验。
+	//
+	// 这一步必须在构造时做：NextTrace 拿到不认识的数据源名时
+	// 不报错，而是换一个源继续跑——那会让人以为在用 IPInfo，
+	// 实际用的是别的，从结果上完全看不出来。
+	dataProvider, err := opts.DataProvider.Normalize()
+	if err != nil {
+		return nil, err
+	}
+	powProvider, err := opts.PowProvider.Normalize()
+	if err != nil {
+		return nil, err
+	}
+
 	timeout := opts.Timeout
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
 
 	engine := &NextTraceEngine{
-		BinaryPath: opts.BinaryPath,
-		Timeout:    timeout,
-		Mode:       mode,
-		runCommand: opts.RunCommand,
+		BinaryPath:   opts.BinaryPath,
+		Timeout:      timeout,
+		Mode:         mode,
+		DataProvider: dataProvider,
+		PowProvider:  powProvider,
+		runCommand:   opts.RunCommand,
 	}
 
 	// 注入自定义执行器时（测试）跳过真实解析。
@@ -369,6 +403,9 @@ func (e *NextTraceEngine) BuildArgs(target model.Target) ([]string, error) {
 	// 只解析 JSON，不要颜色与表格。
 	args := []string{"--json"}
 
+	// 数据源（以及可能需要的 PoW 源）。
+	args = e.buildProviderArgs(args)
+
 	switch e.Mode {
 	case ModeTCP:
 		args = append(args, "--tcp", "--port", itoa(target.Port))
@@ -390,6 +427,38 @@ func (e *NextTraceEngine) BuildArgs(target model.Target) ([]string, error) {
 	// 而 "[::1]:443" 这种形式它并不认识（实测报 "unknown arguments"）。
 	args = append(args, target.IP)
 	return args, nil
+}
+
+// buildProviderArgs 生成数据源相关的参数。
+//
+// 单独一个函数是为了让"哪些参数与数据源有关"一目了然，
+// 也便于测试直接断言（不必构造整个 Target）。
+//
+// 显式传 `-d` 即使等于默认值：这样命令行日志本身就能证明
+// 用的是哪个源。否则"没传"与"传了默认值"看起来一样，
+// 排查时无法区分。
+func (e *NextTraceEngine) buildProviderArgs(args []string) []string {
+	provider, err := e.DataProvider.Normalize()
+	if err != nil {
+		// 理论上不可达（构造时已校验）；真发生了也不猜，
+		// 让 nexttrace 用自己的默认值，并由构造期的错误暴露问题。
+		return args
+	}
+	args = append(args, "--data-provider", string(provider))
+
+	// PoW 源只在显式指定时传：默认值交给 nexttrace 自己决定，
+	// 免得把上游的默认值固化进本项目。
+	//
+	// 也只在数据源真的会走 NextTrace API 时才传——
+	// 用 IPInfo 等第三方源时这个参数没有意义。
+	if !e.PowProvider.IsZero() && provider == ProviderNextTraceAPI {
+		pow, powErr := e.PowProvider.Normalize()
+		if powErr == nil && !pow.IsZero() {
+			args = append(args, "--pow-provider", string(pow))
+		}
+	}
+
+	return args
 }
 
 // Trace 实现 TraceEngine。

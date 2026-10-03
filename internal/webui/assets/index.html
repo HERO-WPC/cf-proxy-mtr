@@ -187,6 +187,28 @@
               <option value="udp">udp</option>
             </select>
           </div>
+          <div>
+            <label for="dataProvider">数据源（ASN / 运营商 / 地区）</label>
+            <select id="dataProvider">
+              <option value="NextTrace-API">NextTrace-API（默认，最全；走 PoW 令牌，可能被限流）</option>
+              <option value="IPInfo">IPInfo</option>
+              <option value="IP.SB">IP.SB</option>
+              <option value="IPInsight">IPInsight</option>
+              <option value="IP-API.com">IP-API.com</option>
+              <option value="IPInfoLocal">IPInfoLocal（本地库，不联网）</option>
+              <option value="ipdb.one">ipdb.one</option>
+              <option value="chunzhen">chunzhen（纯真库）</option>
+              <option value="disable-geoip">disable-geoip（不查地区，最快；as_path 与落地地区为空）</option>
+            </select>
+          </div>
+          <div>
+            <label for="powProvider">PoW 令牌源（仅 NextTrace-API 有效）</label>
+            <select id="powProvider">
+              <option value="">不指定（用 NextTrace 默认）</option>
+              <option value="sakura">sakura（中国大陆用户建议）</option>
+              <option value="api.nxtrace.org">api.nxtrace.org</option>
+            </select>
+          </div>
         </div>
       </div>
 
@@ -396,6 +418,8 @@ startBtn.addEventListener('click', async () => {
     trace: traceBox.checked,
     trace_binary: document.getElementById('traceBinary').value.trim(),
     trace_mode: document.getElementById('traceMode').value,
+    data_provider: document.getElementById('dataProvider').value,
+    pow_provider: document.getElementById('powProvider').value,
   };
 
   banner('', '');

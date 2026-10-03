@@ -253,6 +253,66 @@ func TestRunCSVScanValidatesTraceModeFirst(t *testing.T) {
 	}
 }
 
+// TestRunCSVScanValidatesDataProviderFirst 验证数据源错误也是**用法错误**，
+// 且发生在任何副作用之前。
+//
+// 为什么要单独测：数据源校验曾经只在跟踪阶段做，于是写错源名的后果是
+// "先测完所有目标、写好 CSV，然后报跟踪被跳过"——那看起来像引擎没装，
+// 排查方向完全错。真正的问题是参数写错。
+//
+// 更重要的一点：nexttrace 拿到不认识的数据源名时**不报错**，
+// 而是悄悄换一个源。所以必须在构造引擎之前就挡住。
+func TestRunCSVScanValidatesDataProviderFirst(t *testing.T) {
+	svc := testService(t, writeCache(t, listenLocal(t)))
+	out := filepath.Join(t.TempDir(), "results.csv")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err := svc.RunCSVScan(ctx, CSVScanOptions{
+		OutputPath:  out,
+		Trace:       true,
+		TraceConfig: TraceOptions{DataProvider: "nope"},
+	})
+	if err == nil {
+		t.Fatal("RunCSVScan accepted an unknown data provider")
+	}
+	if !IsUsage(err) {
+		t.Errorf("error = %v, want a usage error", err)
+	}
+	if !strings.Contains(err.Error(), "unknown data provider") {
+		t.Errorf("error = %v, want it to name the problem", err)
+	}
+	// 连 CSV 都不该被创建：目标一个都没测，文件就不该出现。
+	if _, statErr := os.Stat(out); statErr == nil {
+		t.Error("the CSV was created before the data provider was validated")
+	}
+}
+
+// TestRunCSVScanValidatesPowProviderFirst 验证 PoW 源同样先校验。
+func TestRunCSVScanValidatesPowProviderFirst(t *testing.T) {
+	svc := testService(t, writeCache(t, listenLocal(t)))
+	out := filepath.Join(t.TempDir(), "results.csv")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err := svc.RunCSVScan(ctx, CSVScanOptions{
+		OutputPath:  out,
+		Trace:       true,
+		TraceConfig: TraceOptions{PowProvider: "cloudflare"},
+	})
+	if err == nil {
+		t.Fatal("RunCSVScan accepted an unknown pow provider")
+	}
+	if !IsUsage(err) {
+		t.Errorf("error = %v, want a usage error", err)
+	}
+	if _, statErr := os.Stat(out); statErr == nil {
+		t.Error("the CSV was created before the pow provider was validated")
+	}
+}
+
 // TestRunCSVScanHonorsLimit 验证 limit 只测前 N 个。
 func TestRunCSVScanHonorsLimit(t *testing.T) {
 	p1, p2, p3 := listenLocal(t), listenLocal(t), listenLocal(t)

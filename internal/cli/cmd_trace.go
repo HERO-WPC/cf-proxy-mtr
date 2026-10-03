@@ -47,6 +47,11 @@ type traceParams struct {
 	timeout durationFlag
 	limit   int
 
+	// 数据源相关：分别决定 ASN/地区从哪儿来、
+	// 以及 NextTrace API 的 PoW 令牌从哪儿取。
+	dataProvider string
+	powProvider  string
+
 	jsonOut bool
 	verbose bool
 	quiet   bool
@@ -89,6 +94,10 @@ func traceFlagSet(p *traceParams) *flag.FlagSet {
 	fs.Var(&p.targets, "target", "要跟踪的 IP:Port（可重复；不传则取目标列表）")
 	fs.StringVar(&p.binary, "binary", trace.DefaultBinary, "nexttrace 可执行文件路径或名字")
 	fs.StringVar(&p.mode, "mode", string(trace.ModeTCP), "跟踪模式：tcp / icmp / udp")
+	fs.StringVar(&p.dataProvider, "data-provider", string(trace.DefaultDataProvider),
+		"GeoIP 数据源（ASN/运营商/地区的来源），可选："+providerList())
+	fs.StringVar(&p.powProvider, "pow-provider", "",
+		"NextTrace API v3 的 PoW 令牌源（仅 --data-provider NextTrace-API 时生效），可选："+powProviderList())
 	fs.IntVar(&p.workers, "workers", trace.DefaultWorkers,
 		"跟踪并发数（上限 "+itoa(trace.MaxWorkers)+"；每个 worker 会启动一个进程）")
 	fs.Var(&p.timeout, "timeout", "单个跟踪超时（默认 "+trace.DefaultTimeout.String()+"）")
@@ -224,11 +233,28 @@ func buildTraceEngine(ctx context.Context, p traceParams) (*trace.NextTraceEngin
 	opts := trace.EngineOptions{
 		BinaryPath: p.binary,
 		Mode:       mode,
+		// 数据源与 PoW 源在这里原样传下去，由引擎构造时校验。
+		// 非法值必须变成**用法错误**（而不是让 nexttrace 悄悄换源）。
+		DataProvider: trace.DataProvider(p.dataProvider),
+		PowProvider:  trace.PowProvider(p.powProvider),
 	}
 	if p.timeout.set {
 		opts.Timeout = p.timeout.d
 	}
-	return trace.NewNextTraceEngine(ctx, opts)
+
+	engine, err := trace.NewNextTraceEngine(ctx, opts)
+	if err != nil {
+		// "数据源名字写错"是使用者能自己修的问题，因此归为用法错误；
+		// 而"引擎找不到"不是，保持原样（调用方会据此只禁用跟踪）。
+		if _, providerErr := trace.DataProvider(p.dataProvider).Normalize(); providerErr != nil {
+			return nil, usageError("%v", providerErr)
+		}
+		if _, powErr := trace.PowProvider(p.powProvider).Normalize(); powErr != nil {
+			return nil, usageError("%v", powErr)
+		}
+		return nil, err
+	}
+	return engine, nil
 }
 
 // runTraceBatch 用共享的有界 worker pool 并发跟踪。

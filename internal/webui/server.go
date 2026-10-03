@@ -521,6 +521,12 @@ type scanRequest struct {
 	TraceWorkers  int    `json:"trace_workers"`
 	TraceTimeoutS int    `json:"trace_timeout_s"`
 
+	// DataProvider 是 GeoIP 数据源（ASN/运营商/地区的来源）。
+	DataProvider string `json:"data_provider"`
+
+	// PowProvider 是 NextTrace API v3 的 PoW 令牌源。
+	PowProvider string `json:"pow_provider"`
+
 	// OutputPath 是结果 CSV 的路径（留空用默认值）。
 	//
 	// 结果只进 CSV：没有会话、没有数据库、没有续测。
@@ -603,10 +609,12 @@ func (s *Server) runScan(ctx context.Context, req scanRequest, cancel context.Ca
 		Limit:      req.Limit,
 		Trace:      req.Trace,
 		TraceConfig: service.TraceOptions{
-			Binary:  strings.TrimSpace(req.TraceBinary),
-			Mode:    strings.TrimSpace(req.TraceMode),
-			Workers: req.TraceWorkers,
-			Timeout: durationSeconds(req.TraceTimeoutS),
+			Binary:       strings.TrimSpace(req.TraceBinary),
+			Mode:         strings.TrimSpace(req.TraceMode),
+			DataProvider: strings.TrimSpace(req.DataProvider),
+			PowProvider:  strings.TrimSpace(req.PowProvider),
+			Workers:      req.TraceWorkers,
+			Timeout:      durationSeconds(req.TraceTimeoutS),
 		},
 		// Progress 既推给进度条，也翻译成日志行（阶段完成时才写一条）。
 		Progress: s.emitCSVProgress,

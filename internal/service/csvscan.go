@@ -165,6 +165,20 @@ func (s *Service) RunCSVScan(ctx context.Context, opts CSVScanOptions) (*CSVScan
 		if _, err := trace.Mode(opts.TraceConfig.Mode).Normalize(); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrUsage, err)
 		}
+
+		// 数据源与 PoW 源也在这里校验，而不是等到跟踪阶段。
+		//
+		// 放到跟踪阶段的话，写错数据源名的后果是"先测完所有目标、
+		// 写好 CSV，然后报跟踪被跳过"——那看起来像引擎没装，
+		// 排查方向完全错。真正的问题是参数写错。
+		//
+		// 这个位置同时覆盖命令行与图形界面（两边都走 RunCSVScan）。
+		if _, err := trace.DataProvider(opts.TraceConfig.DataProvider).Normalize(); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrUsage, err)
+		}
+		if _, err := trace.PowProvider(opts.TraceConfig.PowProvider).Normalize(); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrUsage, err)
+		}
 	}
 
 	// ---- 2) 目标列表 ----

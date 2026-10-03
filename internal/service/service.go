@@ -144,6 +144,19 @@ type TraceOptions struct {
 	// Mode 是跟踪模式：tcp / icmp / udp（空表示 tcp）。
 	Mode string
 
+	// DataProvider 是 GeoIP 数据源（空表示默认 NextTrace-API）。
+	//
+	// 可选值见 trace.DataProviders()。它决定每一跳的 ASN / 运营商 /
+	// 地理位置从哪儿来，也决定会不会被 PoW 令牌机制挡住
+	// （只有 NextTrace-API 走 PoW）。
+	DataProvider string
+
+	// PowProvider 是 NextTrace API v3 的 PoW 令牌来源（空表示不指定）。
+	//
+	// 只在 DataProvider 为 NextTrace-API 时生效；中国大陆用户
+	// 常用 sakura 避开默认源的限流。
+	PowProvider string
+
 	// Workers 是跟踪并发数（<=0 用默认值）。
 	Workers int
 
@@ -420,6 +433,12 @@ func (s *Service) buildTraceEngine(ctx context.Context, opts TraceOptions) (*tra
 		}
 		engineOpts.Mode = mode
 	}
+
+	// 数据源与 PoW 源：直接交给 EngineOptions，由它在构造时校验。
+	// 这里刻意不做二次判断，避免两处校验规则漂移。
+	engineOpts.DataProvider = trace.DataProvider(strings.TrimSpace(opts.DataProvider))
+	engineOpts.PowProvider = trace.PowProvider(strings.TrimSpace(opts.PowProvider))
+
 	return trace.NewNextTraceEngine(ctx, engineOpts)
 }
 
