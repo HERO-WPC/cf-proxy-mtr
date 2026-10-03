@@ -39,8 +39,8 @@ Phase 6  ✅ 本机地区 / 运营商信息（detect 包：可解释的检测源
 Phase 7  ✅ NextTrace 集成（trace 包：外部进程、真实 JSON 解析、trace 命令）
 Phase 8  ✅ TCP Probe + NextTrace 两级测量（只跟踪探测成功的目标，可续测）
 Phase 9  ✅ 结果导出（export 包 + privacy 包：JSONL / gzip、公开 Schema、隐私过滤）
-Phase 10 ⏳ GitHub 上传（按用户要求暂缓，等确定方案后再做）
-Phase 11 ⏳ GitHub 数据聚合
+Phase 10 ⏸️ GitHub 上传（按用户要求暂缓：先把全部流程在本地跑通）
+Phase 11 ✅ 数据聚合（aggregate 包：按目标 × 地区 × 运营商分组、跨节点对比）
 Phase 12 ⏳ 查询与统计
 Phase 13 ⏳ 跨平台打包与发布
 ```
@@ -60,13 +60,17 @@ cf-route-tester scan --trace   # 扫描后对**探测成功**的目标做线路�
 cf-route-tester trace --target 1.1.1.1:443   # 单独跟踪一个目标
 cf-route-tester export --list-sessions       # 查看可导出的会话
 cf-route-tester export --session <id>        # 导出为公开 JSONL（自动隐私过滤）
+cf-route-tester aggregate --input batch.jsonl.gz   # 把导出物聚合为统计结果
 cf-route-tester db stats       # 查看本地数据库状态
 cf-route-tester db migrate     # 应用数据库迁移
 cf-route-tester db vacuum      # 整理数据库文件
 ```
 
 尚未实现（执行时明确报 `not implemented yet`，退出码 2）：
-`upload`、`aggregate`、`query`。
+`query`、`upload`。
+
+> `upload` 按用户要求暂缓：先确保 `fetch → detect → scan → trace → export → aggregate`
+> 整条链路在本地完全跑通，凭据与归属方案确定后再做。
 
 ---
 
@@ -888,6 +892,132 @@ another path with --out
 cf-route-tester export --format jsonl --out - | jq -c 'select(.kind=="trace")' | head
 ```
 
+### aggregate：把公开数据聚合为统计结果
+
+```bash
+cf-route-tester aggregate --input batch.jsonl.gz           # 单个批次
+cf-route-tester aggregate --input data/batches             # 整个目录（递归）
+cf-route-tester aggregate --input a.jsonl --input b.jsonl.gz
+cf-route-tester aggregate --input data/batches --format json --out report.json
+cf-route-tester aggregate --input data/batches --min-samples 5 --top-groups 100
+```
+
+它**只读 JSONL**（本地导出物或从别处下载的批次），**不读数据库**。
+这个边界是刻意的：聚合结果必须能从公开数据复现，如果它依赖本地库，
+第三方就无法独立验证我们的数字。
+
+#### 分组键：目标 × 地区 × 运营商
+
+```text
+(IP:Port) × (国家/省/市) × (运营商/ASN)
+```
+
+必须这样分组，因为「1.1.1.1:443 的延迟是多少」**没有唯一答案**——
+只有「从某地某运营商看是多少」。同一个 IP 从Sample Province移动和从德国电信看过去
+是完全不同的线路。
+
+真实运行结果（两个节点的批次，各 10 个目标）：
+
+```text
+input:
+  files:        2
+  rows:         20 (20 measurements, 0 traces)
+  collectors:   2
+
+totals:
+  targets:      10
+  groups:       4 shown of 20
+  probes:       20 total, 19 ok (95.0%)
+
+by region / ISP:
+  REGION                                 TARGETS     PROBES      OK%   P50 ms
+  CN/Zhejiang/Hangzhou/China Mobile/AS9808      10         10    90.0%    321.3
+  US/California/Los Angeles/Vultr/AS204…      10         10   100.0%    276.6
+
+top targets by cross-region coverage:
+  TARGET                         REGIONS   PROBES      OK%   SPREAD ms
+  121.127.34.119:443                   2        2   100.0%        55.4
+  216.128.154.87:8443                  2        2   100.0%      1065.0
+
+groups (target x region x ISP):
+  TARGET                     REGION/ISP              PROBES      OK%   P50 ms
+  121.127.34.119:443         CN/Zhejiang/Hangzhou/Ch…       1   100.0%    305.6
+  121.127.34.119:443         US/California/Los Ang…       1   100.0%    250.2
+```
+
+#### 它回答的三个问题
+
+| 输出 | 回答的问题 |
+| --- | --- |
+| `regions[]` | 哪类网络（地区/运营商）整体表现更好 |
+| `latency_spread_ms` | **同一个目标跨地区的表现差异有多大** |
+| `distinct_as_paths` | **不同运营商是否走了不同的 AS 路径** |
+
+`latency_spread_ms` 是各分组延迟中位数的极差。上面例子里的
+`216.128.154.87:8443` 差异高达 **1065 ms**，说明这条线路对位置
+极其敏感——这类目标才是众测数据真正有价值的部分。
+
+`distinct_as_paths` 由路径的 AS 序列签名（`AS9808-AS58453-AS13335`）
+去重得到。>1 就证实了"同一个目标在不同运营商下走不同出口"。
+
+#### 不做主观评分
+
+输出里只有计数、成功率与分位数，没有任何"评分""等级""推荐"。
+需求明确要求客观指标：一个 290 ms 的 p50 是好是坏取决于用途
+（网页浏览可以，实时游戏不行），程序不该替用户下这个结论。
+
+#### 延迟分位数是近似值，且被明确标记
+
+延迟用**固定对数直方图**统计（每倍频程 20 个桶，相对误差约 3.5%），
+而不是把所有样本存进内存：
+
+- 聚合的输入是多节点长期的公开数据，单个目标可能积累几十万个样本；
+- 把每个样本都留在内存里会让聚合无法在普通机器上跑完；
+- 直方图可合并，因此"每个分组各算一份再合并出全局"是可行的。
+
+代价是分位数近似，因此每个结果都带 `percentiles_approx: true`，
+绝不把近似值当精确值报出去。**极值与平均值是精确的**
+（极值单独维护，平均值用累加和）。
+
+#### `--min-samples` 作用在**目标**层面，不是分组层面
+
+这个区别很关键。跨地区对比的常态是"每个地区只有一两个样本"
+（一个节点一次扫描对同一目标只测一次）。若按分组过滤，
+`--min-samples 2` 会把所有分组都藏掉，跨地区对比直接失效。
+
+因此语义是「这个目标被足够多次地测过没有」。明细分组
+（`groups[]`）不受该选项影响——它是原始观察记录，不是结论。
+
+（这一条是实测发现的：第一版按分组过滤，用两个真实节点跑
+`--min-samples 2` 时 `groups: 0 shown of 20`，跨节点对比完全看不到。）
+
+#### 坏数据不会被静默忽略
+
+| 情况 | 行为 |
+| --- | --- |
+| 行无法解析 | 跳过并计数，出现在 `input.bad_lines` 与 notes 里 |
+| `kind` 无法识别 | 计入 `input.unknown_kinds`，不参与分组 |
+| 单个文件打不开/损坏 | **跳过该文件并继续**，warning 里报出路径与原因 |
+| 分组数超过上限 | 丢弃并计数，notes 里说明（不静默丢） |
+| 目标样本不足 `--min-samples` | 隐藏并计数，notes 里说明 |
+
+单个坏文件不终止整批：众测数据里混着坏文件是常态，
+一个坏文件不该让整批数据作废。
+
+#### notes：不让人误读数字
+
+结果里带一组提醒，专门用于防止误读：
+
+```text
+notes:
+  - only one collector contributed data; cross-region comparisons are not meaningful yet
+  - 3 of 25 group(s) are shown; use --min-samples 1 and --top-groups 0 to see them all
+  - all data was collected within one hour; this is a snapshot, not a trend
+```
+
+当只有一个节点贡献数据时会直接说明「跨地区对比还没有意义」——
+否则一个 100% 的成功率看起来像是普遍结论，实际只是单点观察。
+
 ### db：本地 SQLite 数据库
 
 ```bash
@@ -1242,8 +1372,12 @@ cf-route-tester/
 │   │   ├── schema.go             公开 Schema（Row / Measurement / Trace）
 │   │   ├── convert.go            storage -> Row 转换 + 隐私过滤 + 错误信息清洗
 │   │   └── output.go             JSONL / gzip 编码（确定性 gzip 头）
-│   ├── upload/                   GitHub 上传（Phase 10）
-│   └── aggregate/                数据聚合（Phase 11）
+│   ├── aggregate/                数据聚合（已实现）
+│   │   ├── aggregate.go          输入读取、延迟直方图、分组键、错误计数
+│   │   ├── collector.go          累积状态（分组 / 目标 / 采集者维度）
+│   │   ├── report.go             报告生成、MinSamples 过滤、notes
+│   │   └── source.go             文件/目录发现、gzip 读取、坏文件容错
+│   └── upload/                   GitHub 上传（暂缓）
 ├── configs/config.example.yaml   配置示例（含详细注释，Phase 13 起真正被读取）
 ├── data/                         本地数据（内容不提交，仅保留说明文件）
 ├── migrations/                   迁移说明；SQL 迁移常量放在 internal/storage/migrations.go
