@@ -62,6 +62,12 @@ type Command struct {
 	// Run 执行该子命令。args 是不含命令名的剩余参数。
 	// 返回 error 时由调用方决定退出码。
 	Run func(env *Env, args []string) error
+
+	// Flags 可选地把该子命令的完整参数说明写入 w。
+	//
+	// 存在的意义：参数定义只写一次（在 FlagSet 里），
+	// 帮助文本由 FlagSet 自己渲染，避免"帮助与实际参数不一致"。
+	Flags func(w io.Writer)
 }
 
 // Env 是一次 CLI 调用的运行环境。
@@ -209,6 +215,7 @@ func newCommands() map[string]Command {
 				return nil
 			},
 		},
+		newFetchCommand(),
 		{
 			Name:    "version",
 			Summary: "显示版本信息（--verbose 显示构建细节）",

@@ -34,8 +34,8 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      - name: go test
-        run: go test ./... -count=1
+      - name: go test (with race detector)
+        run: go test ./... -count=1 -race
 
       - name: go build
         run: go build ./...
