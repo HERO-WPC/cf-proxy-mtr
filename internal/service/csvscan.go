@@ -56,6 +56,16 @@ type CSVScanOptions struct {
 	//
 	// 刻意不导出：它是测试接缝，不是使用者的选项。
 	probeOverride *probe.Config
+
+	// traceEngineOverride 允许测试注入一个跟踪引擎。
+	//
+	// 存在的理由：跟踪阶段的并发性与"每行拿到就写盘"必须被测试守住，
+	// 而真实 nexttrace 在测试里既慢又依赖本机权限（TCP/UDP 模式
+	// 需要管理员 + WinDivert）。没有这个接缝，那段代码就是零覆盖——
+	// 事实上一度就是如此。
+	//
+	// 同样刻意不导出。
+	traceEngineOverride *trace.NextTraceEngine
 }
 
 // CSVScanResult 是扫描结果摘要。
@@ -263,7 +273,7 @@ func (s *Service) RunCSVScan(ctx context.Context, opts CSVScanOptions) (*CSVScan
 
 	// ---- 5) 线路跟踪（只对成功的目标） ----
 	if opts.Trace && !result.Interrupted && len(successful) > 0 {
-		engine, engineErr := s.buildTraceEngine(ctx, opts.TraceConfig)
+		engine, engineErr := s.resolveTraceEngine(ctx, opts)
 		if engineErr != nil {
 			// 引擎不可用**不算扫描失败**：TCP 结果已经写进 CSV 了。
 			// 如实记录，让调用方展示原因。
@@ -413,6 +423,14 @@ func (s *Service) runTracePhase(
 	if stats.Skipped > 0 {
 		s.log("scan: %d target(s) were not traced because the scan stopped early", stats.Skipped)
 	}
+}
+
+// resolveTraceEngine 取得跟踪引擎：优先用注入的（测试），否则按配置构造。
+func (s *Service) resolveTraceEngine(ctx context.Context, opts CSVScanOptions) (*trace.NextTraceEngine, error) {
+	if opts.traceEngineOverride != nil {
+		return opts.traceEngineOverride, nil
+	}
+	return s.buildTraceEngine(ctx, opts.TraceConfig)
 }
 
 // traceOutcome 是跟踪阶段的"结果类型"。
