@@ -304,7 +304,8 @@ func printScanHeader(w io.Writer, res *source.Result, targets []model.Target,
 	fmt.Fprintf(w, "session:    %s (%s)\n", sessionID, mode)
 	fmt.Fprintf(w, "concurrency: %d workers, timeout %s\n", p.workers, probeTimeout(p))
 	if p.trace {
-		fmt.Fprintf(w, "trace:      requested (Phase 7 之前无法执行，会被明确跳过)\n")
+		fmt.Fprintf(w, "trace:      requested (scan 内的两级跟踪在 Phase 8 接入；\n")
+		fmt.Fprintf(w, "            现在可用 `%s trace --target IP:PORT` 手动跟踪)\n", ClientName)
 	}
 	if res.Stale {
 		fmt.Fprintf(w, "warning:    using STALE target list\n")
@@ -405,7 +406,8 @@ func printScanSummary(w io.Writer, r *scheduler.Result, p scanParams) {
 		r.Progress.Measured, r.Progress.Success, r.Progress.Failed)
 
 	if r.TraceSkipped {
-		fmt.Fprintf(w, "\ntrace:       SKIPPED (--trace 需要 NextTrace，Phase 7 起可用)\n")
+		fmt.Fprintf(w, "\ntrace:       SKIPPED (scan 内的两级跟踪在 Phase 8 接入；\n")
+		fmt.Fprintf(w, "             现在可用 `%s trace --target IP:PORT` 手动跟踪)\n", ClientName)
 	} else if r.TraceAttempted > 0 {
 		fmt.Fprintf(w, "trace:       %d target(s) attempted\n", r.TraceAttempted)
 	}

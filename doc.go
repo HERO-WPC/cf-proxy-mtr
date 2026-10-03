@@ -12,13 +12,15 @@
 //	internal/version   版本与公开数据 schema 版本
 //	internal/model     Target / Location / ColoInfo / CollectorProfile
 //	internal/source    all.json / all.txt 的下载、容错解析与本地缓存
-//	internal/probe     TCP 探测、错误分类与有界 worker pool
+//	internal/probe     TCP 探测、错误分类
+//	internal/worker    通用有界 worker pool（probe 与 trace 共用）
+//	internal/trace     NextTrace 集成：外部进程调用与 JSON 归一化
 //	internal/storage   本地 SQLite：迁移、只追加时间序列、查询
 //	internal/scheduler 扫描编排：测量会话、断点续测、两级测量顺序
 //	internal/detect    测量者地区 / 运营商检测（可解释的源、手动优先）
 //	internal/identity  本地匿名标识 collector_id（随机生成，非硬件指纹）
 //
-// 后续阶段的包（trace / export / privacy / upload / aggregate）
+// 后续阶段的包（export / privacy / upload / aggregate）
 // 会随对应 Phase 逐步加入。
 //
 // 本地验证要求（每个 Phase 都必须通过）：

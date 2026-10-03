@@ -36,7 +36,7 @@ Phase 3  ✅ TCP Probe（probe 包：错误分类、worker pool、probe 命令�
 Phase 4  ✅ SQLite（storage 包：迁移、只追加时间序列、db 命令、probe --db）
 Phase 5  ✅ 全量扫描 + Resume（scheduler 包：测量会话、断点续测、scan 命令）
 Phase 6  ✅ 本机地区 / 运营商信息（detect 包：可解释的检测源、手动优先）
-Phase 7  ⏳ NextTrace 集成
+Phase 7  ✅ NextTrace 集成（trace 包：外部进程、真实 JSON 解析、trace 命令）
 Phase 8  ⏳ TCP Probe + NextTrace 两级测量
 Phase 9  ⏳ 结果导出
 Phase 10 ⏳ GitHub 上传（按用户要求暂缓，等确定方案后再做）
@@ -56,13 +56,14 @@ cf-route-tester probe          # 对全部 IP:Port 做 TCP 连通性与延迟测
 cf-route-tester probe --db data/results.db   # 同上，并把结果写入本地 SQLite
 cf-route-tester scan           # 全量扫描：测量 + 会话记录，写入数据库
 cf-route-tester scan --resume  # 继续上次未完成的扫描，只测没测过的目标
+cf-route-tester trace --target 1.1.1.1:443   # 用 NextTrace 做线路跟踪
 cf-route-tester db stats       # 查看本地数据库状态
 cf-route-tester db migrate     # 应用数据库迁移
 cf-route-tester db vacuum      # 整理数据库文件
 ```
 
 尚未实现（执行时明确报 `not implemented yet`，退出码 2）：
-`trace`、`export`、`upload`、`aggregate`、`query`。
+`export`、`upload`、`aggregate`、`query`。
 
 ---
 
@@ -444,6 +445,176 @@ trace:       SKIPPED (--trace 需要 NextTrace，Phase 7 起可用)
 
 宁可明确告知跳过，也不静默略过——否则汇总看起来像是跟踪过了。
 
+### trace：使用 NextTrace 做线路跟踪
+
+```bash
+cf-route-tester trace --target 1.1.1.1:443                  # 默认 TCP，测 443
+cf-route-tester trace --target 1.1.1.1:2053                 # 端口原样传给引擎
+cf-route-tester trace --target 1.1.1.1 --mode icmp          # 无需管理员权限
+cf-route-tester trace --binary "C:/Tools/nexttrace.exe" --target 1.1.1.1:443
+cf-route-tester trace --limit 20 --workers 10 --json        # 从目标列表批量跟踪
+cf-route-tester trace --target 1.1.1.1:443 --verbose        # 打印完整跳表
+```
+
+输出示例（真实运行结果，NextTrace v1.7.3，ICMP 模式）：
+
+```text
+1.1.1.1:443  30 hops (15072.2 ms)
+   1  192.168.1.1                                 0.75 ms
+   2  192.168.1.1                                 1.23 ms
+   3  *
+   4  203.0.113.4                               3.45 ms  AS64500  example.net
+   5  203.0.113.5                              3.97 ms  AS64500  example.net
+   6  *
+   ...
+  30  *
+
+traced:      1 target(s)
+success:     1 (100.0%)
+failed:      0 (0.0%)
+average hops: 30.0
+```
+
+#### 引擎调用方式（实测修正）
+
+需求文档里给的形态是：
+
+```bash
+nexttrace --traceroute --tcp --port <PORT> --json <IP>
+```
+
+**实测 NextTrace v1.7.3 里 `--traceroute` 这个参数并不存在**，传了会得到
+`unknown arguments`。该版本的相关参数是：
+
+| 参数 | 实际作用 |
+| --- | --- |
+| `--mtr` / `-t` | MTR 模式 |
+| `--report` / `-r` | 报告模式（**隐含 MTR**，与 `--json` 互斥） |
+| `--classic` / `-c` | 经典模式 |
+| `--tcp` / `--udp` | 指定探测协议 |
+| `--icmp-mode <n>` | ICMP 模式（**不是** `--icmp`） |
+
+因此本项目实际使用（并已在真实二进制上验证）：
+
+```bash
+nexttrace --json --tcp --port <目标的端口> <IP>
+nexttrace --json --udp --port <目标的端口> <IP>
+nexttrace --json --icmp-mode 0 <IP>
+```
+
+原文档"必须显式 `--traceroute`"的**意图**仍然被遵守了，只是用另一种方式表达：
+它的本意是"不要依赖默认模式，因为它会变"。这里的做法是
+**显式写死探测协议开关**，并且完全不碰 MTR 相关参数——
+即使将来默认模式真的变成 MTR，我们要的仍然是"传统 traceroute + 指定协议 + 指定端口"。
+
+#### 端口必须原样传递
+
+`1.2.3.4:2053` 一定用 `--port 2053`，绝不固定成 443。
+这条由 `TestBuildArgsUsesActualTargetPort` 逐端口覆盖。
+
+#### Windows 上 TCP/UDP 模式需要管理员权限
+
+NextTrace 在 Windows 上的 TCP/UDP 探测依赖 **WinDivert**：
+
+```text
+1. 首次使用先释放运行时（普通权限即可）：
+     nexttrace --init          # 会生成 WinDivert.dll 与 WinDivert64.sys
+2. 跟踪时必须用「以管理员身份运行」的终端：
+     cf-route-tester trace --target 1.1.1.1:443
+```
+
+没有管理员权限时，程序会**如实分类**而不是报一句没用的错误：
+
+```text
+traced:      1 target(s)
+success:     0 (0.0%)
+failed:      1 (100.0%)
+
+failures by type:
+  permission_denied:       1
+
+note: "permission_denied" means the trace could not be performed
+      (environment / permission), not that the path is bad.
+```
+
+这个分类是**中英文双语匹配**的：NextTrace 在 Windows 上会用中文报
+"依赖 WinDivert，但当前进程没有管理员权限"，只匹配英文关键词会让中文用户
+看到毫无帮助的 `other`。ICMP 模式（`--mode icmp`）不需要管理员权限，
+可以先用它验证链路。
+
+#### 真实 JSON 结构（v1.7.3 实测，与最初的假设有三处关键差异）
+
+```json
+{
+  "Hops": [
+    [
+      {
+        "Success": true,
+        "Address": { "IP": "203.0.113.4", "Zone": "" },
+        "Hostname": "",
+        "TTL": 4,
+        "RTT": 4996800,
+        "Error": null,
+        "Geo": {
+          "asnumber": "64500",
+          "country": "中国", "country_en": "China",
+          "prov": "Sample Province", "prov_en": "Zhejiang",
+          "city": "Sample City", "city_en": "Hangzhou",
+          "owner": "example.net ", "isp": "移动",
+          "lat": 30.29, "lng": 120.16
+        }
+      }
+    ]
+  ],
+  "StopReason": { "hop": 30, "reason": "max_hops" },
+  "TraceMapUrl": "https://assets.nxtrace.org/tracemap/....html"
+}
+```
+
+三个**凭文档猜一定会错**的地方：
+
+1. **`RTT` 的单位是纳秒**。`4996800` 表示 4.9968 ms，不是 4996.8 ms。
+   当毫秒用会把延迟放大 100 万倍，而"数字看起来大"很容易被误读成
+   "网络很差"而不是"单位错了"。解析层统一除以 `1e6`。
+2. **`Hops` 是二维数组**：外层是 TTL，内层是同一 TTL 的多次探测。
+   同一跳的多个 RTT 必须**聚合成一跳**，否则 30 跳会变成 90 跳，
+   "平均跳数"直接错三倍。
+3. **只有 `*_en` 字段是干净文本**：`country` / `prov` / `city` 是本地化文本，
+   而上游给的是**乱码**（GBK 被当 UTF-8 解：`"�й�"`）。因此优先采用
+   `country_en` / `prov_en` / `city_en`。这与 all.json 里 `country_cn`
+   乱码是同一类上游问题。
+
+另外 `country_en` 是国家**全称**（"China"）而不是代码。我们没有权威的
+全称→代码映射表，因此**留空**而不是编一个代码——编错的国家代码会让
+聚合出现错误的地区维度。
+
+真实输出已作为测试夹具保存在
+`internal/trace/testdata/nexttrace_v1.7.3_icmp.json`，
+并有测试断言它没有被手工改过（夹具一旦被编辑就不再是"真实输出"）。
+
+#### Trace 与 TCP Probe 完全解耦
+
+NextTrace 不存在时，`fetch` / `probe` / `scan` 全都照常可用：
+
+```text
+$ cf-route-tester trace --target 1.1.1.1:443
+Error: ... NextTrace not found.
+Please install NextTrace or configure trace.nexttrace.binary.
+```
+
+只有 `trace` 命令（以及后续的 `scan --trace`）受影响，退出码为 1（运行期错误），
+而不是 2（用法错误）——脚本可以据此区分"参数写错"与"环境缺东西"。
+
+#### 并发必须比 Probe 小得多
+
+```text
+probe   默认 100 并发（纯 socket，无外部进程）
+trace   默认 10 并发，上限 64（每个 worker 会启动一个 nexttrace 进程）
+```
+
+两者共用同一个有界 worker pool（`internal/worker`），
+因此并发与取消语义只有一份实现；区别只在"每个 job 做什么"。
+
 ### db：本地 SQLite 数据库
 
 ```bash
@@ -764,13 +935,19 @@ cf-route-tester/
 │   │   ├── parser.go             JSON / 文本容错解析、校验、去重、source metadata
 │   │   ├── cache.go              缓存读写（原子写入）、CacheInfo、格式版本校验
 │   │   └── loader.go             完整策略：缓存命中 / 刷新 / 降级 / 格式识别
-│   ├── probe/                    TCP Probe 与 worker pool（已实现）
+│   ├── probe/                    TCP Probe（已实现）
 │   │   ├── probe.go              Prober / ProbeResult / 统计 / 错误分类
 │   │   ├── errno.go              错误码注册表（平台无关部分）
 │   │   ├── errno_windows.go      Windows WSA 错误码表
 │   │   ├── errno_unix.go         Unix POSIX errno 表
-│   │   └── worker.go             有界 worker pool + Runner（NextTrace 可复用）
-│   ├── trace/                    Trace 引擎接口、NextTrace 调用与解析（Phase 7）
+│   │   └── worker.go             probe.Run（委托给 internal/worker）
+│   ├── worker/                   通用有界 worker pool（probe 与 trace 共用）
+│   │   └── worker.go             Run / Producer / ProcessFunc / RunStats
+│   ├── trace/                    NextTrace 集成（已实现）
+│   │   ├── engine.go             TraceEngine 接口、Hop/TraceResult、失败分类
+│   │   ├── ntrace.go             外部进程调用：路径解析、参数构造、超时、版本
+│   │   ├── parser.go             NextTrace JSON -> TraceResult（含纳秒换算）
+│   │   └── testdata/             真实 v1.7.3 输出夹具（解析契约的依据）
 │   ├── detect/                   本机地区 / 运营商检测（已实现）
 │   │   ├── detect.go             Source 接口、合并规则（手动优先）、报告
 │   │   ├── source_local.go       离线源：只推断出口 IP 版本

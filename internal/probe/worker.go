@@ -2,11 +2,10 @@ package probe
 
 import (
 	"context"
-	"errors"
 	"sync"
-	"time"
 
 	"github.com/cf-route-tester/cf-route-tester/internal/model"
+	"github.com/cf-route-tester/cf-route-tester/internal/worker"
 )
 
 // ---------------------------------------------------------------------------
@@ -16,11 +15,11 @@ import (
 // 需求第 12 条：必须采用 Job Queue -> Worker Pool -> Result Channel，
 // 不能每个目标起一个 goroutine。
 //
-// 这里实现的是一个**有界**的 worker pool：
+// 实现位于 internal/worker：并发与取消语义只有一份实现，
+// 因此 probe（TCP 探测）与 trace（线路跟踪）不会因为"各写一套池子"
+// 而出现行为漂移。下面保留 probe 自己的名字作为薄适配器。
 //
-//	Producer (投喂队列) -> N 个固定 worker -> emit 结果
-//
-// 关键性质（都有对应测试）：
+// 池子的关键性质（都有对应测试）：
 //
 //  1. 同时运行的 worker 数永不超过 N；
 //  2. 每个 job 恰好被处理一次（不重试、不漏掉已投喂的 job）；
@@ -30,66 +29,26 @@ import (
 //  5. worker 与 producer 都可能在 ctx 取消后继续推进，
 //     因此 emit 与 Producer 在取消后必须允许"丢弃"而不阻塞。
 
-// ProcessFunc 处理一个 job，并通过 emit 交付结果。
+// ProcessFunc / Producer / RunStats 是 internal/worker 中同名类型的别名。
 //
-// 语义约定（这决定了上层怎么写）：
-//
-//   - 返回 nil 表示该 job 被正常处理（即使业务结论是"失败"）；
-//   - 返回非 nil 表示**框架层**失败（例如外部进程无法启动），
-//     与"这个目标测失败"是两件事；
-//   - 必须在 ctx 取消后尽快返回；emit 在取消后允许被丢弃。
-type ProcessFunc[T any, R any] func(ctx context.Context, job T, emit func(R)) error
+// 用别名而不是重新定义：probe.Run 与 worker.Run 接受的就是同一组类型，
+// 中间不需要任何转换，也不会出现"两套看起来一样但不通用"的类型。
+type (
+	// ProcessFunc 见 internal/worker.ProcessFunc。
+	ProcessFunc[T any, R any] = worker.ProcessFunc[T, R]
 
-// Producer 投喂 job，返回实际投喂的数量。
-//
-// send 在 ctx 取消后会返回 false，Producer 应当立即返回。
-// 返回的计数只用于统计与日志，不参与正确性判断。
-type Producer[T any] func(ctx context.Context, send func(T) bool) int
+	// Producer 见 internal/worker.Producer。
+	Producer[T any] = worker.Producer[T]
 
-// RunStats 是一次 worker pool 运行的统计。
-type RunStats struct {
-	// Submitted 是实际投喂进队列并被 worker 取走的 job 数。
-	Submitted int
-
-	// Processed 是被完整处理的 job 数（ProcessFunc 返回 nil）。
-	Processed int
-
-	// Emitted 是交付的结果条数。
-	//
-	// 正常情况下 Emitted == Processed；被取消时可能小于 Submitted。
-	Emitted int
-
-	// Skipped 是已投喂但因为 ctx 取消而未被处理的 job 数。
-	Skipped int
-
-	// Errors 是 ProcessFunc 返回错误的次数（框架层失败）。
-	Errors int
-
-	// FirstError 是第一个框架层错误，便于上层给出可操作的提示。
-	FirstError error
-
-	// Canceled 表示运行期间 ctx 被取消。
-	Canceled bool
-
-	// Elapsed 是整个 pool 的运行时长。
-	Elapsed time.Duration
-}
-
-// Completeness 返回"已处理 / 已提交"的比例，用于判断本次测量是否完整。
-//
-// 没有任何 job 时返回 1（空任务视为完整）。
-func (s RunStats) Completeness() float64 {
-	if s.Submitted == 0 {
-		return 1
-	}
-	return float64(s.Processed) / float64(s.Submitted)
-}
+	// RunStats 见 internal/worker.RunStats。
+	RunStats = worker.RunStats
+)
 
 // Run 用 workers 个并发 worker 处理 Producer 投喂的 job。
 //
-// queueSize 是 job 队列与结果交付的缓冲大小（<=0 时使用 workers*2）。
-// Producer、process、emit 任一为 nil 时返回带 FirstError 的空统计，
-// 而不是 panic。
+// 实现委托给 internal/worker：并发与取消语义只有一份实现，
+// 因此 probe 与 trace（线路跟踪）不会因为"各写一套池子"而出现行为漂移。
+// 这个包装保留下来是因为本包的测试与调用方习惯用 probe 的名字。
 func Run[T any, R any](
 	ctx context.Context,
 	workers int,
@@ -98,123 +57,7 @@ func Run[T any, R any](
 	process ProcessFunc[T, R],
 	emit func(R),
 ) RunStats {
-	start := time.Now()
-
-	if workers <= 0 {
-		workers = 1
-	}
-	if queueSize <= 0 {
-		queueSize = workers * 2
-	}
-
-	if produce == nil || process == nil || emit == nil {
-		return RunStats{
-			FirstError: errors.New("probe: Run requires non-nil produce, process and emit"),
-			Elapsed:    time.Since(start),
-		}
-	}
-
-	jobs := make(chan T, queueSize)
-
-	var (
-		mu       sync.Mutex
-		stats    RunStats
-		workerWG sync.WaitGroup
-	)
-
-	// record 在锁内更新共享统计。
-	record := func(fn func()) {
-		mu.Lock()
-		fn()
-		mu.Unlock()
-	}
-
-	// safeEmit 在 ctx 取消后丢弃结果，避免 worker 卡在无人消费的 channel 上。
-	safeEmit := func(r R) {
-		defer func() {
-			// emit 由调用方提供，可能自身会 panic（例如向已关闭 channel 发送）。
-			// 这里把 panic 转成一次计数，保证一个坏消费者不会拖垮整个扫描。
-			if rec := recover(); rec != nil {
-				record(func() {
-					stats.Errors++
-					if stats.FirstError == nil {
-						stats.FirstError = errors.New("probe: emit panicked")
-					}
-				})
-			}
-		}()
-
-		record(func() { stats.Emitted++ })
-		emit(r)
-	}
-
-	for i := 0; i < workers; i++ {
-		workerWG.Add(1)
-		go func() {
-			defer workerWG.Done()
-
-			for {
-				var job T
-				select {
-				case j, ok := <-jobs:
-					if !ok {
-						return
-					}
-					job = j
-				case <-ctx.Done():
-					return
-				}
-
-				record(func() { stats.Submitted++ })
-
-				// 取到 job 之后再次检查取消：跳过处理并如实计入 Skipped。
-				if ctx.Err() != nil {
-					record(func() {
-						stats.Skipped++
-						stats.Canceled = true
-					})
-					continue
-				}
-
-				err := process(ctx, job, safeEmit)
-				if err != nil {
-					record(func() {
-						stats.Errors++
-						if stats.FirstError == nil {
-							stats.FirstError = err
-						}
-					})
-					continue
-				}
-
-				record(func() { stats.Processed++ })
-			}
-		}()
-	}
-
-	// 投喂完成后关闭队列，worker 读到关闭即退出。
-	total := produce(ctx, func(job T) bool {
-		select {
-		case jobs <- job:
-			return true
-		case <-ctx.Done():
-			return false
-		}
-	})
-	close(jobs)
-
-	workerWG.Wait()
-
-	stats.Elapsed = time.Since(start)
-	if stats.Submitted == 0 {
-		// Producer 一个 job 都没投出去（例如空列表或立刻被取消）。
-		// 用 Producer 的返回值兜底，避免统计里 Submitted 恒为 0。
-		stats.Submitted = total
-	}
-	if ctx.Err() != nil {
-		stats.Canceled = true
-	}
-	return stats
+	return worker.Run(ctx, workers, queueSize, produce, process, emit)
 }
 
 // ---------------------------------------------------------------------------
