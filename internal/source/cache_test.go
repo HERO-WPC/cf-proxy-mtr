@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/cf-route-tester/cf-route-tester/internal/model"
-	"github.com/cf-route-tester/cf-route-tester/internal/version"
 )
 
 // ---------------------------------------------------------------------------
@@ -18,6 +17,11 @@ import (
 // ---------------------------------------------------------------------------
 
 // sampleTargets 返回一组用于缓存往返测试的目标。
+//
+// 刻意覆盖三类情况：
+//   - 目标坐标来自 meta（Location）
+//   - 目标坐标缺失、只有 colo 坐标（接入点位置）
+//   - 0,0 坐标（合法值，不能被 omitempty 吃掉语义）
 func sampleTargets(t *testing.T) []model.Target {
 	t.Helper()
 
@@ -27,32 +31,48 @@ func sampleTargets(t *testing.T) []model.Target {
 		Port:      443,
 		IPVersion: model.IPVersionIPv4,
 		Location: model.Location{
+			Country:        "US",
 			CCA2:           "US",
-			IATA:           "ORD",
 			Region:         "Illinois",
 			City:           "Chicago",
 			Latitude:       41.85003,
 			Longitude:      -87.65005,
-			Country:        "US",
 			CountryEN:      "United States",
 			HasCoordinates: true,
 		},
+		Colo: model.ColoInfo{
+			IATA:           "ORD",
+			CCA2:           "US",
+			Region:         "North America",
+			City:           "Chicago",
+			Latitude:       41.9786,
+			Longitude:      -87.9048,
+			HasCoordinates: true,
+		},
 	}
+
+	// 只有 colo 坐标：目标的自身坐标必须保持"没有"，
+	// 不能因为 colo 有坐标就被悄悄填上。
 	v6 := model.Target{
 		ID:        "[2001:db8::1]:8443",
 		IP:        "2001:db8::1",
 		Port:      8443,
 		IPVersion: model.IPVersionIPv6,
 		Location: model.Location{
-			CCA2:             "DE",
-			IATA:             "FRA",
-			City:             "Frankfurt",
-			Latitude:         50.026402,
-			Longitude:        8.54313,
-			HasCoordinates:   true,
-			FromColoFallback: true,
+			CCA2: "DE",
+			City: "Lauterbourg",
+		},
+		Colo: model.ColoInfo{
+			IATA:           "FRA",
+			CCA2:           "DE",
+			Region:         "Europe",
+			City:           "Frankfurt-am-Main",
+			Latitude:       50.026402,
+			Longitude:      8.54313,
+			HasCoordinates: true,
 		},
 	}
+
 	// 0,0 是合法坐标，必须能往返而不被当成"无坐标"。
 	zero := model.Target{
 		ID:        "9.9.9.9:443",
@@ -115,12 +135,22 @@ func TestCacheRoundTrip(t *testing.T) {
 	if got[0] != targets[0] {
 		t.Errorf("target[0] = %+v, want %+v", got[0], targets[0])
 	}
+	// 目标位置与接入点信息必须分别往返，不能混在一起。
+	if got[1].Location.HasCoordinates {
+		t.Errorf("target[1] location has coordinates %+v, want none (only colo has them)", got[1].Location)
+	}
+	if !got[1].Colo.HasCoordinates || got[1].Colo.IATA != "FRA" {
+		t.Errorf("target[1] colo = %+v, want FRA with coordinates", got[1].Colo)
+	}
 	if got[1] != targets[1] {
 		t.Errorf("target[1] = %+v, want %+v", got[1], targets[1])
 	}
 	// 0,0 坐标必须原样往返，且 HasCoordinates 保持 true。
 	if !got[2].Location.HasCoordinates || got[2].Location.Latitude != 0 || got[2].Location.Longitude != 0 {
 		t.Errorf("target[2] location = %+v, want 0,0 with HasCoordinates", got[2].Location)
+	}
+	if got[2] != targets[2] {
+		t.Errorf("target[2] = %+v, want %+v", got[2], targets[2])
 	}
 
 	if meta.URL != sampleMeta().URL || meta.Format != "json" {
@@ -164,8 +194,13 @@ func TestCacheIsValidJSONWithSchemaVersion(t *testing.T) {
 			IP       string `json:"ip"`
 			Port     int    `json:"port"`
 			Location struct {
-				Lat *float64 `json:"lat"`
+				Lat  *float64 `json:"lat"`
+				CCA2 string   `json:"cca2"`
 			} `json:"location"`
+			Colo struct {
+				IATA string   `json:"iata"`
+				Lat  *float64 `json:"lat"`
+			} `json:"colo"`
 		} `json:"targets"`
 	}
 	if err := json.Unmarshal(blob, &doc); err != nil {
@@ -173,8 +208,8 @@ func TestCacheIsValidJSONWithSchemaVersion(t *testing.T) {
 	}
 
 	// 公共数据必须带 schema_version；缓存文件同样带上，便于失效判断。
-	if doc.SchemaVersion != version.SchemaVersion {
-		t.Errorf("schema_version = %d, want %d", doc.SchemaVersion, version.SchemaVersion)
+	if doc.SchemaVersion != cacheSchemaVersion {
+		t.Errorf("schema_version = %d, want %d", doc.SchemaVersion, cacheSchemaVersion)
 	}
 	if doc.WrittenAt == "" {
 		t.Error("written_at is empty")
@@ -188,6 +223,14 @@ func TestCacheIsValidJSONWithSchemaVersion(t *testing.T) {
 	// omitempty 会让 0 值坐标消失：这正是需要 HasCoordinates 字段的原因。
 	if doc.Targets[2].Location.Lat != nil {
 		t.Errorf("zero latitude should be omitted by omitempty, got %v", *doc.Targets[2].Location.Lat)
+	}
+	// 目标位置与 colo 必须是两个独立对象，不能把 colo 的 IATA 写进 location。
+	if doc.Targets[0].Colo.IATA != "ORD" {
+		t.Errorf("colo.iata = %q, want ORD", doc.Targets[0].Colo.IATA)
+	}
+	if doc.Targets[1].Location.CCA2 != "DE" || doc.Targets[1].Colo.Lat == nil {
+		t.Errorf("target[1] = %+v, want location without coordinates and colo with them",
+			doc.Targets[1])
 	}
 }
 
@@ -310,8 +353,8 @@ func TestInspectCache(t *testing.T) {
 	if info.SourceURL != sampleMeta().URL {
 		t.Errorf("SourceURL = %q, want %q", info.SourceURL, sampleMeta().URL)
 	}
-	if info.SchemaVersion != version.SchemaVersion {
-		t.Errorf("SchemaVersion = %d, want %d", info.SchemaVersion, version.SchemaVersion)
+	if info.SchemaVersion != cacheSchemaVersion {
+		t.Errorf("SchemaVersion = %d, want %d", info.SchemaVersion, cacheSchemaVersion)
 	}
 	if info.Age < 0 || info.Age > time.Minute {
 		t.Errorf("Age = %s, want small positive duration", info.Age)
@@ -365,19 +408,59 @@ func TestFromCacheTargetInfersMissingFields(t *testing.T) {
 	}
 }
 
-func TestSortTargetsIsStableAndTotal(t *testing.T) {
-	targets := []model.Target{
-		{ID: "9.9.9.9:443"},
-		{ID: "1.2.3.4:8443"},
-		{ID: "1.2.3.4:443"},
+// TestCacheSchemaVersionIsIndependentOfPublicSchema 锁定一个刻意的设计决定：
+//
+// 缓存格式版本与公开数据 schema 版本是**两个独立的数字**。
+// 缓存是本地中间数据，结构可以随内部重构变化（v2 拆出了 colo），
+// 而公开数据格式没有变。若把两者绑在一起，内部重构就会被迫
+// 宣布"公开数据格式变了"，或者旧缓存会被成功解析却悄悄丢字段。
+func TestCacheSchemaVersionIsIndependentOfPublicSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "all.json")
+	if err := WriteCache(path, sampleMeta(), sampleStats(), sampleTargets(t)); err != nil {
+		t.Fatalf("WriteCache: %v", err)
 	}
-	SortTargets(targets)
 
-	want := []string{"1.2.3.4:443", "1.2.3.4:8443", "9.9.9.9:443"}
-	for i := range want {
-		if targets[i].ID != want[i] {
-			t.Fatalf("targets = %v, want %v", targets, want)
-		}
+	blob, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var head struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	if err := json.Unmarshal(blob, &head); err != nil {
+		t.Fatal(err)
+	}
+	if head.SchemaVersion != cacheSchemaVersion {
+		t.Errorf("cache schema_version = %d, want %d", head.SchemaVersion, cacheSchemaVersion)
+	}
+}
+
+// TestCacheRejectsPreviousFormat 确认旧格式（colo 还在 Location 里）的缓存
+// 会被拒绝，而不是被"成功解析"却丢掉 iata。
+//
+// 这是本轮修复对应的回归测试：v1 缓存里的 location.iata 在 v2 结构下
+// 没有任何字段接收，json 解码不会报错，于是数据静默丢失。
+// 版本号闸门把这种"静默降级"变成"缓存失效并重新下载"。
+func TestCacheRejectsPreviousFormat(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v1.json")
+	v1 := `{"schema_version":1,"written_at":"2026-10-03T00:00:00Z",
+	  "source":{"url":"https://example.test/all.json","format":"json"},
+	  "stats":{"RawItems":1},
+	  "targets":[{"id":"1.2.3.4:443","ip":"1.2.3.4","port":443,"ip_version":"ipv4",
+	    "location":{"cca2":"US","iata":"ORD","city":"Chicago","lat":41.85,"lon":-87.65,
+	                "country":"US","has_coordinates":true}}]}`
+	if err := os.WriteFile(path, []byte(v1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, _, _, err := ReadCache(path); err == nil {
+		t.Fatal("ReadCache accepted a v1 cache, want schema mismatch error")
+	} else if !strings.Contains(err.Error(), "schema_version") {
+		t.Errorf("error = %v, want schema_version mention", err)
+	}
+
+	if _, err := InspectCache(path, time.Now()); err == nil {
+		t.Fatal("InspectCache accepted a v1 cache, want schema mismatch error")
 	}
 }
 

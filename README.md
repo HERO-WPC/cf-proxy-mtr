@@ -30,8 +30,8 @@
 
 ```text
 Phase 0  ✅ 项目初始化（Go module / CLI / version / help / README / 基础测试）
-Phase 1  ✅ all.json 获取与解析（source / model，含缓存与容错）
-Phase 2  ⏳ Target 数据模型（已随 Phase 1 提前落地，待 Phase 2 复核补充）
+Phase 1  ✅ all.json 获取与解析（source 包 + fetch 命令 + 缓存）
+Phase 2  ✅ Target 数据模型（model 包：不变量、归一化、去重、隐私边界）
 Phase 3  ⏳ TCP Probe
 Phase 4  ⏳ SQLite
 Phase 5  ⏳ 全量扫描 + Resume
@@ -207,9 +207,9 @@ cache:        data/all.json (written)
 | `list.ips` 是 **11610**（IP 数），不是 `IP:Port` 数 | 输出中如实同时显示 `targets` 与 `source reports`，不假装一致 |
 | `latitude` / `longitude` 是**字符串** | 宽松类型转换，字符串与数字都能解析 |
 | `asn` 是数字，`asOrganization` 有缺失 | 只用于展示，缺失不影响目标有效性 |
-| `colo` 缺失（实测 8 条） | 位置字段留空，不报错 |
-| `colo.cca2` 与 `meta.country` 实测有 2450 条不一致 | 两者分开保存：`CCA2` 取 colo，`Country` 取 meta |
-| `meta.latitude/longitude` 与 `colo.lat/lon` 是**两个不同位置** | 保存 meta 坐标（目标 IP 地理位置）；仅在 meta 坐标缺失时回退 colo，并置 `FromColoFallback` 标记 |
+| `colo` 缺失（实测 8/14635 条） | `Target.Colo` 留空，不报错、不用目标位置冒充 |
+| `colo.cca2` 与 `meta.country` 实测有 2718 条不一致 | 两者分别保存，不合并：`Location.Country` 取 meta，`Location.CCA2` 取 colo |
+| `meta.latitude/longitude` 与 `colo.lat/lon` 是**两个不同位置** | 分别保存在 `Location` 与 `Colo` 中，**不做隐式回退**；需要回退时调用 `Location.ResolveCoordinates(colo)` 并显式处理 `fromColo` |
 | `country_cn` 等中文字段在上游已经是乱码（形如 `鎷夎劚缁翠簹`） | 原样保留上游数据、不做静默改写；展示优先使用 `country_en` |
 | `generated_at` 没有时区后缀 | 统一按 UTC 解析，保证不同时区采集者得到同一时间点 |
 
@@ -387,8 +387,11 @@ cf-route-tester/
 ├── cmd/cf-route-tester/main.go   入口：构造环境、调用 CLI、返回退出码
 ├── internal/
 │   ├── cli/                      命令分发、帮助、退出码、各子命令参数解析（已实现）
-│   ├── version/                  版本与 schema 版本（已实现）
-│   ├── model/                    Target / Location / CollectorProfile（已实现）
+│   ├── version/                  版本与公开数据 schema 版本（已实现）
+│   ├── model/                    核心数据模型（已实现）
+│   │   ├── model.go              Target / Location / ColoInfo / 不变量 / 归一化
+│   │   ├── collector.go          CollectorProfile / collector_id（匿名）
+│   │   └── dedup.go              Dedup / SortTargets / ValidateAll / Keys
 │   ├── source/                   all.json 获取、解析、缓存（已实现）
 │   │   ├── api.go                HTTP 下载：超时、重试、退避、代理、gzip、备用源
 │   │   ├── parser.go             JSON / 文本容错解析、校验、去重、source metadata
@@ -476,17 +479,39 @@ collector:
 备：https://zip.cm.edu.kg/all.txt
 ```
 
-`all.json` 中对目标 IP 的地理信息（`Location.CCA2` / `IATA` / `Region` /
-`City` / `Latitude` / `Longitude`）是**目标 IP 的属性**，
+`all.json` 中对目标 IP 的地理信息是**目标 IP 的属性**，
 与**测量者的位置**（`CollectorProfile`）是两件事，两者不会混淆：
 
 ```go
 Target.Location       // 这个目标 IP 在哪（来自 all.json 的 meta）
+Target.Colo           // 这个目标从哪个 Cloudflare 接入点进来（meta.colo）
 CollectorProfile      // 我在哪、我用哪家运营商（本机检测或手动配置）
 ```
 
-`internal/model` 中这两个类型被刻意分开定义，且 `CollectorProfile`
-不允许出现公网 IP / MAC / 内网 IP / 主机名等字段。
+`internal/model` 中这三者被刻意分开定义：
+
+- `Target.Location` **只**承载目标 IP 自身的地理位置（来自 `meta.country/region/city/latitude/longitude`）；
+- `Target.Colo` 承载接入点信息（`iata/cca2/region/city/lat/lon`），实测约 19% 的记录里
+  `meta.country` 与 `colo.cca2` 不一致，混在一起就会得出"目标在荷兰"这种错误结论；
+- 坐标**不做隐式回退**：`Location` 没有坐标就是没有坐标，
+  需要接入点坐标的调用方必须显式调用 `Location.ResolveCoordinates(colo)`，
+  并自行处理 `fromColo` 为真（即"这是接入点坐标，不是目标坐标"）的情况；
+- `CollectorProfile` 不允许出现公网 IP / MAC / 内网 IP / 主机名等字段，
+  `collector_id` 由 `crypto/rand` 生成（`c-` + 32 位十六进制），**不由任何硬件信息推导**。
+
+模型层还提供统一的不变式与工具，避免各阶段各写一套：
+
+```go
+target.Validate()        // ID == TargetID(IP, Port)、IP 合法、端口范围、IPVersion 一致、
+                         // 国家代码 2 位大写、坐标成对且在范围内
+target.Normalize()       // 归一化（去空白、国家代码大写、IP 规范形式），幂等
+model.Dedup              // 按 (IP, Port) 去重的唯一实现点，保留首次出现与顺序
+model.SortTargets        // 按 ID 排序（导出/对比用）
+model.NewTargetFromStrings / model.ParseAddr / model.ValidPort
+```
+
+`Normalize` **不做静默数据修正**：它只处理空白与大小写，遇到越界坐标只会把
+`HasCoordinates` 置为 false，不会改写数值——数据问题应当被看见，而不是被抹平。
 
 ---
 

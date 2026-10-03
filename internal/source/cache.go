@@ -7,12 +7,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/cf-route-tester/cf-route-tester/internal/model"
-	"github.com/cf-route-tester/cf-route-tester/internal/version"
 )
 
 // 缓存相关常量。
@@ -24,6 +22,24 @@ const (
 	// 因此 6 小时既可以避免重复下载 10 MiB 数据，
 	// 又不会让目标列表明显过期。
 	DefaultCacheTTL = 6 * time.Hour
+
+	// cacheSchemaVersion 是本地缓存文件的格式版本，与公开数据的
+	// schema 版本（version.SchemaVersion）**互相独立**。
+	//
+	// 为什么必须独立：缓存是本地中间数据，它的结构会随内部重构变化
+	// （例如 v2 把 Cloudflare 接入点 colo 从 Location 中拆出来）。
+	// 如果复用公开 schema 版本，要么无法让旧缓存失效——旧缓存会被
+	// "成功解析"却悄悄丢掉字段——要么会因为内部重构而错误地宣布
+	// 公开数据格式发生了变化。
+	//
+	// 版本不匹配时缓存一律视为"不存在"，程序会重新下载，
+	// 因此提升该值不会要求用户手工清理文件。
+	//
+	// 历史：
+	//
+	//	1  初始格式（Location 内含 iata 与 from_colo_fallback）
+	//	2  把 colo 从 Location 拆分为独立对象（Target.Colo）
+	cacheSchemaVersion = 2
 
 	// cacheFileMode 是新缓存文件的权限。
 	cacheFileMode = fs.FileMode(0o644)
@@ -39,10 +55,11 @@ const (
 //     "格式变化"隔离在解析层，重跑一次 fetch 即可恢复。
 //  3. 目标列表本身是紧凑、稳定、可读的 JSON，便于排查问题。
 //
-// 缓存文件属于**本地中间数据**，不是公开数据，因此不承诺向后兼容；
-// 通过 SchemaVersion 校验，不匹配时视为缓存失效并重新下载。
+// 缓存文件属于**本地中间数据**，不是公开数据，因此不承诺向后兼容：
+// 通过 cacheSchemaVersion 校验，不匹配时视为缓存失效并重新下载。
+// 这与公开数据的 version.SchemaVersion 是两件不同的事，见上面的常量说明。
 type cacheDoc struct {
-	// SchemaVersion 是缓存文件格式版本。
+	// SchemaVersion 是缓存文件格式版本（cacheSchemaVersion）。
 	SchemaVersion int `json:"schema_version"`
 
 	// WrittenAt 是缓存写入时间。
@@ -79,14 +96,17 @@ type cacheTarget struct {
 
 	IPVersion string `json:"ip_version,omitempty"`
 
-	// Location 是目标 IP 自身的地理信息。
+	// Location 是目标 IP 自身的地理位置。
 	Location cacheLocation `json:"location"`
+
+	// Colo 是处理该目标的 Cloudflare 接入点信息。
+	// 与 Location 分开保存：两者在约 21% 的记录上国家不一致。
+	Colo cacheColo `json:"colo,omitempty"`
 }
 
 // cacheLocation 是缓存中的目标地理位置。
 type cacheLocation struct {
 	CCA2      string  `json:"cca2,omitempty"`
-	IATA      string  `json:"iata,omitempty"`
 	Region    string  `json:"region,omitempty"`
 	City      string  `json:"city,omitempty"`
 	Latitude  float64 `json:"lat,omitempty"`
@@ -97,9 +117,18 @@ type cacheLocation struct {
 	// HasCoordinates 必须显式保存：0,0 是合法坐标，
 	// 不能靠零值推断"没有坐标"。
 	HasCoordinates bool `json:"has_coordinates,omitempty"`
+}
 
-	// FromColoFallback 标记坐标来自 colo 回退。
-	FromColoFallback bool `json:"from_colo_fallback,omitempty"`
+// cacheColo 是缓存中的接入点信息。
+type cacheColo struct {
+	IATA      string  `json:"iata,omitempty"`
+	CCA2      string  `json:"cca2,omitempty"`
+	Region    string  `json:"region,omitempty"`
+	City      string  `json:"city,omitempty"`
+	Latitude  float64 `json:"lat,omitempty"`
+	Longitude float64 `json:"lon,omitempty"`
+
+	HasCoordinates bool `json:"has_coordinates,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -120,7 +149,7 @@ func WriteCache(path string, meta SourceMeta, stats ParseStats, targets []model.
 	}
 
 	doc := cacheDoc{
-		SchemaVersion: version.SchemaVersion,
+		SchemaVersion: cacheSchemaVersion,
 		WrittenAt:     time.Now().UTC(),
 		Source: cacheSource{
 			URL:           meta.URL,
@@ -211,10 +240,10 @@ func ReadCache(path string) (*SourceMeta, ParseStats, []model.Target, time.Time,
 	if err := json.Unmarshal(blob, &doc); err != nil {
 		return nil, ParseStats{}, nil, time.Time{}, fmt.Errorf("decode cache %q: %w", path, err)
 	}
-	if doc.SchemaVersion != version.SchemaVersion {
+	if doc.SchemaVersion != cacheSchemaVersion {
 		return nil, ParseStats{}, nil, time.Time{}, fmt.Errorf(
 			"cache %q has schema_version %d, want %d",
-			path, doc.SchemaVersion, version.SchemaVersion)
+			path, doc.SchemaVersion, cacheSchemaVersion)
 	}
 
 	meta := SourceMeta{
@@ -281,10 +310,10 @@ func InspectCache(path string, now time.Time) (CacheInfo, error) {
 	if err := dec.Decode(&head); err != nil {
 		return CacheInfo{}, fmt.Errorf("decode cache %q: %w", path, err)
 	}
-	if head.SchemaVersion != version.SchemaVersion {
+	if head.SchemaVersion != cacheSchemaVersion {
 		return CacheInfo{}, fmt.Errorf(
 			"cache %q has schema_version %d, want %d",
-			path, head.SchemaVersion, version.SchemaVersion)
+			path, head.SchemaVersion, cacheSchemaVersion)
 	}
 
 	return CacheInfo{
@@ -308,24 +337,31 @@ func toCacheTarget(t model.Target) cacheTarget {
 		Port:      t.Port,
 		IPVersion: string(t.IPVersion),
 		Location: cacheLocation{
-			CCA2:             t.Location.CCA2,
-			IATA:             t.Location.IATA,
-			Region:           t.Location.Region,
-			City:             t.Location.City,
-			Latitude:         t.Location.Latitude,
-			Longitude:        t.Location.Longitude,
-			Country:          t.Location.Country,
-			CountryEN:        t.Location.CountryEN,
-			HasCoordinates:   t.Location.HasCoordinates,
-			FromColoFallback: t.Location.FromColoFallback,
+			CCA2:           t.Location.CCA2,
+			Region:         t.Location.Region,
+			City:           t.Location.City,
+			Latitude:       t.Location.Latitude,
+			Longitude:      t.Location.Longitude,
+			Country:        t.Location.Country,
+			CountryEN:      t.Location.CountryEN,
+			HasCoordinates: t.Location.HasCoordinates,
+		},
+		Colo: cacheColo{
+			IATA:           t.Colo.IATA,
+			CCA2:           t.Colo.CCA2,
+			Region:         t.Colo.Region,
+			City:           t.Colo.City,
+			Latitude:       t.Colo.Latitude,
+			Longitude:      t.Colo.Longitude,
+			HasCoordinates: t.Colo.HasCoordinates,
 		},
 	}
 }
 
 func fromCacheTarget(ct cacheTarget) model.Target {
 	ipVersion := model.IPVersion(ct.IPVersion)
-	if ipVersion == "" {
-		// 兼容早期缓存文件：根据 IP 推断版本。
+	if !ipVersion.Valid() {
+		// 兼容早期/损坏的缓存：根据 IP 推断版本。
 		if addr, ok := model.ParseAddr(ct.IP); ok {
 			ipVersion = model.IPVersionOf(addr)
 		} else {
@@ -338,30 +374,35 @@ func fromCacheTarget(ct cacheTarget) model.Target {
 		id = model.TargetID(ct.IP, ct.Port)
 	}
 
-	return model.Target{
+	target := model.Target{
 		ID:        id,
 		IP:        ct.IP,
 		Port:      ct.Port,
 		IPVersion: ipVersion,
 		Location: model.Location{
-			CCA2:             ct.Location.CCA2,
-			IATA:             ct.Location.IATA,
-			Region:           ct.Location.Region,
-			City:             ct.Location.City,
-			Latitude:         ct.Location.Latitude,
-			Longitude:        ct.Location.Longitude,
-			Country:          ct.Location.Country,
-			CountryEN:        ct.Location.CountryEN,
-			HasCoordinates:   ct.Location.HasCoordinates,
-			FromColoFallback: ct.Location.FromColoFallback,
+			CCA2:           ct.Location.CCA2,
+			Region:         ct.Location.Region,
+			City:           ct.Location.City,
+			Latitude:       ct.Location.Latitude,
+			Longitude:      ct.Location.Longitude,
+			Country:        ct.Location.Country,
+			CountryEN:      ct.Location.CountryEN,
+			HasCoordinates: ct.Location.HasCoordinates,
+		},
+		Colo: model.ColoInfo{
+			IATA:           ct.Colo.IATA,
+			CCA2:           ct.Colo.CCA2,
+			Region:         ct.Colo.Region,
+			City:           ct.Colo.City,
+			Latitude:       ct.Colo.Latitude,
+			Longitude:      ct.Colo.Longitude,
+			HasCoordinates: ct.Colo.HasCoordinates,
 		},
 	}
-}
 
-// SortTargets 按 ID 排序目标列表。
-//
-// 缓存与扫描都保持"源顺序"以保证可复现；只有在导出、
-// 对比两份列表等场景才需要稳定排序。
-func SortTargets(targets []model.Target) {
-	sort.Slice(targets, func(i, j int) bool { return targets[i].ID < targets[j].ID })
+	// 缓存属于外部输入：读取后统一归一化，保证与解析结果形式完全一致。
+	// （解析结果在 parseLocation 里已经归一化过，两条路径必须收敛到同一形式。）
+	target.Normalize()
+
+	return target
 }

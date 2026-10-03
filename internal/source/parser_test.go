@@ -119,9 +119,6 @@ func TestParseJSONBasicTarget(t *testing.T) {
 	if loc.CCA2 != "US" || loc.Country != "US" {
 		t.Errorf("CCA2/Country = %q/%q, want US/US", loc.CCA2, loc.Country)
 	}
-	if loc.IATA != "ORD" {
-		t.Errorf("IATA = %q, want ORD", loc.IATA)
-	}
 	if loc.City != "Chicago" || loc.Region != "Illinois" {
 		t.Errorf("City/Region = %q/%q, want Chicago/Illinois", loc.City, loc.Region)
 	}
@@ -132,12 +129,25 @@ func TestParseJSONBasicTarget(t *testing.T) {
 	if loc.Latitude != 41.85003 || loc.Longitude != -87.65005 {
 		t.Errorf("Latitude/Longitude = %v/%v, want 41.85003/-87.65005", loc.Latitude, loc.Longitude)
 	}
-	// 坐标来自 meta，不是 colo，因此不应标记回退。
-	if loc.FromColoFallback {
-		t.Error("FromColoFallback = true, want false")
-	}
 	if loc.CountryEN != "United States" {
 		t.Errorf("CountryEN = %q, want United States", loc.CountryEN)
+	}
+
+	// 接入点是**另一个**结构：colo 的 IATA / 坐标不能出现在 Location 上。
+	colo := got.Colo
+	if colo.IATA != "ORD" || colo.CCA2 != "US" {
+		t.Errorf("Colo = %+v, want ORD/US", colo)
+	}
+	if colo.Region != "North America" || colo.City != "Chicago" {
+		t.Errorf("Colo region/city = %q/%q, want colo's own values", colo.Region, colo.City)
+	}
+	if !colo.HasCoordinates || colo.Latitude != 41.9786 || colo.Longitude != -87.9048 {
+		t.Errorf("Colo coordinates = %+v, want 41.9786/-87.9048", colo)
+	}
+
+	// 解析结果必须自洽（ID / IP / Port / IPVersion 一致）。
+	if err := got.Validate(); err != nil {
+		t.Errorf("parsed target fails Validate: %v", err)
 	}
 }
 
@@ -164,8 +174,9 @@ func TestParseJSONMultiplePortsExpandToSeparateTargets(t *testing.T) {
 	}
 }
 
-func TestParseJSONUsesTargetLocationNotCollectorLocation(t *testing.T) {
-	// 目标在德国，colo 在阿姆斯特丹：Coordinate/Region 必须跟随 meta。
+func TestParseJSONKeepsTargetAndColoSeparate(t *testing.T) {
+	// 目标在德国、从阿姆斯特丹接入：
+	// 目标地理位置跟随 meta，接入点信息跟随 colo，两者不得互相污染。
 	meta := map[string]any{
 		"country":   "DE",
 		"city":      "Nuremberg",
@@ -179,27 +190,37 @@ func TestParseJSONUsesTargetLocationNotCollectorLocation(t *testing.T) {
 	}
 	doc := jsonDoc(t, []map[string]any{jsonItem("62.3.41.40", []int{8443}, meta)}, nil)
 
-	got := mustParseJSON(t, doc).Targets[0].Location
+	got := mustParseJSON(t, doc).Targets[0]
 
-	if got.CCA2 != "NL" {
-		t.Errorf("CCA2 = %q, want NL (from colo)", got.CCA2)
+	if got.Location.CCA2 != "NL" {
+		t.Errorf("Location.CCA2 = %q, want NL (from colo)", got.Location.CCA2)
 	}
-	if got.Country != "DE" {
-		t.Errorf("Country = %q, want DE (from meta)", got.Country)
+	if got.Location.Country != "DE" {
+		t.Errorf("Location.Country = %q, want DE (from meta)", got.Location.Country)
 	}
-	if got.IATA != "AMS" {
-		t.Errorf("IATA = %q, want AMS", got.IATA)
+	if got.Location.City != "Nuremberg" {
+		t.Errorf("Location.City = %q, want Nuremberg", got.Location.City)
 	}
-	if got.City != "Nuremberg" {
-		t.Errorf("City = %q, want Nuremberg", got.City)
+	if got.Location.Latitude != 49.45421 {
+		t.Errorf("Location.Latitude = %v, want meta latitude 49.45421", got.Location.Latitude)
 	}
-	if got.Latitude != 49.45421 {
-		t.Errorf("Latitude = %v, want meta latitude 49.45421", got.Latitude)
+
+	// colo 自己的字段完整保留，包括它自己的 region / city / 坐标。
+	if got.Colo.IATA != "AMS" || got.Colo.CCA2 != "NL" {
+		t.Errorf("Colo = %+v, want AMS/NL", got.Colo)
+	}
+	if got.Colo.Region != "Europe" || got.Colo.City != "Amsterdam" {
+		t.Errorf("Colo region/city = %q/%q, want Europe/Amsterdam", got.Colo.Region, got.Colo.City)
+	}
+	if got.Colo.Latitude != 52.308601 {
+		t.Errorf("Colo.Latitude = %v, want 52.308601", got.Colo.Latitude)
 	}
 }
 
-func TestParseJSONColoFallbackMarked(t *testing.T) {
-	// meta 没有经纬度时回退到 colo 坐标，并且必须显式标记。
+func TestParseJSONWithoutTargetCoordinatesKeepsLocationEmpty(t *testing.T) {
+	// meta 没有经纬度时，Location 必须保持"没有坐标"，
+	// 绝不能把 colo 的接入点坐标悄悄填进去——
+	// 那会让"目标位置"变成"接入点位置"，是最容易被误用的错误。
 	meta := map[string]any{
 		"country": "SG",
 		"city":    "Singapore",
@@ -209,16 +230,44 @@ func TestParseJSONColoFallbackMarked(t *testing.T) {
 	}
 	doc := jsonDoc(t, []map[string]any{jsonItem("9.9.9.9", []int{443}, meta)}, nil)
 
-	got := mustParseJSON(t, doc).Targets[0].Location
+	got := mustParseJSON(t, doc).Targets[0]
 
-	if !got.HasCoordinates {
-		t.Fatal("HasCoordinates = false, want true (colo fallback)")
+	if got.Location.HasCoordinates {
+		t.Errorf("Location.HasCoordinates = true (%+v), want false without meta coordinates",
+			got.Location)
 	}
-	if !got.FromColoFallback {
-		t.Error("FromColoFallback = false, want true")
+	// 需要坐标的调用方必须显式回退，并能知道坐标来自接入点。
+	lat, lon, ok, fromColo := got.Location.ResolveCoordinates(got.Colo)
+	if !ok || !fromColo {
+		t.Fatalf("ResolveCoordinates = (ok=%v fromColo=%v), want (true,true)", ok, fromColo)
 	}
-	if got.Latitude != 1.35019 {
-		t.Errorf("Latitude = %v, want 1.35019", got.Latitude)
+	if lat != 1.35019 || lon != 103.994003 {
+		t.Errorf("fallback coordinates = %v/%v, want colo coordinates", lat, lon)
+	}
+	if got.Location.City != "Singapore" {
+		t.Errorf("Location.City = %q, want Singapore", got.Location.City)
+	}
+}
+
+func TestParseJSONPartialCoordinatesAreIgnored(t *testing.T) {
+	// 只有一个坐标值时不能生成"半真半假"的点。
+	meta := map[string]any{
+		"country":   "US",
+		"latitude":  "41.85003",
+		"longitude": "",
+		"colo": map[string]any{
+			"iata": "ORD", "lat": 41.9786, "lon": -87.9048, "cca2": "US",
+		},
+	}
+	doc := jsonDoc(t, []map[string]any{jsonItem("1.2.3.4", []int{443}, meta)}, nil)
+
+	got := mustParseJSON(t, doc).Targets[0]
+	if got.Location.HasCoordinates {
+		t.Errorf("Location = %+v, want no coordinates when only one value is present", got.Location)
+	}
+	// colo 的一对坐标是完整的，必须照常保留。
+	if !got.Colo.HasCoordinates {
+		t.Errorf("Colo = %+v, want coordinates preserved", got.Colo)
 	}
 }
 
@@ -231,8 +280,8 @@ func TestParseJSONZeroCoordinatesAreValid(t *testing.T) {
 	if !got.HasCoordinates {
 		t.Error("HasCoordinates = false, want true for 0,0 coordinates")
 	}
-	if got.FromColoFallback {
-		t.Error("FromColoFallback = true, want false for explicit 0,0")
+	if got.Latitude != 0 || got.Longitude != 0 {
+		t.Errorf("coordinates = %v/%v, want 0/0", got.Latitude, got.Longitude)
 	}
 }
 
@@ -355,19 +404,69 @@ func TestParseJSONHandlesMissingMetaAndColo(t *testing.T) {
 		t.Fatalf("targets = %d, want 3", len(res.Targets))
 	}
 
-	// 完全没有 meta：Location 为空但不报错。
+	// 完全没有 meta：Location 与 Colo 都为空，但不报错。
 	if !res.Targets[0].Location.IsZero() {
 		t.Errorf("target[0].Location = %+v, want zero", res.Targets[0].Location)
 	}
-
-	// 没有 colo：CCA2 回退到 meta.country。
-	if got := res.Targets[1].Location; got.CCA2 != "JP" || got.IATA != "" {
-		t.Errorf("target[1].Location = %+v, want CCA2=JP, IATA empty", got)
+	if !res.Targets[0].Colo.IsZero() {
+		t.Errorf("target[0].Colo = %+v, want zero", res.Targets[0].Colo)
 	}
 
-	// 没有 meta.country：CCA2 来自 colo。
-	if got := res.Targets[2].Location; got.CCA2 != "JP" || got.IATA != "NRT" {
-		t.Errorf("target[2].Location = %+v, want CCA2=JP, IATA=NRT", got)
+	// 没有 colo：CCA2 回退到 meta.country，且 Colo 保持为空。
+	if got := res.Targets[1].Location; got.CCA2 != "JP" {
+		t.Errorf("target[1].Location = %+v, want CCA2=JP (fallback to meta.country)", got)
+	}
+	if got := res.Targets[1].Colo; !got.IsZero() {
+		t.Errorf("target[1].Colo = %+v, want zero when meta has no colo", got)
+	}
+
+	// 没有 meta.country：CCA2 来自 colo，接入点信息完整。
+	if got := res.Targets[2].Location; got.CCA2 != "JP" {
+		t.Errorf("target[2].Location = %+v, want CCA2=JP from colo", got)
+	}
+	if got := res.Targets[2].Colo; got.IATA != "NRT" {
+		t.Errorf("target[2].Colo = %+v, want IATA=NRT", got)
+	}
+}
+
+// TestParseJSONNormalizesEveryTarget 确认解析产物本身就是规范形式。
+//
+// 这是解析层与模型层之间的契约：下游（缓存、数据库、聚合）
+// 不需要再猜"这个值到底是 ' us ' 还是 'US'"。
+func TestParseJSONNormalizesEveryTarget(t *testing.T) {
+	meta := map[string]any{
+		"country":   " us ",
+		"city":      " Chicago ",
+		"region":    " illinois ",
+		"latitude":  "41.85",
+		"longitude": "-87.65",
+		"colo": map[string]any{
+			"iata": " ord ", "lat": 41.97, "lon": -87.90, "cca2": " us ",
+			"region": " north america ", "city": " chicago ",
+		},
+	}
+	doc := jsonDoc(t, []map[string]any{jsonItem("1.2.3.4", []int{443}, meta)}, nil)
+
+	got := mustParseJSON(t, doc).Targets[0]
+
+	if got.Location.Country != "US" || got.Location.CCA2 != "US" {
+		t.Errorf("Location codes = %q/%q, want normalized US/US", got.Location.Country, got.Location.CCA2)
+	}
+	if got.Location.City != "Chicago" || got.Location.Region != "illinois" {
+		t.Errorf("Location city/region = %q/%q, want trimmed", got.Location.City, got.Location.Region)
+	}
+	if got.Colo.IATA != "ORD" || got.Colo.CCA2 != "US" || got.Colo.City != "chicago" {
+		t.Errorf("Colo = %+v, want trimmed/uppercased codes", got.Colo)
+	}
+
+	// 每个解析出来的目标都必须是规范形式：Normalize 不应再发现改动。
+	for i, target := range mustParseJSON(t, doc).Targets {
+		if target.Normalize() {
+			t.Errorf("target[%d] was not canonical: %+v", i, target)
+		}
+		if err := target.Validate(); err != nil {
+			t.Errorf("target[%d] invalid: %v", i, err)
+		}
 	}
 }
 

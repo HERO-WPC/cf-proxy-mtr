@@ -265,32 +265,43 @@ func (m SourceMeta) GeneratedAtLocation() *time.Location {
 
 // ParseStats 是解析统计，用于"跳过并记录"以及命令行汇报。
 //
-// 不变式（可被测试验证）：
+// 严格不变式（可被测试验证）：
 //
-//	RawItems    = TargetCandidates + SkippedItems
-//	RawCombos   = len(Targets) + Duplicates + InvalidPorts + Unknown
-//	TargetCandidates + Unknown = RawCombos
-//	len(Targets) = RawCombos - Duplicates - InvalidPorts - Unknown
+//	RawItems  = TargetCandidates + SkippedItems + Unknown
+//	RawCombos = len(Targets) + Duplicates
+//
+// 非加和关系（重要，避免误读）：
+//
+//	InvalidPorts 计的是"被丢弃的非法端口值个数"，它与 RawCombos 不是
+//	相加关系——同一条记录可以既丢掉了非法端口值，又用剩余合法端口
+//	产生了组合。因此不要写
+//	"RawCombos == TargetCandidates + InvalidPorts" 这种判断。
+//
+// 由以上两条可以推出：InvalidPorts 增加不会改变 RawCombos，
+// 只会让"原始端口值总数"大于"实际展开出的组合数"。
 type ParseStats struct {
 	// RawItems 是源记录条数（JSON 的 data 数组长度，或文本行数）。
 	RawItems int
 
-	// TargetCandidates 是成功取出 IP 的记录条数（此时还没展开端口）。
+	// TargetCandidates 是成功取出 IP 且**至少有一个合法端口**的记录条数。
 	TargetCandidates int
 
 	// SkippedItems 是因为 ip 字段缺失/非法而整条跳过的记录数。
 	SkippedItems int
 
-	// RawCombos 是展开端口后得到的 IP:Port 组合总数（去重前）。
+	// RawCombos 是展开端口后得到的有效 IP:Port 组合总数（去重前）。
 	RawCombos int
 
 	// Duplicates 是因为 (IP, Port) 已出现过而被丢弃的组合数。
 	Duplicates int
 
-	// InvalidPorts 是因为端口非法（非整数 / 超出 1-65535）而丢弃的组合数。
+	// InvalidPorts 是因为端口非法（非整数 / 超出 1-65535）而丢弃的端口值个数。
+	//
+	// 计数范围包含"记录里被丢弃的端口值"，因此可能大于 RawCombos 的差额部分。
 	InvalidPorts int
 
-	// Unknown 是因为记录缺少端口信息（无 port 字段或空数组）而无法生成组合的数量。
+	// Unknown 是因为记录缺少端口信息（无 port 字段、空数组、或全部端口非法）
+	// 而无法生成任何组合的记录数。
 	Unknown int
 
 	// Reasons 是各类跳过原因的计数，例如 "invalid ip" -> 3。
@@ -350,7 +361,7 @@ func ParseJSON(data []byte) (*ParseResult, error) {
 		return nil, fmt.Errorf("parse json: missing or null \"data\" array")
 	}
 
-	dedup := newDeduper()
+	dedup := model.NewDedup(len(root.Data))
 	warnings := newWarningList(maxWarnings)
 
 	for i, item := range root.Data {
@@ -374,33 +385,40 @@ func ParseJSON(data []byte) (*ParseResult, error) {
 		}
 
 		res.Stats.TargetCandidates++
-		res.Stats.InvalidPorts += badPorts
 		if badPorts > 0 {
+			// 注意：这里统计的是"被丢弃的非法端口值个数"，与 RawCombos 不是
+			// 相加关系——同一条记录可能既丢了非法端口，又用合法端口产生了组合。
+			res.Stats.InvalidPorts += badPorts
 			res.Stats.addReason("invalid port")
 			warnings.add("record #%d (%s): dropped %d invalid port value(s)", i, ipRaw, badPorts)
 		}
 
-		loc := parseLocation(getMap(item, "meta"))
+		// parseLocation 只做字段映射与归一化；目标地理位置（meta）与
+		// 接入点位置（colo）被分别返回，不会混在同一个结构里。
+		loc, colo := parseLocation(getMap(item, "meta"))
 
 		for _, port := range ports {
 			res.Stats.RawCombos++
 			target, ok := model.NewTarget(addr, port)
 			if !ok {
+				// 理论上不可达（normalizePorts 已经过滤过端口范围），
+				// 保留兜底并计数，避免出现"静默丢数据"。
 				res.Stats.InvalidPorts++
 				res.Stats.addReason("invalid port")
 				warnings.add("record #%d (%s): invalid port %d", i, ipRaw, port)
 				continue
 			}
 			target.Location = loc
+			target.Colo = colo
 
-			if !dedup.add(target) {
+			if !dedup.Add(target) {
 				res.Stats.Duplicates++
 				res.Stats.addReason("duplicate ip:port")
 			}
 		}
 	}
 
-	res.Targets = dedup.targets
+	res.Targets = dedup.Targets()
 	res.Warnings = warnings.items()
 	return res, nil
 }
@@ -431,7 +449,7 @@ func ParseText(data []byte) (*ParseResult, error) {
 		Stats: ParseStats{Reasons: make(map[string]int)},
 	}
 
-	dedup := newDeduper()
+	dedup := model.NewDedup(len(data) / 24) // 每行约 24 字节，用于预分配
 	warnings := newWarningList(maxWarnings)
 
 	lines := bytes.Split(data, []byte("\n"))
@@ -490,7 +508,7 @@ func ParseText(data []byte) (*ParseResult, error) {
 			target.Location.Country = country
 		}
 
-		if !dedup.add(target) {
+		if !dedup.Add(target) {
 			res.Stats.Duplicates++
 			res.Stats.addReason("duplicate ip:port")
 		}
@@ -499,11 +517,11 @@ func ParseText(data []byte) (*ParseResult, error) {
 	if res.Stats.RawItems == 0 {
 		return nil, fmt.Errorf("parse text: no data lines found")
 	}
-	if len(dedup.targets) == 0 {
+	if dedup.Len() == 0 {
 		return nil, fmt.Errorf("parse text: no valid ip:port found in %d line(s)", res.Stats.RawItems)
 	}
 
-	res.Targets = dedup.targets
+	res.Targets = dedup.Targets()
 	res.Warnings = warnings.items()
 	return res, nil
 }
@@ -663,67 +681,81 @@ func sortInts(xs []int) {
 	}
 }
 
-// parseLocation 把 meta（含 colo）转换为 model.Location。
+// parseLocation 把 meta（含 colo）映射为**目标地理位置**与**接入点信息**。
 //
-// 该函数只做字段映射与容错，不做任何"猜测"以外的加工：
-// 所有字段都原样来自源数据，缺失就留空。
-func parseLocation(meta map[string]any) model.Location {
-	loc := model.Location{}
+// 两个返回值刻意分开：生产数据里 meta.country 与 colo.cca2 有约 21%
+// 的记录不一致，它们回答的是不同问题：
+//
+//	loc    这个目标 IP 在哪里（meta）
+//	colo   这个目标从哪个 Cloudflare 接入点进来（meta.colo）
+//
+// 该函数只做字段映射与容错，不做任何猜测：
+// 所有字段都原样来自源数据，缺失就留空；坐标不完整时不会被"部分填充"。
+//
+// 关于 colo.region / colo.city：它们描述的是接入点位置，不是目标位置。
+// 因此只在 meta 自身缺失 region/city 时，才作为降级信息填进 loc，
+// 同时 colo 结构里始终保留原始值，下游可以自行取舍。
+func parseLocation(meta map[string]any) (model.Location, model.ColoInfo) {
+	var loc model.Location
+	var colo model.ColoInfo
 	if meta == nil {
-		return loc
+		return loc, colo
 	}
 
-	loc.Country = upperTrim(getString(meta, "country"))
+	loc.Country = getString(meta, "country")
 	loc.Region = getString(meta, "region")
 	loc.City = getString(meta, "city")
 	loc.CountryEN = getString(meta, "country_en")
 
-	if colo := getMap(meta, "colo"); colo != nil {
-		loc.CCA2 = upperTrim(getString(colo, "cca2"))
-		loc.IATA = upperTrim(getString(colo, "iata"))
-		// colo.region / colo.city 是"接入点位置"，与目标地理位置不同，
-		// 只有在 meta 自身没有 region/city 时才作为降级填充。
+	if rawColo := getMap(meta, "colo"); rawColo != nil {
+		colo.IATA = getString(rawColo, "iata")
+		colo.CCA2 = getString(rawColo, "cca2")
+		colo.Region = getString(rawColo, "region")
+		colo.City = getString(rawColo, "city")
+
+		// colo.cca2 同时也是目标 Location 的国家代码来源（覆盖率高于 meta.country）。
+		loc.CCA2 = colo.CCA2
+
+		// 坐标必须成对出现才有效：只有一个值时宁可当作"没有坐标"，
+		// 也不要生成一个半真半假的点。
+		if lat, ok := asFloat(rawColo["lat"]); ok {
+			if lon, ok := asFloat(rawColo["lon"]); ok {
+				colo.Latitude, colo.Longitude = lat, lon
+				colo.HasCoordinates = true
+			}
+		}
+
+		// 目标自身的 region/city 缺失时，用接入点信息降级填充（仅展示用途）。
 		if loc.Region == "" {
-			loc.Region = getString(colo, "region")
+			loc.Region = colo.Region
 		}
 		if loc.City == "" {
-			loc.City = getString(colo, "city")
+			loc.City = colo.City
 		}
 	}
 
-	// CCA2 缺失时回退到 meta.country：两者含义不同，
-	// 但在"目标 IP 属于哪个国家"这一点上，国家字段比空值更有用。
-	if loc.CCA2 == "" {
-		loc.CCA2 = loc.Country
-	}
-
-	// 经纬度优先级：meta.latitude/longitude（目标 IP 地理位置）
-	// 优先于 colo.lat/lon（Cloudflare 接入点）。回退时显式标记。
+	// 目标经纬度：只有成对有效才采用。
 	if lat, ok := asFloat(meta["latitude"]); ok {
 		if lon, ok := asFloat(meta["longitude"]); ok {
 			loc.Latitude, loc.Longitude = lat, lon
 			loc.HasCoordinates = true
-			return loc
 		}
 	}
 
-	// 坐标不完整：尝试 colo 坐标（仅当两个值都有效时）。
-	if colo := getMap(meta, "colo"); colo != nil {
-		if lat, ok := asFloat(colo["lat"]); ok {
-			if lon, ok := asFloat(colo["lon"]); ok {
-				loc.Latitude, loc.Longitude = lat, lon
-				loc.HasCoordinates = true
-				loc.FromColoFallback = true
-			}
-		}
+	// CCA2 表示"目标 IP 的国家/地区代码"：
+	// 优先用 colo.cca2（生产数据里覆盖率更高），缺失时才回退 meta.country。
+	// 注意不能用 meta.country 覆盖已有的 colo.cca2——两者实测有约 21% 不一致，
+	// 覆盖会丢掉"从哪个国家接入"这个信息。
+	if loc.CCA2 == "" {
+		loc.CCA2 = loc.Country
 	}
 
-	return loc
-}
+	// 归一化（去空白、统一大写）在模型层统一完成，
+	// 保证解析结果与缓存/数据库读回的结果是同一套规范形式。
+	loc.Normalize()
+	colo.Normalize()
 
-// upperTrim 统一处理国家/地区代码的大小写与空白。
-func upperTrim(s string) string {
-	return strings.ToUpper(strings.TrimSpace(s))
+	return loc, colo
 }
 
 // truncate 截断过长的值，避免把整条畸形 JSON 写进警告。
@@ -735,31 +767,8 @@ func truncate(s string, n int) string {
 }
 
 // ---------------------------------------------------------------------------
-// 去重与告警辅助
+// 告警辅助
 // ---------------------------------------------------------------------------
-
-// deduper 按 (IP, Port) 去重，并保持首次出现的顺序。
-//
-// 顺序稳定很重要：扫描进度、断点续测、导出 diff 都依赖目标顺序一致。
-// 重复时保留**首次出现**的记录，保证同一份输入每次解析结果完全相同。
-type deduper struct {
-	seen    map[string]struct{}
-	targets []model.Target
-}
-
-func newDeduper() *deduper {
-	return &deduper{seen: make(map[string]struct{})}
-}
-
-// add 尝试加入一个目标。返回 false 表示是重复项。
-func (d *deduper) add(t model.Target) bool {
-	if _, dup := d.seen[t.ID]; dup {
-		return false
-	}
-	d.seen[t.ID] = struct{}{}
-	d.targets = append(d.targets, t)
-	return true
-}
 
 // warningList 收集有限条数的告警，并做去重。
 //
