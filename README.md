@@ -67,11 +67,11 @@ cf-route-tester db migrate     # 应用数据库迁移
 cf-route-tester db vacuum      # 整理数据库文件
 ```
 
-尚未实现（执行时明确报 `not implemented yet`，退出码 2）：
-`query`、`upload`。
+尚未实现（执行时明确报 `not implemented yet`，退出码 2）：`upload`。
 
-> `upload` 按用户要求暂缓：先确保 `fetch → detect → scan → trace → export → aggregate`
-> 整条链路在本地完全跑通，凭据与归属方案确定后再做。
+> `upload` 按用户要求暂缓：先确保 `fetch → detect → scan → trace → export → aggregate → query`
+> 整条链路在本地完全跑通（已完成，见下文各命令的真实运行输出），
+> 凭据与归属方案确定后再做。
 
 ---
 
@@ -90,12 +90,20 @@ cf-route-tester db vacuum      # 整理数据库文件
 低于它无法构建。
 
 ```bash
-git clone <this-repo>
+# 把 <你的用户名> 换成实际地址（本仓库的 remote 尚未设置）
+git clone https://github.com/<你的用户名>/cf-route-tester.git
 cd cf-route-tester
 
 go build ./...
 go build -o bin/cf-route-tester ./cmd/cf-route-tester
+
+# 确认可用
+./bin/cf-route-tester version --verbose
+./bin/cf-route-tester --help
 ```
+
+克隆下来只有约 1.3 MB（源码 + 测试 + 文档），构建**不需要**任何数据文件
+或第三方二进制；`data/all.json` 与 NextTrace 都是按需获取的。
 
 Windows：
 
@@ -486,14 +494,38 @@ mode:        resume (skipped N already-measured target(s))
 另外，落库与收尾一律使用 **未被取消的 context**：Ctrl+C 之后
 正是最需要把已测结果保存下来的时刻，用已取消的 ctx 会直接失败。
 
-#### `--trace` 在 Phase 7 之前会明确说明"没做"
+#### `--trace` 在引擎不可用时会明确说明"没做"
+
+（以下为真实运行输出，`--trace-binary no-such-engine` 模拟未安装 NextTrace）
 
 ```text
-$ cf-route-tester scan --trace
-trace:       SKIPPED (--trace 需要 NextTrace，Phase 7 起可用)
+trace:       UNAVAILABLE
+             file does not exist: "no-such-engine" not found in PATH
+             NextTrace not found.
+             Please install NextTrace or configure trace.nexttrace.binary.
+             TCP 测量继续进行；未指定 --binary 时默认从 PATH 查找 nexttrace。
+
+probe completed=3/3 success=3 failed=0
+
+Completed: 3 / 3
+Success:   3
+Failed:    0
+Success %: 100.0%
+
+stored:      3 measurement(s)
+session progress: 3 measured (3 ok, 0 failed)
+
+trace:       SKIPPED (no NextTrace engine available;
+             TCP measurements above are still valid)
+session:     finished
 ```
 
-宁可明确告知跳过，也不静默略过——否则汇总看起来像是跟踪过了。
+两个刻意的决定：
+
+1. **引擎缺失不终止扫描**。TCP 测量本身仍有价值，
+   "用户没装 NextTrace"是最常见的情况之一。
+2. **绝不静默跳过**。明确标为 `SKIPPED` / `UNAVAILABLE`，
+   否则汇总看起来像是跟踪过了——那会让用户基于错误的前提去分析数据。
 
 #### 两级测量：只跟踪探测成功的目标
 
@@ -504,6 +536,22 @@ cf-route-tester scan --trace
 cf-route-tester scan --trace --trace-binary "data/bin/nexttrace.exe" --trace-mode icmp
 cf-route-tester scan --trace --trace-workers 4 --trace-timeout 25s
 ```
+
+扫描开始时会先把配置讲清楚（真实输出）：
+
+```text
+source:     https://zip.cm.edu.kg/all.json (cache, json)
+targets:    3
+database:   /path/to/results.db
+collector:  c-00000000...  CN/Zhejiang/Hangzhou/China Mobile/AS9808
+session:    20260101T000000Z-00000000 (new session)
+concurrency: 100 workers, timeout 1s
+trace:      enabled (mode tcp, 10 workers) — 只跟踪 TCP 探测成功的目标
+```
+
+`concurrency` 与 `trace:` 是**两套独立的并发**：探测是纯 socket
+（默认 100），跟踪每个 worker 都要启动一个外部进程（默认 10）。
+混在一个数字里会让用户把并发调到 100 去跑跟踪，那会拖垮机器。
 
 ```
 --- Level 2: route trace (only TCP-successful targets) ---
@@ -1297,19 +1345,31 @@ Go 工具链   modernc.org/sqlite 自身要求 go 1.26，因此 go.mod 的
 
 ## 规划中的命令
 
-以下命令**尚未实现**，`--help` 中列在 `Planned commands` 一节，
-执行时会明确返回“not implemented yet”，不会静默失败：
+只剩**一个**命令尚未实现，它在 `cf-route-tester --help` 里列在
+`Planned commands` 一节，执行时会明确返回 `not implemented yet`
+（退出码 2），不会静默失败：
+
+| 命令 | 作用 | 状态 |
+| --- | --- | --- |
+| `upload` | 将匿名压缩批次上传到 GitHub 数据仓库 | **暂缓**：先把本地链路跑通，凭据与归属方案确定后再做 |
+
+其余命令均已实现，见上文「使用」一节：
 
 | 命令 | 作用 |
 | --- | --- |
-| `detect` | 检测测量者地区与运营商信息 |
-| `scan` | 全量扫描：TCP Probe + NextTrace 两级测量（支持 `--resume`） |
-| `trace` | 使用 NextTrace 对指定 `IP:Port` 做线路跟踪 |
-| `export` | 导出 measurements / traces 为 JSONL 及压缩批次 |
-| `upload` | 将匿名压缩批次上传到 GitHub 数据仓库 |
-| `aggregate` | 聚合 `data/raw` 生成按地区 / 运营商分组的统计结果 |
+| `fetch` | 下载 / 缓存 / 解析 `all.json` |
+| `detect` | 检测本机地区与运营商，写入本地标识文件 |
+| `probe` | TCP 连通性与延迟测量 |
+| `scan` | 全量扫描：会话记录、断点续测、两级测量 |
+| `trace` | 使用 NextTrace 对 `IP:Port` 做线路跟踪 |
+| `export` | 导出为可公开的 JSONL（自动隐私过滤） |
+| `aggregate` | 把公开 JSONL 聚合为按地区 / 运营商分组的统计 |
 | `query` | 查询某个 `IP:Port` 在不同地区 / 运营商下的线路画像 |
-| `db` | 本地 SQLite 数据库维护（统计等） |
+| `db` | 本地 SQLite 维护（`stats` / `migrate` / `vacuum`） |
+| `version` | 版本信息（`--verbose` 显示构建细节） |
+
+`help` 与 `version` 之外的命令都在 `README.md` 的「使用」一节里有
+完整示例与真实运行输出。
 
 ---
 
@@ -1453,73 +1513,299 @@ latency / loss / samples / success_rate / path / timestamp
 
 ```text
 cf-route-tester/
-├── cmd/cf-route-tester/main.go   入口：构造环境、调用 CLI、返回退出码
-├── internal/
-│   ├── cli/                      命令分发、帮助、退出码、各子命令参数解析（已实现）
-│   ├── version/                  版本与公开数据 schema 版本（已实现）
-│   ├── model/                    核心数据模型（已实现）
-│   │   ├── model.go              Target / Location / ColoInfo / 不变量 / 归一化
-│   │   ├── collector.go          CollectorProfile / collector_id（匿名）
-│   │   └── dedup.go              Dedup / SortTargets / ValidateAll / Keys
-│   ├── source/                   all.json 获取、解析、缓存（已实现）
-│   │   ├── api.go                HTTP 下载：超时、重试、退避、代理、gzip、备用源
-│   │   ├── parser.go             JSON / 文本容错解析、校验、去重、source metadata
-│   │   ├── cache.go              缓存读写（原子写入）、CacheInfo、格式版本校验
-│   │   └── loader.go             完整策略：缓存命中 / 刷新 / 降级 / 格式识别
-│   ├── probe/                    TCP Probe（已实现）
-│   │   ├── probe.go              Prober / ProbeResult / 统计 / 错误分类
-│   │   ├── errno.go              错误码注册表（平台无关部分）
-│   │   ├── errno_windows.go      Windows WSA 错误码表
-│   │   ├── errno_unix.go         Unix POSIX errno 表
-│   │   └── worker.go             probe.Run（委托给 internal/worker）
-│   ├── worker/                   通用有界 worker pool（probe 与 trace 共用）
-│   │   └── worker.go             Run / Producer / ProcessFunc / RunStats
-│   ├── trace/                    NextTrace 集成（已实现）
-│   │   ├── engine.go             TraceEngine 接口、Hop/TraceResult、失败分类
-│   │   ├── ntrace.go             外部进程调用：路径解析、参数构造、超时、版本
-│   │   ├── parser.go             NextTrace JSON -> TraceResult（含纳秒换算）
-│   │   └── testdata/             真实 v1.7.3 输出夹具（解析契约的依据）
-│   ├── detect/                   本机地区 / 运营商检测（已实现）
-│   │   ├── detect.go             Source 接口、合并规则（手动优先）、报告
-│   │   ├── source_local.go       离线源：只推断出口 IP 版本
-│   │   └── source_geoip.go       联网源：可配置的 geo-IP API + 宽松解析
-│   ├── identity/                 本地匿名标识 collector_id（已实现）
-│   ├── scheduler/                扫描编排、断点续测与两级测量（已实现）
-│   │   └── scheduler.go          会话 -> 待测目标 -> Probe -> 落库
-│   │                             -> 只对成功目标 Trace -> 落库 -> 收尾
-│   ├── storage/                  本地 SQLite（已实现）
-│   │   ├── sqlite.go             打开 / PRAGMA / 迁移 / 统计
-│   │   ├── migrations.go         版本化迁移（表结构的唯一来源）
-│   │   ├── model.go              Measurement / Trace / 目标与采集者 UPSERT
-│   │   ├── writer.go             只追加写入（整批一个事务 + 幂等去重）
-│   │   └── query.go              按目标 / 采集者 / 会话 / 时间窗口查询
-│   │                             + 导出专用流式读取（export_query.go）
-│   ├── privacy/                  隐私过滤（已实现）
-│   │   └── privacy.go            内网/保留地址判定、坐标与目标分类
-│   ├── export/                   公开 JSONL 导出（已实现）
-│   │   ├── schema.go             公开 Schema（Row / Measurement / Trace）
-│   │   ├── convert.go            storage -> Row 转换 + 隐私过滤 + 错误信息清洗
-│   │   └── output.go             JSONL / gzip 编码（确定性 gzip 头）
-│   ├── query/                    单目标线路画像查询（已实现）
-│   │   ├── query.go              数据集索引、目标/地区画像、AS 路径
-│   │   └── load.go               两个数据源适配（SQLite / JSONL）
-│   ├── aggregate/                数据聚合（已实现）
-│   │   ├── aggregate.go          输入读取、延迟直方图、分组键、错误计数
-│   │   ├── collector.go          累积状态（分组 / 目标 / 采集者维度）
-│   │   ├── report.go             报告生成、MinSamples 过滤、notes
-│   │   └── source.go             文件/目录发现、gzip 读取、坏文件容错
-│   └── upload/                   GitHub 上传（暂缓）
-├── configs/config.example.yaml   配置示例（含详细注释，Phase 13 起真正被读取）
-├── data/                         本地数据（内容不提交，仅保留说明文件）
-├── migrations/                   迁移说明；SQL 迁移常量放在 internal/storage/migrations.go
-├── tests/                        跨模块集成测试
-└── .github/workflows/ci.yml      go test / vet / build
+├── cmd/cf-route-tester/          程序入口
+├── internal/                     全部业务逻辑（15 个包）
+│   ├── cli/                      命令分发、帮助、退出码、各子命令
+│   ├── version/                  程序版本与公开数据 schema 版本
+│   ├── model/                    核心数据模型与不变量
+│   ├── source/                   all.json 获取、解析、缓存
+│   ├── probe/                    TCP 探测与错误分类
+│   ├── worker/                   通用有界 worker pool（probe / trace 共用）
+│   ├── trace/                    NextTrace 集成（外部进程 + JSON 归一化）
+│   ├── detect/                   本机地区 / 运营商检测
+│   ├── identity/                 本地匿名标识 collector_id
+│   ├── scheduler/                扫描编排、断点续测、两级测量
+│   ├── storage/                  本地 SQLite（迁移 / 只追加写入 / 查询）
+│   ├── privacy/                  隐私过滤（内网地址判定与替换）
+│   ├── export/                   公开 JSONL 导出
+│   ├── aggregate/                数据聚合
+│   └── query/                    单目标线路画像查询
+├── tools/                        构建与测试辅助工具（独立可执行）
+│   ├── release/                  跨平台发布构建
+│   └── write-cache/              生成确定性缓存夹具（CI 用）
+├── docs/INSTALL.md               安装、校验、权限、NextTrace 配置
+├── .github/workflows/ci.yml      CI：格式 / vet / 测试 / 交叉编译 / 端到端冒烟
+├── migrations/README.md          迁移规则与表结构说明（SQL 在 Go 代码里）
+├── tests/README.md               为什么集成测试不集中放在这里
+├── configs/config.example.yaml   配置设计草案（**当前未被读取**）
+├── data/                         本地数据目录（内容不提交）
+├── dist/                         构建产物（不提交）
+├── LICENSE                       许可证状态（**尚未选定，见下文**）
+└── README.md / doc.go / go.mod / go.sum / .gitignore / .gitattributes
 ```
 
-`cmd` 与 `internal/cli` 只负责参数解析、调用与退出码；
-业务逻辑一律放在 `internal/` 下。
+> `internal/source/` 里**没有** `api_test.go`——下载层的重试与超时
+> 由 `loader_test.go` 覆盖，因为两者走同一条 HTTP 客户端路径。
+> 文件清单里如实标注了这一点，而不是列一个不存在的文件。
 
-排查数据来源问题时可打开内部诊断日志（仅输出到 stderr，默认关闭）：
+分层原则：`cmd` 与 `internal/cli` 只负责参数解析、调用与退出码；
+业务逻辑一律在 `internal/` 下的具体包里。`internal/` 前缀意味着
+这些包不对外暴露为公共 API——本项目发布的是**可执行文件**，
+不是库，因此没有义务维护 Go API 的向后兼容。
+
+---
+
+## 文件清单
+
+下面逐个说明**仓库里每一个被跟踪的文件**是做什么的。
+（构建产物 `dist/`、本地数据 `data/all.json`、第三方二进制
+`data/bin/` 都被 `.gitignore` 忽略，不会上传，见文末说明。）
+
+### 顶层与构建
+
+| 文件 | 作用 |
+| --- | --- |
+| `go.mod` | 模块声明。**Go 版本是 1.26**（`modernc.org/sqlite` 强制要求），唯一直接依赖是纯 Go 的 SQLite 驱动。 |
+| `go.sum` | 依赖校验和。9 个间接依赖全部来自 SQLite 驱动。 |
+| `doc.go` | 仓库级包文档：列出所有 `internal/` 包的职责与设计边界。 |
+| `LICENSE` | **许可证尚未选定**，文件里写明了发布前必须完成的事项（详见下文「发布前的法律事项」）。 |
+| `.gitignore` | 忽略 `dist/`、`bin/`、`data/` 等产物。 |
+| `.gitattributes` | 强制 LF 换行与文本规范化。Windows 上编辑过的文件不会因 CRLF 产生噪声 diff。 |
+
+### 程序入口
+
+| 文件 | 作用 |
+| --- | --- |
+| `cmd/cf-route-tester/main.go` | 入口：构造 `cli.Env`、调用 `cli.Run`、把退出码交给操作系统。**这里没有业务逻辑**，因此不需要测试。 |
+
+### `internal/version/` — 版本信息
+
+| 文件 | 作用 |
+| --- | --- |
+| `version.go` | 程序版本（`0.1.0`）、公开数据 schema 版本（`1`）、构建期注入的 commit 与构建时间。`SchemaVersion` 独立于程序版本：程序可以频繁升级，公开数据结构不变它就不变。 |
+| `version_test.go` | 保证版本字段永不为空（公开数据里不能出现空字符串版本号）。 |
+
+### `internal/model/` — 核心数据模型
+
+| 文件 | 作用 |
+| --- | --- |
+| `model.go` | `Target`（IP × Port）、`Location`、`ColoInfo`。不变量、归一化、`HasCoordinates`（0,0 是合法坐标，不能用 0 表示缺失）。 |
+| `collector.go` | `CollectorProfile` 与分组键 `GroupKey()`（固定 6 字段顺序，保证同分组在任何时间/节点生成一致的键）。含 `IsAnonymous()` 这一可测试的隐私断言。 |
+| `dedup.go` | 去重、排序、`ValidateAll`、批量键生成。解析层去重与存储层去重共用它，避免两套判据。 |
+| `session.go` | `MeasurementSession` 与 `NewSessionID()`（UTC 时间前缀 + 随机后缀，同一秒并发也不撞 ID、不承载可识别信息）。 |
+| `model_test.go` | Target 不变量、归一化、坐标边界（含 0,0 与越界）。 |
+| `collector_test.go` | 分组键稳定性、ASN 归一化、匿名性断言。 |
+| `session_test.go` | 会话 ID 格式与时区稳定性、生命周期（`Finished` / `Duration` / `Remaining`）、零值不 panic。 |
+| `schema_test.go` | 公开 schema 相关的不变量（字段语义一旦确定就不能悄悄改）。 |
+
+### `internal/source/` — all.json 获取、解析、缓存
+
+| 文件 | 作用 |
+| --- | --- |
+| `api.go` | HTTP 下载：超时、重试与退避、代理支持、gzip 解压、主源失败后降级到备用源。**没有单独的 `api_test.go`**：它的重试/超时行为由 `loader_test.go` 覆盖（两者走同一条 HTTP 客户端路径）。 |
+| `parser.go` | JSON / 文本容错解析、端口取并集、字段校验、去重、来源元数据（`SourceMeta` / `ParseStats`）。 |
+| `cache.go` | 缓存读写（**原子写入**）、`cacheSchemaVersion` 格式版本闸门、`CacheInfo`。 |
+| `loader.go` | 完整策略：新鲜缓存命中 → 网络 → 过期缓存降级；并把"缓存属于哪个源"作为判据的一部分。 |
+| `parser_test.go` | 解析：字段缺失、类型异常、端口并集、去重、统计口径。 |
+| `cache_test.go` | 缓存：原子写入、格式版本拒绝、损坏文件处理。 |
+| `loader_test.go` | 加载策略：缓存命中、强制刷新、网络失败时降级、缓存源不匹配。 |
+| `contract_test.go` | **上游结构契约**：用真实的 all.json 片段固定字段形态，上游改结构时立刻失败，而不是静默产出空数据。 |
+| `live_test.go` | 需要真实网络的只读检查，网络不可用时**自动跳过**（不把环境问题报成代码问题）。 |
+
+### `internal/probe/` — TCP 探测
+
+| 文件 | 作用 |
+| --- | --- |
+| `probe.go` | `Prober`、`ProbeResult`、统计与**错误分类**。分类是这一层的核心价值：超时 / 连接被拒 / 网络不可达是不同的线路现象。 |
+| `errno.go` | 错误码注册表的平台无关部分与查找逻辑。 |
+| `errno_windows.go` | Windows WSA 错误码表（10061 / 10054 等）。 |
+| `errno_unix.go` | Unix POSIX errno 表。 |
+| `worker.go` | `probe.Run` 与 `Runner`。池子实现已抽到 `internal/worker`，这里只保留 probe 侧的名字作为薄适配器。 |
+| `probe_test.go` | 分类映射、结果自洽性（不能既成功又带错误分类）、并发正确性。 |
+| `worker_test.go` | 池子语义：并发上限、恰好处理一次、取消后计入 Skipped、生产者不尊重取消时不死锁。 |
+
+### `internal/worker/` — 通用有界 worker pool
+
+| 文件 | 作用 |
+| --- | --- |
+| `worker.go` | `Run` / `Producer` / `ProcessFunc` / `RunStats`。probe 与 trace 共用同一份并发与取消语义，因此不会出现"probe 能正常取消、trace 取消后卡死"这类漂移。 |
+| `worker_test.go` | 独有行为：`emit` panic 被隔离、参数缺失不 panic、取消后账目闭合（`Processed + Skipped + Abandoned == Produced`）。 |
+
+### `internal/trace/` — NextTrace 集成
+
+| 文件 | 作用 |
+| --- | --- |
+| `engine.go` | `TraceEngine` 接口、`Hop` / `TraceResult`、失败分类（含"引擎不存在""权限不足"这类**环境问题**，它们不算线路质量）。 |
+| `ntrace.go` | 外部进程调用：路径解析（PATH / 绝对路径 / 补 `.exe`）、参数构造、超时、版本查询。 |
+| `parser.go` | NextTrace JSON → `TraceResult` 的归一化。**含纳秒→毫秒换算**、二维 `Hops` 聚合、乱码 `*_en` 字段优先。 |
+| `testdata/nexttrace_v1.7.3_icmp.json` | **真实** NextTrace v1.7.3 输出夹具。解析契约的依据；有测试断言它没被手工改过。 |
+| `trace_test.go` | 用真实夹具锁定解析契约、参数构造（端口必须用目标自己的）、失败分类、超时、假二进制端到端。 |
+
+### `internal/detect/` — 本机地区 / 运营商检测
+
+| 文件 | 作用 |
+| --- | --- |
+| `detect.go` | `Source` 接口、`Result`、合并规则（**手动配置优先**）、每源报告与暴露声明。 |
+| `source_local.go` | 离线源：只推断出口 IP 版本。不猜国家/运营商（离线推断出的其实是 DNS 服务商的 ASN）。 |
+| `source_geoip.go` | 联网源：可配置的 geo-IP API + 宽松但**不猜测**的解析（含 `_en` 字段优先、ASN 从 `org` 提取、去掉 ISP 名的 ASN 前缀）。 |
+| `detect_test.go` | 合并优先级、单源失败不影响其它源、**绝不写入隐私字段**（喂一份塞满 MAC/主机名/坐标的响应，断言一个都没落盘）。 |
+
+### `internal/identity/` — 本地匿名标识
+
+| 文件 | 作用 |
+| --- | --- |
+| `identity.go` | `collector_id`（`c-` + 32 位十六进制，`crypto/rand` 生成，**不由 MAC/CPU/磁盘/公网 IP/主机名推导**）、画像、上一个会话 ID 的记忆与原子写入。文件损坏时**拒绝静默重建**。 |
+| `identity_test.go` | 原子写入、损坏文件拒绝重建、ID 格式、跨进程一致。 |
+
+### `internal/scheduler/` — 扫描编排与两级测量
+
+| 文件 | 作用 |
+| --- | --- |
+| `scheduler.go` | 一次完整测量的编排：会话确定 → 待测目标 → TCP 探测 → 落库 → **只对成功目标跟踪** → 落库 → 收尾。含断点续测判据、条数+时间双触发落库、中断后保留会话。 |
+| `scheduler_test.go` | 续测判据（三元组）、只测未完成目标、中断后会话保持未结束、两级过滤、跟踪失败不中断、幂等去重、落库失败被计数。 |
+
+### `internal/storage/` — 本地 SQLite
+
+| 文件 | 作用 |
+| --- | --- |
+| `sqlite.go` | 打开数据库、PRAGMA（WAL / busy_timeout / foreign_keys）、迁移执行、文件统计。 |
+| `migrations.go` | **版本化迁移，表结构的唯一来源**。只增不改。 |
+| `model.go` | `Measurement` / `Trace` / `TargetView`、目标与采集者 UPSERT、`NewTrace`（引擎结果 → 入库行）。 |
+| `writer.go` | 只追加写入：整批一个事务 + `dedup_key` 幂等去重。失败结果同样入库。 |
+| `query.go` | 按目标 / 采集者 / 会话 / 时间窗口查询，`PendingTargets` 等续测判据。 |
+| `export_query.go` | 导出与查询专用的**流式**读取（带目标元数据的 3 表 JOIN、按会话过滤、会话列表）。 |
+| `version_info.go` | 落库时写入的 `schema_version` 与 `client_version`，并说明它与"表结构版本"的区别。 |
+| `storage_test.go` | 迁移幂等、只追加语义、外键约束、幂等去重、`collectors` 表**没有**隐私列（直接检查实际创建的列名）。 |
+| `export_query_test.go` | 导出查询真的能执行（30 多列 JOIN 写错列名只有执行时才暴露）、数据库层**不**过滤私有目标（过滤是导出层的职责）。 |
+
+### `internal/privacy/` — 隐私过滤
+
+| 文件 | 作用 |
+| --- | --- |
+| `privacy.go` | 内网/保留地址判定（比 RFC1918 更宽：CGNAT、链路本地、文档用途、基准测试、保留、组播）、替换为 `private-v4` / `private-v6`、目标分类。判定基于解析后的地址，因此 `::ffff:192.168.1.1` 与 `192.168.1.1` 结论一致。 |
+| `privacy_test.go` | 逐条地址边界（含 `172.15` / `172.32` / `100.63` / `100.128` 这些"紧邻但不属于"的地址，最容易写错一位）。 |
+
+### `internal/export/` — 公开 JSONL 导出
+
+| 文件 | 作用 |
+| --- | --- |
+| `schema.go` | **公开 Schema**：`Row` / `Measurement` / `Trace` / `TargetMeta`。字段名一旦确定，聚合、网站、第三方分析都依赖它。 |
+| `convert.go` | `storage` → `Row` 转换，**在转换时**应用隐私过滤（不是转换后）、错误信息清洗（IP / 路径 / 用户名替换）。 |
+| `output.go` | JSONL / gzip 编码。gzip 头 `ModTime` 置零 → **同一份数据导出两次字节相同**。 |
+| `export_test.go` | 私有目标整行丢弃、内网跳**替换而非删除**、整体扫描式的"轨迹里任何原始内网地址都不得出现"、gzip 往返与确定性、`Close` 幂等。 |
+
+### `internal/aggregate/` — 数据聚合
+
+| 文件 | 作用 |
+| --- | --- |
+| `aggregate.go` | 输入行类型、JSONL 流式读取、**延迟直方图**（内存与样本数无关、可合并）、分组键、错误计数。 |
+| `collector.go` | 累积状态：分组（目标×地区×运营商）、目标、采集者三个维度。 |
+| `report.go` | 报告生成、`MinSamples` 过滤（作用在**目标**层面，否则会毁掉跨地区对比）、`notes`（防止误读数字）。 |
+| `source.go` | 文件/目录发现、gzip 读取、**单个坏文件不终止整批**。 |
+| `aggregate_test.go` | 分组语义、成功率、**失败样本不污染延迟统计**、直方图边界（分位数不得超出精确极值）、坏行计数、坏文件容错、notes 完整性。 |
+
+### `internal/query/` — 单目标线路画像
+
+| 文件 | 作用 |
+| --- | --- |
+| `query.go` | 数据集索引、目标与地区画像、AS 路径签名、逐跳统计（按 TTL 聚合而非按 IP）、时间序列。 |
+| `load.go` | 两个数据源适配：**SQLite**（本地历史）与 **JSONL**（公开数据）。两条路径共用同一套统计逻辑，因此数字一致。 |
+| `query_test.go` | 分组、裸 IP 有歧义时报错不瞎猜、IPv6 规范化、AS 路径去重、逐跳超时不计入延迟、时间序列保留最近点。 |
+
+### `internal/cli/` — 命令行
+
+入口与分发：
+
+| 文件 | 作用 |
+| --- | --- |
+| `cli.go` | 命令注册表、分发、退出码约定（`0` 成功 / `1` 运行期错误 / `2` 用法错误）。 |
+| `help.go` | 顶层帮助与路线图。**命令一旦实现必须从路线图移到可用列表**，两边都有会让用户无法判断它到底能不能用。 |
+| `cmd_source.go` | 各命令共用的数据源 flag（`--url` / `--fallback-url` / `--cache` / `--refresh` / `--proxy` 等）。 |
+| `cmd_fetch.go` | `fetch` 命令；同时提供 `newFlagSet` / `parseFlags` / `parseFlagsAllowInterspersed` 三个解析助手。 |
+
+各子命令（一个命令一个文件）：
+
+| 文件 | 命令 | 作用 |
+| --- | --- | --- |
+| `cmd_probe.go` | `probe` | TCP 探测，支持 `--db` 落库、`--json` 输出 JSONL、失败分类汇总。 |
+| `cmd_scan.go` | `scan` | 全量扫描：会话控制（`--resume` / `--new` / `--session`）、进度、两级测量汇总。 |
+| `cmd_trace.go` | `trace` | 单个/批量线路跟踪，`--hops` 逐跳表、`--json` JSONL。 |
+| `cmd_detect.go` | `detect` | 检测本机地区/运营商，写入标识文件；发起请求**之前**打印"谁会看到你的 IP"。 |
+| `cmd_db.go` | `db` | `db stats` / `migrate` / `vacuum`。 |
+| `cmd_export.go` | `export` | 导出公开 JSONL，含 `--dry-run`、`--list-sessions`、格式与隐私报告。 |
+| `cmd_aggregate.go` | `aggregate` | 聚合报告（text / json / jsonl）。 |
+| `cmd_query.go` | `query` | 单目标画像；位置参数与选项可任意交错。 |
+
+测试（全部在包内，用真实本机监听与真实 SQLite）：
+
+| 文件 | 覆盖 |
+| --- | --- |
+| `cli_test.go` | 分发、退出码、帮助与路线图一致性、未实现命令明确报错。 |
+| `fixture_test.go` | 测试夹具：写一份合法目标缓存（**离线**，绝不偷偷联网）。 |
+| `helpers_test.go` | 测试计时助手。 |
+| `cmd_probe_test.go` | 探测命令参数、JSONL 形状、失败分类输出。 |
+| `cmd_scan_test.go` | 会话创建/续测/中断、`--limit` 保持源顺序、`--stdout`/`--quiet` 行为。 |
+| `cmd_trace_test.go` | 跟踪命令：帮助文本、非法模式/目标、**引擎缺失时给出安装提示且退出码为 1（运行期错误）而非 2（用法错误）**、多个 `--target`、失败时不输出半截 JSONL。 |
+| `cmd_detect_test.go` | 检测命令：手动值优先、写入语义、**绝不写入隐私字段**、JSON 输出可解析。 |
+| `cmd_export_test.go` | 导出：隐私报告、gzip 可解、拒绝覆盖、zstd 明确拒绝并给替代方案。 |
+| `cmd_query_test.go` | 查询：两个数据源互斥、交错参数、JSON 结构、`--hops` / `--series` / `--stats` / `--list-targets`。 |
+| `cmd_db_test.go` | `db` 子命令：统计口径、迁移幂等、vacuum 行为。 |
+| `cmd_fetch_test.go` | `fetch` 参数与输出。 |
+| `cmd_fetch_cache_test.go` | 缓存命中路径（离线）。 |
+| `cmd_fetch_e2e_test.go` | 端到端：下载 → 缓存 → 解析，使用本地 HTTP 服务器，不依赖外网。 |
+
+### `tools/` — 构建与测试辅助
+
+| 文件 | 作用 |
+| --- | --- |
+| `tools/release/main.go` | 跨平台发布构建：跑 gofmt/vet/test → 交叉编译 6 个平台 → 生成 `SHA256SUMS` 与 `release.json`。构建时间取自 **commit 时间**（而非 `time.Now()`），配合 `-trimpath` 实现**可复现构建**。 |
+| `tools/release/main_test.go` | 钉住产物命名规则与校验和格式（它们属于发布产物的一部分，写错了用户就没法校验）、语义化版本校验、git 不可用时优雅降级。 |
+| `tools/write-cache/main.go` | 生成**确定性**的目标缓存夹具，供 CI 端到端冒烟使用（不依赖外网数据源）。调用真实的 `source.WriteCache`，避免手工拼缓存格式而与实现漂移。 |
+
+### `docs/`、`migrations/`、`tests/`、`configs/`、`data/`
+
+| 文件 | 作用 |
+| --- | --- |
+| `docs/INSTALL.md` | 安装完整说明：校验下载、macOS Gatekeeper、交叉编译、可复现构建、NextTrace 安装与权限、最短上手路径。 |
+| `migrations/README.md` | 迁移规则（只增不改、事务、幂等）与当前 5 张表的结构说明。**SQL 本身在 Go 源码里**，这里只有给人看的说明。 |
+| `tests/README.md` | 说明为什么跨模块集成测试**不集中放在这里**，以及端到端覆盖实际在哪个文件里。 |
+| `configs/config.example.yaml` | 配置文件的**设计草案**。当前版本**不读取它**——所有可配置项都走命令行 flag。保留它是为了固定键名、默认值与"Token 只能来自环境变量"这条硬约束。 |
+| `data/.gitignore` | 忽略 `data/` 下的一切（数据与第三方二进制都不上传）。 |
+| `data/README.md` | 说明 `data/` 目录里各文件是什么、为什么不上传。 |
+
+### CI
+
+| 文件 | 作用 |
+| --- | --- |
+| `.github/workflows/ci.yml` | 11 个步骤：gofmt 检查 → `go vet` → `go test -race` → `go build` → 6 平台交叉编译 → `CGO_ENABLED=0` 校验（防止有人引入需要 CGO 的依赖）→ 二进制冒烟 → **完整链路端到端冒烟**（scan → export → aggregate/query，含隐私回归断言）→ 发布工具自检。 |
+
+---
+
+## 哪些文件不会上传
+
+以下内容被 `.gitignore` 忽略，**不会**出现在 GitHub 仓库里：
+
+| 路径 | 大小（本机实测） | 为什么不提交 |
+| --- | --- | --- |
+| `data/all.json` | 5.1 MB | 上游目标列表的缓存，随时可重新下载；提交它会让仓库无谓地变大且迅速过期。 |
+| `data/bin/nexttrace_*.exe` | 32.1 MB | 第三方二进制（GPL-3.0），由用户按 `docs/INSTALL.md` 自行下载。 |
+| `data/bin/WinDivert.dll`、`WinDivert64.sys` | 约 140 KB | NextTrace 的运行时依赖，由 `nexttrace --init` 生成。 |
+| `dist/` | 81.7 MB | 构建产物（含 `dist/release/` 的 6 个平台二进制，每个约 11 MB）。发布走 GitHub Releases，不进仓库历史。 |
+| `data/*.db` | 视使用而定 | 本地测量数据库（个人数据），绝不提交。 |
+| `data/collector.json` | 约 235 B | 本地匿名标识。虽然不含隐私信息，但它是**这台机器**的身份，提交它会让不同人的数据混在同一个 ID 下。 |
+
+因此别人 `git clone` 下来只有 **107 个文件 / 约 1.3 MB**（源码 + 测试 + 文档），
+不含任何数据与二进制。这一点已实测：把仓库克隆到临时目录后，
+`go build ./...`、`go vet ./...`、`go test ./...` 全部通过
+（16 个包全绿），说明**没有遗漏任何构建所需的文件**。
+
+> 上面的大小与文件数是**实测值**而不是估计值。README 里写估计数字
+> （"大约 33 MB"）迟早会与事实脱节，而读者没有理由怀疑它。
+> 仓库体积这类可测量的数字，应当用命令量出来再写进去。
+
+### 排查问题时的内部诊断日志
+
+排查数据来源问题时可以打开内部诊断日志（仅输出到 stderr，默认关闭）：
 
 ```bash
 CF_ROUTE_TESTER_DEBUG=1 cf-route-tester fetch --verbose
@@ -1529,14 +1815,24 @@ CF_ROUTE_TESTER_DEBUG=1 cf-route-tester fetch --verbose
 
 ## 配置
 
-配置文件为 YAML（`configs/config.example.yaml` 为示例，带详细注释）。
-命令行参数可以覆盖配置文件。
+> **当前版本不读取配置文件。** 所有可配置项都通过命令行参数传入
+> （见 `cf-route-tester <command> --help`）。
+>
+> `configs/config.example.yaml` 是一份**设计草案**：它固定了将来的键名、
+> 各项的合理默认值，以及"上传 Token 只能来自环境变量"这条硬约束。
+> 保留它是为了避免将来实现时随手发明另一套键名。
+> 现在想要这些设置请用对应的 flag，例如：
+>
+> ```bash
+> cf-route-tester probe --workers 100 --timeout 3s
+> cf-route-tester scan  --workers 100 --timeout 3s --trace --trace-mode tcp
+> cf-route-tester trace --target 1.1.1.1:443 --binary nexttrace --timeout 15s
+> ```
+>
+> 引入 YAML 解析会把第一个非必要第三方依赖带进项目（当前唯一直接依赖是
+> SQLite 驱动），因此这件事被推迟到确有需要时。
 
-> Phase 1 状态：`fetch` 的全部参数目前来自命令行（见上文），
-> 配置文件尚未被读取——引入 YAML 解析会把第一个第三方依赖带进项目，
-> 计划与后续阶段（`scan` / `trace`）需要的一起处理。
-> 因此下表中的字段目前只是**已确定的设计约定**，`configs/config.example.yaml`
-> 已经按此写好，等配置加载落地后即可直接使用。
+下面是已经确定的设计约定，`configs/config.example.yaml` 按此编写：
 
 ```yaml
 source:
@@ -1696,6 +1992,33 @@ linux/darwin/windows × amd64/arm64 交叉编译
 
 ## 许可证
 
-尚未指定。在正式发布之前需要确定本项目的许可证，
-并复核 NextTrace-core（GPL-3.0）等外部依赖的许可证要求。
-详见 `LICENSE`。
+**本项目自身的许可证尚未选定**，`LICENSE` 文件里写明了发布前必须完成的事项。
+
+### 为什么这不是可以跳过的细节
+
+一个没有许可证的公开仓库，在法律上默认是 **"保留所有权利"**：
+别人可以阅读，但**不能**合法地使用、修改或再分发——包括把它打包进
+自己的发行版。若你希望别人能用它，就必须显式给出许可证。
+因此**在把仓库公开之前**（或至少在发布第一个二进制之前）需要选定一个。
+
+### 需要你先决定的事
+
+1. **本项目采用哪个许可证**（常见选择：MIT / Apache-2.0 宽松，
+   或 GPL-3.0 强 copyleft）。
+2. **与 NextTrace-core 的关系**：它标注 **GPL-3.0**，而本项目
+   **以独立可执行文件的方式调用它**（`exec.Command` 启动子进程），
+   不复制其源码、不静态链接、不修改它。
+   这种"调用外部程序"的用法通常被认为不构成衍生作品，
+   因此一般**不会**强制本项目也采用 GPL。但这是需要你自己
+   确认（必要时咨询法律意见）的判断，我不会替你下结论。
+3. 若决定随包分发 NextTrace，需要同时提供它的许可证与源码获取方式说明。
+
+在上述事项确定之前，本仓库仅作为开发中的工作副本，
+未授予任何再分发许可。
+
+### 目前没有做的事
+
+本项目**不**内嵌、**不**复制、**不**重新分发 NextTrace 的任何代码或二进制：
+`data/bin/` 下的 `nexttrace_*.exe` 被 `.gitignore` 忽略，
+用户按 `docs/INSTALL.md` 自行从上游下载。这也是把它做成
+"外部进程调用"而不是"内嵌库"的原因之一。

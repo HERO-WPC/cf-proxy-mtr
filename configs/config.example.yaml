@@ -1,12 +1,28 @@
 # cf-route-tester 配置示例
 #
-# 使用方法：
-#   cp configs/config.example.yaml configs/config.yaml
-# 然后用 --config 指定，或放到默认查找路径。
+# ============================================================================
+# 重要：当前版本**不读取这个文件**。
+# ============================================================================
 #
-# 注意：命令行参数可以覆盖本文件中的值。
-# 注意：本文件中不允许出现任何密钥（例如 GitHub Token）。
-#       Token 只能来自环境变量 GITHUB_TOKEN。
+# 现阶段的实现是"纯命令行参数"：所有可配置项都通过 flag 传入
+# （见 `cf-route-tester <command> --help`）。本文件是**设计草案**，
+# 记录了配置项应当长什么样，等配置文件解析真正实现后才会被读取。
+#
+# 为什么仍然把它留在仓库里：
+#   1. 它是一个明确的设计意图记录，避免将来实现时随手发明另一套键名；
+#   2. 它列出了各项的合理默认值（并发数、超时），与代码里的默认值一致；
+#   3. 它写明了"上传的 Token 只能来自环境变量"这条硬约束，
+#      这条约束在实现之前就必须先定下来，否则很容易被违反。
+#
+# 如果你现在就想要这些设置，请用对应的命令行参数，例如：
+#
+#   cf-route-tester probe --workers 100 --timeout 3s
+#   cf-route-tester scan  --workers 100 --timeout 3s --db data/results.db
+#   cf-route-tester scan  --trace --trace-binary "C:/Tools/nexttrace.exe" --trace-mode tcp
+#   cf-route-tester trace --target 1.1.1.1:443 --binary nexttrace --timeout 15s
+#
+# 注意：本文件中**不允许**出现任何密钥（例如 GitHub Token）。
+#       Token 只能来自环境变量，绝不能进仓库。
 
 source:
   # all.json 主数据源。

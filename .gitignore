@@ -1,9 +1,17 @@
 # Build output / 编译产物
+#
+# 注意：这里的模式必须用前导 "/" 锚定到仓库根目录。
+# 早先写成裸的 "cf-route-tester" 时，它同时匹配了**目录**
+# cmd/cf-route-tester/，导致整个程序入口被忽略、仓库 clone 下来无法构建。
+# 这类"忽略了不该忽略的东西"的错误，症状出现在别人那里而不是自己这里，
+# 因此规则一律锚定根目录。
 /bin/
 /dist/
-cf-route-tester
-cf-route-tester.exe
-*.exe
+/cf-route-tester
+/cf-route-tester.exe
+
+# 二进制与库文件。用 "/" 前缀锚定，避免误伤同名目录。
+/*.exe
 *.dll
 *.so
 *.dylib
@@ -37,7 +45,10 @@ configs/local.yml
 gh_token.txt
 
 # Test / coverage artifacts
-*.out
+#
+# 刻意**不**写 "*.out"：那是一条在任意层级生效的规则，
+# 而 Go 的包名里 ".out" 并不常见、却可能出现在目录名里。
+# 只忽略 Go 工具链真正产出的那几个文件名，风险更低。
 coverage.txt
 coverage.html
 

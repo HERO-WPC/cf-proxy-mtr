@@ -212,6 +212,20 @@ func runScan(env *Env, args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	// 0) 先校验 "用法类" 参数，再去做任何有代价的事（下载、开库、建会话）。
+	//
+	// 顺序很重要：如果放到后面，用户写错 --trace-mode 时会先经历
+	// 下载目标列表、打开数据库、创建会话，最后才看到
+	// "trace mode 不对"——而且当目标列表为空时，他甚至看不到这条错误，
+	// 只会看到 "no targets to scan"，从而去排查完全无关的方向。
+	// 这类"参数校验必须发生在副作用之前"的规则，靠这条注释与
+	// cmd_trace_test.go 里的测试守住。
+	if p.trace {
+		if _, err := trace.Mode(p.traceMode).Normalize(); err != nil {
+			return usageError("%v", err)
+		}
+	}
+
 	// 1) 目标列表（缓存优先，与 fetch/probe 一致）。
 	res, err := loadTargets(ctx, p.source)
 	if err != nil {
