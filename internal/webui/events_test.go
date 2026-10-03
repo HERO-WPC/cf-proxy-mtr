@@ -215,10 +215,14 @@ func TestScanEmitsLogEvents(t *testing.T) {
 	joined := strings.Join(texts, "\n")
 	t.Logf("日志事件:\n%s", joined)
 
-	// 必须包含：开始、正在测某个目标、阶段完成、总体完成。
+	// 必须包含：开始、**每条结果**、阶段完成、总体完成。
+	//
+	// 注意这里是"逐条结果"而不是"正在测量 X"：日志面板的用途是
+	// 让人看到每个 IP 通不通、多少毫秒，而不是宣告即将开始测它。
+	// 每个目标因此只产生一行，且那一行带着结论。
 	wants := []string{
 		"开始测量",
-		"正在测量",
+		"连通",
 		"TCP 探测完成",
 		"测量完成",
 	}
@@ -228,9 +232,13 @@ func TestScanEmitsLogEvents(t *testing.T) {
 		}
 	}
 
-	// 必须出现被测目标的 ID，否则"当前测试的 IP"无从显示。
+	// 必须出现被测目标的 ID 与它实际测到的延迟，
+	// 否则"每个 IP 的延迟与连通性"这个要求就没有落地。
 	if !strings.Contains(joined, "127.0.0.1:") {
 		t.Errorf("log does not mention the target being measured:\n%s", joined)
+	}
+	if !strings.Contains(joined, " ms") {
+		t.Errorf("log does not show a measured latency:\n%s", joined)
 	}
 }
 

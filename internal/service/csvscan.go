@@ -46,10 +46,20 @@ type CSVScanOptions struct {
 	Progress func(ProgressEvent)
 
 	// OnTarget 在每个目标**开始**探测时调用（可为 nil，会并发调用）。
+	//
+	// 它只用于"当前正在测哪个"这类实时状态展示，
+	// 不该拿来写日志行——那会让每个目标的日志变成两条。
 	OnTarget func(target string)
 
-	// OnTrace 在一条线路跟踪完成后调用（可为 nil）。
-	OnTrace func(target string, result *trace.TraceResult)
+	// OnProbe 在每个目标探测**完成后**调用，携带延迟与连通性。
+	//
+	// 进度回调只给"完成 37/100"这种聚合数字，而使用者真正想知道的是
+	// "这个 IP 通不通、多少毫秒、在哪儿"——那需要逐条结果，
+	// 因此单独一个回调。
+	OnProbe func(outcome ProbeOutcome)
+
+	// OnTrace 在一条线路跟踪完成后调用（可为 nil，**会并发调用**）。
+	OnTrace func(outcome TraceOutcome)
 
 	// probeOverride 允许测试替换探测配置（并发性测试需要
 	// 一个"每个目标都恰好耗时 timeout"的确定性拨号器）。
@@ -247,6 +257,20 @@ func (s *Service) RunCSVScan(ctx context.Context, opts CSVScanOptions) (*CSVScan
 			result.RowsWritten++
 		}
 
+		// 逐条结果的日志回调（调用方通常用它写"这个 IP 通不通、多少毫秒"）。
+		if opts.OnProbe != nil {
+			opts.OnProbe(ProbeOutcome{
+				Target:       probeResult.TargetID,
+				IP:           target.IP,
+				Port:         target.Port,
+				Landing:      landing(target),
+				Success:      probeResult.Success,
+				LatencyMS:    probeResult.LatencyMS,
+				ErrorType:    string(probeResult.ErrorType),
+				ErrorMessage: probeResult.ErrorMessage,
+			})
+		}
+
 		if opts.Progress != nil {
 			opts.Progress(ProgressEvent{
 				Phase:         "probe",
@@ -392,7 +416,17 @@ func (s *Service) runTracePhase(
 			}
 
 			if opts.OnTrace != nil {
-				opts.OnTrace(id, traceResult)
+				// 并发调用：多个 worker 会同时进入这里，
+				// 回调实现必须自己保证线程安全。
+				opts.OnTrace(TraceOutcome{
+					Target:       id,
+					Landing:      landing(target),
+					HopCount:     traceResult.HopCount(),
+					Route:        asnmap.FullPath(hopASNs(traceResult.Hops)),
+					Success:      traceResult.Success,
+					ErrorType:    string(traceResult.ErrorType),
+					ErrorMessage: traceResult.ErrorMessage,
+				})
 			}
 
 			// 每行拿到就立刻写盘，与探测阶段同样的性质：
@@ -439,6 +473,81 @@ func (s *Service) resolveTraceEngine(ctx context.Context, opts CSVScanOptions) (
 // 的，没有需要交付给消费者的结构化结果。用一个空结构体占位，
 // 比为了满足签名而把结果绕一圈再丢弃更诚实。
 type traceOutcome struct{}
+
+// ProbeOutcome 是一条 TCP 探测完成后交给界面展示的信息。
+//
+// 它是"给人看的一行"，因此只带日志需要的东西：
+// 目标、落地地区、通不通、多少毫秒、失败原因。
+// 结构化数据在 CSV 里，这里的字段刻意保持扁平。
+type ProbeOutcome struct {
+	// Target 是 "IP:Port"。
+	Target string
+
+	// IP / Port 是拆开的形式。
+	IP   string
+	Port int
+
+	// Landing 是**落地地区**（目标 IP 自身的地理位置），
+	// 形如 "US/Illinois/Chicago"；没有数据时是 "-"。
+	Landing string
+
+	// Success 表示这次连接是否成功。
+	Success bool
+
+	// LatencyMS 是握手耗时；失败时为 0（不展示）。
+	LatencyMS float64
+
+	// ErrorType / ErrorMessage 是失败原因（成功时为空）。
+	ErrorType    string
+	ErrorMessage string
+}
+
+// TraceOutcome 是一条线路跟踪完成后交给界面展示的信息。
+type TraceOutcome struct {
+	// Target 是 "IP:Port"。
+	Target string
+
+	// Landing 是落地地区，同上。
+	Landing string
+
+	// HopCount 是路径跳数。
+	HopCount int
+
+	// Route 是**线路串，含 ASN 编号与线路名称**，
+	// 形如 "163(AS4134) > CN2(AS4809) > AS13335"。
+	//
+	// 用 FullPath 而不是 ShortPath：日志是拿来核对与排查的，
+	// 光有"163"无法确认到底是不是 AS4134，而光有编号
+	// 又认不出这条线路意味着什么。两者都要。
+	Route string
+
+	// Success 表示这次跟踪是否成功拿到路径。
+	Success bool
+
+	// ErrorType / ErrorMessage 是失败原因（成功时为空）。
+	ErrorType    string
+	ErrorMessage string
+}
+
+// landing 把目标的地理位置格式化成日志用的一行短语。
+func landing(target model.Target) string {
+	return target.Location.String()
+}
+
+// hopASNs 取出每一跳的 ASN。
+//
+// 跳过空值：没有 ASN 的跳（超时、内网）对"线路"这件事没有信息量，
+// 留着会让线路串里出现一堆重复的空段。
+func hopASNs(hops []trace.Hop) []string {
+	out := make([]string, 0, len(hops))
+	for _, hop := range hops {
+		if strings.TrimSpace(hop.ASN) == "" {
+			continue
+		}
+		out = append(out, hop.ASN)
+	}
+	return out
+}
 
 // probeRow 把探测结果转成 CSV 行。
 func probeRow(target model.Target, result probe.ProbeResult) csvstore.Row {

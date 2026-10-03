@@ -610,9 +610,12 @@ func (s *Server) runScan(ctx context.Context, req scanRequest, cancel context.Ca
 		},
 		// Progress 既推给进度条，也翻译成日志行（阶段完成时才写一条）。
 		Progress: s.emitCSVProgress,
-		// OnTarget 让日志面板显示"正在测哪个 IP"。
+		// OnTarget 只更新"当前正在测哪个 IP"（供状态接口与页面恢复显示），
+		// 不写日志行——每个目标的结果由 OnProbe 输出。
 		OnTarget: s.emitTarget,
-		// OnTrace 让日志面板显示这条线路走的是什么（163 / CN2 / ...）。
+		// OnProbe 输出每个 IP 的延迟与连通性（含落地地区）。
+		OnProbe: s.emitProbe,
+		// OnTrace 输出线路：ASN 编号 + 线路名称 + 落地地区。
 		OnTrace: s.emitTrace,
 	}
 

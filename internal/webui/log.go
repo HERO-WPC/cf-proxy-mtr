@@ -4,11 +4,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
-	"github.com/cf-route-tester/cf-route-tester/internal/asnmap"
 	"github.com/cf-route-tester/cf-route-tester/internal/service"
-	"github.com/cf-route-tester/cf-route-tester/internal/trace"
 )
 
 // handleEventsLog 用 SSE 推送界面日志事件。
@@ -123,48 +122,84 @@ func (s *Server) emitLoadResult(result *service.CSVScanResult) {
 
 // emitTarget 记录"正在测哪个目标"。
 //
-// 参数是字符串而不是 model.Target：CSV 模式下扫描器只知道
-// "IP:Port"，界面层不需要（也不该）拿到整个模型类型。
+// 它会被多个 worker **并发**调用，因此这里只做一件事：
+// 缓存当前目标（供 /api/scan/status 返回，页面刷新时靠它恢复显示）。
 //
-// 它会被多个 worker **并发**调用，因此这里只做两件事：
-// 把消息转给线程安全的 broker，并缓存当前目标
-// （供 /api/scan/status 返回，页面刷新时靠它恢复显示）。
+// **刻意不写日志行**：每个目标的结果由 emitProbe 输出一行带延迟与
+// 连通性的记录。这里再写一条"正在测量 X"会让日志每个目标两行，
+// 其中一行还没有任何结果信息。参数是字符串而不是 model.Target：
+// 界面层不需要拿到整个模型类型。
 func (s *Server) emitTarget(target string) {
 	s.currentMu.Lock()
 	s.currentTarget = target
 	s.currentMu.Unlock()
-
-	s.events.Emit(levelInfo, "正在测量 "+target)
 }
 
-// emitTrace 记录一条已完成线路的**线路信息**。
+// emitProbe 输出一条"这个 IP 通不通、多少毫秒、在哪儿"的日志。
 //
-// 这是"AS4134 → 163"这类信息出现的地方：光有 ASN 编号
-// 对使用者没有意义，配上线路名称才知道走的是普通出口还是优质出口。
-func (s *Server) emitTrace(target string, result *trace.TraceResult) {
-	if result == nil {
+// 这是使用者最常看的一行：TCP 延迟测试的产出就是这些。
+// 落地地区（目标 IP 自身的地理位置）必须带上——同一个 IP 段在不同
+// 地区表现差别很大，没有地区就无法判断"延迟高"是不是因为目标远。
+func (s *Server) emitProbe(outcome service.ProbeOutcome) {
+	location := landingSuffix(outcome.Landing)
+
+	if outcome.Success {
+		s.events.Emit(levelGood, fmt.Sprintf("连通 %s  %.1f ms%s",
+			outcome.Target, outcome.LatencyMS, location))
 		return
 	}
 
-	if !result.Success {
-		reason := result.ErrorMessage
+	// 失败时给**分类**（timeout / refused / ...）而不是整条错误信息：
+	// 分类足够说明问题，而完整信息里带着重复的目标地址，逐行看很吵。
+	// 完整原因在 CSV 的 error_message 列里。
+	reason := outcome.ErrorType
+	if reason == "" {
+		reason = "failed"
+	}
+	s.events.Warn("不通 %s  (%s)%s", outcome.Target, reason, location)
+}
+
+// emitTrace 输出一条线路跟踪结果。
+//
+// 线路串**同时带 ASN 编号与线路名称**（如 "163(AS4134) > CN2(AS4809)"）：
+// 只有名称无法核对编号，只有编号又认不出这条线路意味着什么。
+// 同样带上落地地区，这样"走优质出口到美国"这类判断才成立。
+//
+// 会被多个 worker 并发调用；events 广播器自身是线程安全的。
+func (s *Server) emitTrace(outcome service.TraceOutcome) {
+	location := landingSuffix(outcome.Landing)
+
+	if !outcome.Success {
+		reason := outcome.ErrorMessage
 		if reason == "" {
-			reason = string(result.ErrorType)
+			reason = outcome.ErrorType
 		}
-		s.events.Warn("线路跟踪 %s 失败：%s", target, reason)
+		s.events.Warn("线路跟踪 %s 失败：%s%s", outcome.Target, reason, location)
 		return
 	}
 
-	route := asnmap.ShortPath(hopASNs(result.Hops))
-	if route == "" {
+	if outcome.Route == "" {
 		// 所有跳都没有已知 ASN：如实说"没识别出来"，
 		// 而不是显示一个空白的"线路："。
-		s.events.Info("线路 %s：%d 跳（未识别出已知骨干线路）", target, result.HopCount())
+		s.events.Info("线路 %s：%d 跳（未识别出已知骨干线路）%s",
+			outcome.Target, outcome.HopCount, location)
 		return
 	}
 
-	s.events.Emit(levelGood, fmt.Sprintf("线路 %s：%d 跳，%s",
-		target, result.HopCount(), route))
+	s.events.Emit(levelGood, fmt.Sprintf("线路 %s：%d 跳，%s%s",
+		outcome.Target, outcome.HopCount, outcome.Route, location))
+}
+
+// landingSuffix 把落地地区格式化成日志行尾的补充说明。
+//
+// 没有数据时返回空串而不是 "落地 -"：日志里出现一个空值标注
+// 只增加噪声，不提供信息。
+func landingSuffix(location string) string {
+	trimmed := strings.TrimSpace(location)
+	if trimmed == "" || trimmed == "-" {
+		return ""
+	}
+	return "  落地 " + trimmed
 }
 
 // emitCSVProgress 把扫描进度翻译成日志行。
@@ -247,16 +282,4 @@ func originLabel(fromCache bool) string {
 		return "本地缓存"
 	}
 	return "网络"
-}
-
-// hopASNs 把逐跳的 ASN 抽成一个字符串切片。
-//
-// asnmap 不依赖 trace 包（否则任何用到它的地方都会被拖上
-// 那条依赖链），因此这里做一次转换。
-func hopASNs(hops []trace.Hop) []string {
-	out := make([]string, 0, len(hops))
-	for _, hop := range hops {
-		out = append(out, hop.ASN)
-	}
-	return out
 }

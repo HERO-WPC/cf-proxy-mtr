@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cf-route-tester/cf-route-tester/internal/identity"
@@ -245,6 +246,20 @@ func runScan(env *Env, args []string) error {
 	printer := newCSVProgressPrinter(env.Stderr, p.quiet)
 	opts.Progress = printer.onEvent
 
+	// --verbose：逐条打印每个 IP 的延迟与连通性，以及每条线路的
+	// ASN 编号 + 线路名称 + 落地地区。
+	//
+	// 默认关闭：14000 多个目标逐条打印会把终端刷爆，而"测完了多少"
+	// 由进度行表达。要看细节时再开——那时的输出正是排查所需。
+	//
+	// 顺带说明：这个 flag 在此之前只被声明、从未生效，
+	// 帮助里却写着"显示每个目标的测量结果"。
+	if p.verbose && !p.quiet {
+		reporter := newCSVResultReporter(env.Stderr)
+		opts.OnProbe = reporter.onProbe
+		opts.OnTrace = reporter.onTrace
+	}
+
 	result, err := svc.RunCSVScan(ctx, opts)
 	if err != nil {
 		return err
@@ -348,6 +363,78 @@ func (p *csvProgressPrinter) done() {
 	// 万一将来改成 \r 覆盖式输出，收尾点已经存在。
 }
 
+// ---------------------------------------------------------------------------
+// --verbose 的逐条结果输出
+// ---------------------------------------------------------------------------
+
+// csvResultReporter 打印每个目标的测量结果。
+//
+// OnTrace 会被多个 worker **并发**调用，因此写入必须串行化：
+// 否则两个 goroutine 的输出会交错在同一行里，日志变成乱码。
+type csvResultReporter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+// newCSVResultReporter 创建逐条结果输出。
+func newCSVResultReporter(w io.Writer) *csvResultReporter {
+	return &csvResultReporter{w: w}
+}
+
+// onProbe 打印一个 IP 的连通性与延迟。
+func (r *csvResultReporter) onProbe(outcome service.ProbeOutcome) {
+	location := cliLandingSuffix(outcome.Landing)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if outcome.Success {
+		fmt.Fprintf(r.w, "连通 %s  %.1f ms%s\n", outcome.Target, outcome.LatencyMS, location)
+		return
+	}
+	reason := outcome.ErrorType
+	if reason == "" {
+		reason = "failed"
+	}
+	fmt.Fprintf(r.w, "不通 %s  (%s)%s\n", outcome.Target, reason, location)
+}
+
+// onTrace 打印一条线路：ASN 编号 + 线路名称 + 落地地区。
+func (r *csvResultReporter) onTrace(outcome service.TraceOutcome) {
+	location := cliLandingSuffix(outcome.Landing)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if !outcome.Success {
+		reason := outcome.ErrorMessage
+		if reason == "" {
+			reason = outcome.ErrorType
+		}
+		fmt.Fprintf(r.w, "线路 %s 跟踪失败：%s%s\n", outcome.Target, reason, location)
+		return
+	}
+	if outcome.Route == "" {
+		fmt.Fprintf(r.w, "线路 %s：%d 跳（未识别出已知骨干线路）%s\n",
+			outcome.Target, outcome.HopCount, location)
+		return
+	}
+	fmt.Fprintf(r.w, "线路 %s：%d 跳，%s%s\n",
+		outcome.Target, outcome.HopCount, outcome.Route, location)
+}
+
+// cliLandingSuffix 把落地地区格式化成行尾说明（无数据时不加）。
+//
+// 不加 "落地 -" 这种空标注：它只增加噪声，不提供信息。
+func cliLandingSuffix(location string) string {
+	trimmed := strings.TrimSpace(location)
+	if trimmed == "" || trimmed == "-" {
+		return ""
+	}
+	return "  落地 " + trimmed
+}
+
+// probeTimeout 返回本次扫描的单目标超时。
 func probeTimeout(p scanParams) time.Duration {
 	if p.timeout.set {
 		return p.timeout.d
