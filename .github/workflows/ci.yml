@@ -72,7 +72,7 @@ jobs:
 
       - name: Full local pipeline smoke test
         run: |
-          # 从 scan 到 export 到 aggregate/query 的完整链路。
+          # 从 scan/probe 到 export 到 aggregate/query 的完整链路。
           #
           # 设计原则：**不依赖外网可达性**。CI 的失败原因必须是代码
           # 问题，而不是"某个公网 IP 今天不通"或"上游数据源挂了"。
@@ -88,6 +88,7 @@ jobs:
 
           work="$(mktemp -d)"
           db="$work/results.db"
+          csv="$work/results.csv"
           identity="$work/collector.json"
           out="$work/batch.jsonl.gz"
 
@@ -102,11 +103,24 @@ jobs:
             -target 1.1.1.1:80 \
             -target 8.8.8.8:53
 
-          /tmp/cf-route-tester scan \
-            --url https://zip.cm.edu.kg/all.json \
-            --fallback-url "" \
-            --cache "$work/all.json" \
-            --source-retries 0 \
+          source_flags=(--url https://zip.cm.edu.kg/all.json
+                        --fallback-url "" --cache "$work/all.json" --source-retries 0)
+
+          # scan 只写 CSV：没有数据库、没有会话、没有续测。
+          #
+          # 表头是契约（列名与列序），因此这里断言它而不只是断言
+          # "文件非空"——列错了下游的表格工具会静默读错列。
+          /tmp/cf-route-tester scan "${source_flags[@]}" \
+            --out "$csv" --identity "$identity" \
+            --workers 2 --timeout 1s --quiet
+
+          test -s "$csv"
+          head -1 "$csv" | grep -q '^timestamp_utc,target,ip,port,success,latency_ms,error_type,error_message,hop_count,as_path,hops,client_version$'
+          # 两个目标 + 表头 = 3 行。
+          test "$(wc -l < "$csv")" -eq 3
+
+          # probe 仍然写数据库，用它覆盖 export/aggregate/query 那条链路。
+          /tmp/cf-route-tester probe "${source_flags[@]}" \
             --db "$db" --identity "$identity" \
             --workers 2 --timeout 1s --quiet
           /tmp/cf-route-tester db stats --db "$db"

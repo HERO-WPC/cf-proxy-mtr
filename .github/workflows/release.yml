@@ -1,0 +1,107 @@
+# 发布工作流：打 tag 即发布。
+#
+# 用法：
+#
+#   git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+#
+# 为什么用工作流而不是本地脚本上传：
+#
+#  1. **不需要任何长期密钥**。GitHub 给每个工作流一个临时
+#     GITHUB_TOKEN，用完即弃；本地脚本则要在某台机器上放一个
+#     长期有效的 PAT，那既容易泄露，也容易在换机器时失效。
+#  2. **产物可复现**。发布包由干净的 runner 从 tag 指向的提交
+#     构建，而不是某台开发机上可能带着未提交改动的仓库。
+#  3. 打 tag 与发布之间没有人工步骤，不会出现"tag 打了但忘了传"。
+#
+# 与 ci.yml 的分工：ci.yml 管每次推送的验证，本工作流只管发布。
+name: Release
+
+on:
+  push:
+    # 只在版本 tag 上触发（v0.1.0 / v1.2.3 …）。
+    tags: ["v*"]
+  # 允许手动触发，用于补发或验证工作流本身。
+  #
+  # 手动触发时 tag 未必要存在，因此下面的"取 tag 名"步骤会回退到
+  # 版本号；产物仍然可以下载（作为 workflow artifact）。
+  workflow_dispatch:
+
+# 发布需要写仓库（创建 Release 并上传附件）。
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 发布工具要读 commit 时间与短哈希（写进 release.json），
+          # 浅克隆拿不到完整历史。
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+
+      - name: Resolve version
+        id: version
+        run: |
+          # tag 名去掉前导 v 就是版本号；手动触发时退回源码里的版本，
+          # 再加一个 run 号以免多次手动运行的产物同名混淆。
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            version="$(grep -oP 'Version\s*=\s*"\K[^"]+' internal/version/version.go)"
+            version="${version}-dev.${GITHUB_RUN_NUMBER}"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "resolved version: ${version}"
+
+      - name: Build release bundle
+        # 该工具自己会先跑 gofmt / vet / test，再交叉编译 6 个目标，
+        # 最后生成 SHA256SUMS 与 release.json。
+        # 在发布链路上再跑一次测试是刻意的：发布包一旦出问题，
+        # 使用者拿到的是"下载了但跑不起来"的二进制。
+        run: go run ./tools/release -version "${{ steps.version.outputs.version }}"
+
+      - name: Show what will be published
+        run: |
+          ls -l dist/release
+          echo "--- SHA256SUMS ---"
+          cat dist/release/SHA256SUMS
+          echo "--- release.json ---"
+          cat dist/release/release.json
+
+      - name: Verify checksums before publishing
+        # 自检：清单里每个产物的哈希必须与实际文件一致。
+        # 下载者会用 sha256sum -c 校验，因此这里先按同样方式验一遍——
+        # 否则我们可能发布一个"校验和与文件对不上"的版本，
+        # 而那会让所有认真校验的人以为文件被篡改。
+        working-directory: dist/release
+        run: sha256sum -c SHA256SUMS
+
+      - name: Upload workflow artifacts
+        # 无论是否发布都留一份，便于手动触发时下载检查。
+        uses: actions/upload-artifact@v4
+        with:
+          name: cf-route-tester-${{ steps.version.outputs.version }}
+          path: dist/release/*
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: steps.version.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/release/*
