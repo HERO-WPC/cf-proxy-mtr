@@ -108,8 +108,9 @@ func scanFlagSet(p *scanParams) *flag.FlagSet {
 		"nexttrace 可执行文件路径或名字（--trace 时使用）")
 	fs.StringVar(&p.traceMode, "trace-mode", string(trace.ModeTCP),
 		"跟踪模式：tcp / icmp / udp（--trace 时使用）")
-	fs.StringVar(&p.traceDataProvider, "trace-data-provider", string(trace.DefaultDataProvider),
-		"线路跟踪的 GeoIP 数据源（ASN/运营商/地区的来源），可选："+providerList())
+	fs.StringVar(&p.traceDataProvider, "trace-data-provider", "",
+		"线路跟踪的 GeoIP 数据源。留空=自动（本地 ASN 前缀识别启用时用 disable-geoip，"+
+			"从而不依赖任何限流服务；否则用 NextTrace-API）。可选："+providerList())
 	fs.BoolVar(&p.traceNoASNPrefix, "trace-no-asn-prefix", false,
 		"不用本地 ASN 前缀识别线路（默认开启；它是无限、不限流、无需账号的线路识别方式）")
 	fs.StringVar(&p.traceASNPrefixDir, "trace-asn-prefix-dir", asnprefix.DefaultDir,
@@ -248,9 +249,27 @@ func runScan(env *Env, args []string) error {
 		printCSVScanHeader(env.Stderr, p)
 	}
 
+	// 把 service 的日志接到 stderr。
+	//
+	// 此前这里**没有**接 Logf，于是 service 说的话全部丢失——
+	// 其中包含重要警告，例如"N/30 ASN 的前缀不可用"。
+	// 那条警告正是"线路名为什么少了几条"的唯一线索，
+	// 丢掉它等于让使用者对着不完整的线路名猜原因。
+	//
+	// 代价是 stderr 会多出几行（每轮扫描几条），但那些行
+	// 要么说明正在做什么，要么说明出了什么问题。
+	var logMu sync.Mutex
+
 	svc := service.New(service.Options{
 		IdentityPath: p.identityPath,
 		Source:       p.source.toConfig(),
+		Logf: func(format string, args ...any) {
+			// 跟踪阶段的 worker 会**并发**调用，不加锁会让
+			// 两行日志交错成一行乱码。
+			logMu.Lock()
+			defer logMu.Unlock()
+			fmt.Fprintf(env.Stderr, format+"\n", args...)
+		},
 	})
 
 	opts := service.CSVScanOptions{

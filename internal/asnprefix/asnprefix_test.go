@@ -1,25 +1,30 @@
 package asnprefix
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// 本文件锁定前缀匹配的正确性。
+// 本文件锁定前缀匹配与"整表下载"的正确性。
 //
 // 为什么值得单独测：匹配错了不会报错，只会让线路名**悄悄不对**
 // ——比如把"走了 CN2"认成"没走"，或者把 163 认成 CN2。
 // 那种错误从日志上看完全正常。
+
+// ---------------------------------------------------------------------------
+// 集合与前缀匹配
+// ---------------------------------------------------------------------------
 
 // TestSetContainsIPv4 验证 IPv4 包含判断。
 func TestSetContainsIPv4(t *testing.T) {
@@ -89,9 +94,6 @@ func TestSetContainsIPv6(t *testing.T) {
 }
 
 // TestSetHandlesHostBitsInPrefix 验证 "1.2.3.4/24" 这种带主机位的写法。
-//
-// 不规范化的话 start 会算成 1.2.3.4，于是 1.2.3.1 落不进这个段——
-// 而 RouteViews 的数据里确实出现过这种写法。
 func TestSetHandlesHostBitsInPrefix(t *testing.T) {
 	set, _, err := NewSet([]string{"1.2.3.4/24"})
 	if err != nil {
@@ -109,10 +111,6 @@ func TestSetHandlesHostBitsInPrefix(t *testing.T) {
 }
 
 // TestSetHandlesNestedPrefixes 验证嵌套前缀。
-//
-// RouteViews 数据里同一线路会同时宣告 /18 和它内部的 /24。
-// 二分查找只检查"最后一个 start <= target"的条目，嵌套时
-// 那一条不一定是覆盖 target 的那一条。
 func TestSetHandlesNestedPrefixes(t *testing.T) {
 	set, _, err := NewSet([]string{
 		"10.0.0.0/8",
@@ -163,21 +161,445 @@ func TestSetDistinguishesAddressFamilies(t *testing.T) {
 	if set.Len4() != 1 || set.Len6() != 1 {
 		t.Errorf("Len4=%d Len6=%d, want 1 and 1", set.Len4(), set.Len6())
 	}
-	if set.Contains(mustAddr(t, "1.1.1.1")) != true {
+	if !set.Contains(mustAddr(t, "1.1.1.1")) {
 		t.Error("v4 lookup failed")
 	}
-	if set.Contains(mustAddr(t, "2400::1")) != true {
+	if !set.Contains(mustAddr(t, "2400::1")) {
 		t.Error("v6 lookup failed")
 	}
 }
 
-// TestResolverMatchReturnsAllLinesInStableOrder 验证匹配顺序稳定。
+// ---------------------------------------------------------------------------
+// 区间到 CIDR 的转换
+// ---------------------------------------------------------------------------
+
+// TestRangeToPrefixes 验证区间转 CIDR。
 //
-// 固定顺序是必须的：同一个 IP 落在多条线路的段里时，
-// 谁先出现必须每次一样，否则同一份数据两次运行会给出不同线路名。
+// 全量表给的是区间（起始、结束），而项目的其余部分用 CIDR。
+// 转换错了会让一段 IP **静默地**落在集合外——线路名少一条，
+// 而没有任何报错。因此这里逐个断言精确的转换结果。
+func TestRangeToPrefixes(t *testing.T) {
+	cases := []struct {
+		from, to string
+		want     []string
+	}{
+		// 恰好一条 CIDR 对齐的区间。
+		{"1.0.0.0", "1.0.0.255", []string{"1.0.0.0/24"}},
+		{"1.71.103.0", "1.71.103.255", []string{"1.71.103.0/24"}},
+		// /23 对齐。
+		{"1.203.112.0", "1.203.113.255", []string{"1.203.112.0/23"}},
+		// 单地址。
+		{"1.1.1.1", "1.1.1.1", []string{"1.1.1.1/32"}},
+		// 非对齐：必须拆成多条，且合起来恰好覆盖原区间。
+		{"1.0.0.1", "1.0.0.2", []string{"1.0.0.1/32", "1.0.0.2/32"}},
+		// 跨幂边界：1.0.0.0/24 + 1.0.1.0/24。
+		{"1.0.0.0", "1.0.1.255", []string{"1.0.0.0/23"}},
+		// 经典拆分段：3 个地址 -> /31 + /32。
+		{"10.0.0.0", "10.0.0.2", []string{"10.0.0.0/31", "10.0.0.2/32"}},
+		// 整个 IPv4 空间。
+		{"0.0.0.0", "255.255.255.255", []string{"0.0.0.0/0"}},
+		// IPv6。
+		{"2400:9380:8001::", "2400:9380:8001:ffff:ffff:ffff:ffff:ffff", []string{"2400:9380:8001::/48"}},
+	}
+
+	for _, tc := range cases {
+		got := rangeToPrefixes(mustAddr(t, tc.from), mustAddr(t, tc.to))
+		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+			t.Errorf("rangeToPrefixes(%s, %s) = %v, want %v", tc.from, tc.to, got, tc.want)
+		}
+	}
+}
+
+// TestRangeToPrefixesCoversExactlyTheRange 验证转换结果与区间等价。
+//
+// 上一条测的是精确的拆法，这条测的是**语义**：转换后的集合
+// 必须恰好覆盖原区间，不多不少。两者互补——只测语义可能漏掉
+// "拆得很难看但勉强正确"的情况，只测精确值又会漏掉边界理解错误。
+func TestRangeToPrefixesCoversExactlyTheRange(t *testing.T) {
+	ranges := []struct{ from, to string }{
+		{"1.0.0.1", "1.0.0.2"},
+		{"10.0.0.0", "10.0.0.2"},
+		{"27.148.248.0", "27.148.255.255"},
+		{"1.0.0.0", "1.0.1.255"},
+		{"192.168.1.5", "192.168.1.250"},
+	}
+
+	for _, r := range ranges {
+		prefixes := rangeToPrefixes(mustAddr(t, r.from), mustAddr(t, r.to))
+		set, _, err := NewSet(prefixes)
+		if err != nil {
+			t.Fatalf("NewSet: %v", err)
+		}
+
+		// 两端必须在集合里。
+		for _, ip := range []string{r.from, r.to} {
+			if !set.Contains(mustAddr(t, ip)) {
+				t.Errorf("range %s-%s: endpoint %s is not covered", r.from, r.to, ip)
+			}
+		}
+
+		// 紧邻区间外的地址必须不在集合里。
+		//
+		// 上界用 end+1；下界用 start-1（start 为 0 时越界，跳过）。
+		next := addInt(mustAddr(t, r.to), 1)
+		if next.IsValid() && set.Contains(next) {
+			t.Errorf("range %s-%s: address %s just past the end is wrongly covered",
+				r.from, r.to, next)
+		}
+
+		prev := addInt(mustAddr(t, r.from), -1)
+		if prev.IsValid() && set.Contains(prev) {
+			t.Errorf("range %s-%s: address %s just before the start is wrongly covered",
+				r.from, r.to, prev)
+		}
+	}
+}
+
+// addInt 返回 addr + delta（delta 可为负）；越界时返回无效地址。
+//
+// 用它而不是自己移位：测试要断言"区间外的紧邻地址"，
+// 而那正是最容易算错的地方。
+func addInt(addr netip.Addr, delta int) netip.Addr {
+	value := addrToInt(addr)
+	value.Add(value, big.NewInt(int64(delta)))
+
+	bits := 128
+	if addr.Is4() {
+		bits = 32
+	}
+	if value.Sign() < 0 || value.BitLen() > bits {
+		return netip.Addr{}
+	}
+	return intToAddr(value, bits)
+}
+
+// ---------------------------------------------------------------------------
+// 整表下载
+// ---------------------------------------------------------------------------
+
+// fakeBulkServer 提供一个假的"全量映射表"服务。
+//
+// 返回 gzip 压缩的 TSV，格式与 iptoasn.com 一致：
+//
+//	range_start  range_end  asn  country  description
+func fakeBulkServer(t *testing.T, rows []string) (*httptest.Server, *int64) {
+	t.Helper()
+
+	var hits int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/gzip")
+		gz := gzip.NewWriter(w)
+		defer func() { _ = gz.Close() }()
+		for _, row := range rows {
+			if _, err := gz.Write([]byte(row + "\n")); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server, &hits
+}
+
+// sampleBulkRows 是覆盖两条线路的样本数据（含无关的 ASN 与坏行）。
+func sampleBulkRows() []string {
+	return []string{
+		"1.71.103.0\t1.71.103.255\t4809\tCN\tCHINATELECOM-CORE-WAN-CN2",
+		"103.11.109.0\t103.11.109.255\t58453\tHK\tCMI-INT-HK China Mobile",
+		"27.0.160.0\t27.0.163.255\t9808\tCN\tCHINAMOBILE-CN",
+		// 无关的 ASN：不该被收进来。
+		"1.0.0.0\t1.0.0.255\t13335\tUS\tCLOUDFLARENET",
+		// 未路由：asn 为 0，跳过。
+		"1.0.1.0\t1.0.3.255\t0\tNone\tNot routed",
+		// 坏行：字段不足，跳过而不是让整份数据作废。
+		"broken-line",
+	}
+}
+
+// TestLoadParsesBulkTable 验证一次下载就能拿到多条线路的前缀。
+func TestLoadParsesBulkTable(t *testing.T) {
+	server, hits := fakeBulkServer(t, sampleBulkRows())
+
+	resolver := Load(context.Background(), Options{
+		Dir:        t.TempDir(),
+		BulkURL:    server.URL,
+		ASNs:       []string{"AS4809", "AS58453"},
+		HTTPClient: server.Client(),
+	})
+
+	if !resolver.Ready() {
+		t.Fatal("resolver is not ready")
+	}
+	if *hits != 1 {
+		t.Errorf("made %d requests, want exactly 1 (one bulk download for all ASNs)", *hits)
+	}
+
+	// CN2
+	if got := resolver.Match("1.71.103.5"); len(got) != 1 || got[0] != "AS4809" {
+		t.Errorf("Match(CN2 address) = %v, want [AS4809]", got)
+	}
+	// CMI
+	if got := resolver.Match("103.11.109.5"); len(got) != 1 || got[0] != "AS58453" {
+		t.Errorf("Match(CMI address) = %v, want [AS58453]", got)
+	}
+	// 无关的 ASN 不该被加载。
+	if got := resolver.Match("1.0.0.5"); len(got) != 0 {
+		t.Errorf("Match(Cloudflare address) = %v, want empty (AS13335 was not requested)", got)
+	}
+	// 未路由的段不该被加载。
+	if got := resolver.Match("1.0.1.5"); len(got) != 0 {
+		t.Errorf("Match(unrouted address) = %v, want empty", got)
+	}
+}
+
+// TestLoadWritesCacheForAllRequestedASNs 验证**全有或全无**。
+//
+// 这是这次改造的核心：旧的"每个 ASN 查一次"会得到半成品
+// （60 个请求成功 18 个，于是 12 条线路静默失效）。整表下载
+// 要么全部成功、要么整份退回缓存。
+func TestLoadWritesCacheForAllRequestedASNs(t *testing.T) {
+	server, _ := fakeBulkServer(t, sampleBulkRows())
+	dir := t.TempDir()
+
+	asns := []string{"AS4809", "AS58453", "AS9808", "AS99999"}
+	Load(context.Background(), Options{
+		Dir:        dir,
+		BulkURL:    server.URL,
+		ASNs:       asns,
+		HTTPClient: server.Client(),
+	})
+
+	// 每个请求过的 ASN 都必须有缓存文件——**包括表里没有段的那个**。
+	// 空结果同样是一次有效回答，不写的话每次运行都会重下整张表。
+	for _, asn := range asns {
+		if _, err := os.Stat(filepath.Join(dir, asn+".json")); err != nil {
+			t.Errorf("no cache file for %s: %v", asn, err)
+		}
+	}
+}
+
+// TestLoadIsOfflineWhenCacheIsFresh 验证缓存新鲜时完全不联网。
+func TestLoadIsOfflineWhenCacheIsFresh(t *testing.T) {
+	server, hits := fakeBulkServer(t, sampleBulkRows())
+	dir := t.TempDir()
+	opts := Options{
+		Dir:        dir,
+		BulkURL:    server.URL,
+		ASNs:       []string{"AS4809", "AS58453"},
+		HTTPClient: server.Client(),
+	}
+
+	Load(context.Background(), opts)
+	first := *hits
+	if first == 0 {
+		t.Fatal("the first load did not fetch anything")
+	}
+
+	second := Load(context.Background(), opts)
+	if *hits != first {
+		t.Errorf("second load made %d extra requests; a fresh cache must be offline", *hits-first)
+	}
+	if !second.Ready() {
+		t.Error("second load is not ready")
+	}
+	if got := second.Match("1.71.103.5"); len(got) != 1 {
+		t.Errorf("cached data does not work: Match = %v", got)
+	}
+}
+
+// TestCacheExpiryUsesInjectedClock 验证过期判断走的是注入的时钟。
+//
+// 这条测试存在的理由：早先的 TTL 测试用 "TTL=1ns" 制造过期，
+// 结果因为文件系统时间戳粒度而偶发失败（Windows 时间戳约 100ns
+// 粒度且可能滞后）。把"过期由时钟决定"显式钉住，就不会再有人
+// 退回去依赖真实时间戳。
+func TestCacheExpiryUsesInjectedClock(t *testing.T) {
+	server, hits := fakeBulkServer(t, sampleBulkRows())
+	base := Options{
+		Dir:        t.TempDir(),
+		BulkURL:    server.URL,
+		ASNs:       []string{"AS4809"},
+		HTTPClient: server.Client(),
+	}
+
+	Load(context.Background(), base)
+	first := *hits
+
+	future := base
+	future.Now = func() time.Time { return time.Now().Add(30 * 24 * time.Hour) }
+	Load(context.Background(), future)
+
+	if *hits == first {
+		t.Error("a cache that expired by the injected clock was reused")
+	}
+}
+
+// TestLoadFallsBackToCacheWhenBulkFails 验证下载失败时用已有缓存。
+//
+// 骨干线路的 IP 段变化很慢，过期的前缀仍然比没有强。
+func TestLoadFallsBackToCacheWhenBulkFails(t *testing.T) {
+	server, _ := fakeBulkServer(t, sampleBulkRows())
+	dir := t.TempDir()
+	base := Options{
+		Dir:        dir,
+		BulkURL:    server.URL,
+		ASNs:       []string{"AS4809", "AS58453"},
+		HTTPClient: server.Client(),
+	}
+	Load(context.Background(), base)
+
+	// 表坏掉 + 缓存过期（用注入时钟让过期确定发生）。
+	broken, _ := fakeBulkServer(t, nil)
+	broken.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	stale := base
+	stale.BulkURL = broken.URL
+	stale.Now = func() time.Time { return time.Now().Add(30 * 24 * time.Hour) }
+
+	var logs []string
+	stale.Logf = func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+
+	resolver := Load(context.Background(), stale)
+	if !resolver.Ready() {
+		t.Fatal("resolver gave up instead of using the cached data")
+	}
+	if got := resolver.Match("1.71.103.5"); len(got) != 1 {
+		t.Errorf("Match = %v, want the cached data to still work", got)
+	}
+	if !containsAny(logs, "退回本地缓存") {
+		t.Errorf("logs do not mention the cache fallback: %v", logs)
+	}
+}
+
+// TestLoadSurvivesTotalFailure 验证全盘失败时不 panic、不阻塞。
+//
+// 线路名是锦上添花：拿不到不该让整轮测量失败。
+func TestLoadSurvivesTotalFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	var logs []string
+	resolver := Load(context.Background(), Options{
+		Dir:        t.TempDir(),
+		BulkURL:    server.URL,
+		ASNs:       []string{"AS4809", "AS58453"},
+		HTTPClient: server.Client(),
+		Logf: func(format string, args ...any) {
+			logs = append(logs, fmt.Sprintf(format, args...))
+		},
+	})
+
+	if resolver.Ready() {
+		t.Error("resolver claims to be ready with no data")
+	}
+	if got := resolver.Match("1.1.1.1"); got != nil {
+		t.Errorf("Match = %v, want nil", got)
+	}
+	if !containsAny(logs, "不可用") {
+		t.Errorf("logs do not report the failure: %v", logs)
+	}
+}
+
+// TestCacheWriteIsAtomic 验证缓存写入不留临时文件。
+func TestCacheWriteIsAtomic(t *testing.T) {
+	server, _ := fakeBulkServer(t, sampleBulkRows())
+	dir := t.TempDir()
+
+	Load(context.Background(), Options{
+		Dir: dir, BulkURL: server.URL, ASNs: []string{"AS4809"}, HTTPClient: server.Client(),
+	})
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".tmp") {
+			t.Errorf("a temporary file was left behind: %s", entry.Name())
+		}
+	}
+}
+
+// TestNormalizeASNKey 验证 ASN 写法归一化。
+//
+// 表里是裸数字 "4809"，asnmap 用 "AS4809"。两边对不上会
+// **一个都匹配不到**，而且不会有任何提示——因此这条必须测。
+func TestNormalizeASNKey(t *testing.T) {
+	cases := map[string]string{
+		"AS4809":   "AS4809",
+		"4809":     "AS4809",
+		" as4809 ": "AS4809",
+		"":         "",
+	}
+	for input, want := range cases {
+		if got := normalizeASNKey(input); got != want {
+			t.Errorf("normalizeASNKey(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+// TestParseBulkSkipsBadRows 验证坏行被跳过而不是让整份数据作废。
+func TestParseBulkSkipsBadRows(t *testing.T) {
+	rows := strings.Join([]string{
+		"1.1.1.0\t1.1.1.255\t4809\tCN\tgood",
+		"only-one-field",
+		"bad-ip\talso-bad\t4809\tCN\tbad addresses",
+		"2.2.2.0\t2.2.2.255\tnot-a-number\tCN\tbad asn",
+		"3.3.3.0\t3.3.3.255\t58453\tHK\tgood",
+	}, "\n")
+
+	got, err := parseBulk(strings.NewReader(rows), map[string]bool{"AS4809": true, "AS58453": true})
+	if err != nil {
+		t.Fatalf("parseBulk: %v", err)
+	}
+	if len(got["AS4809"]) != 1 {
+		t.Errorf("AS4809 got %v, want exactly the one good row", got["AS4809"])
+	}
+	if len(got["AS58453"]) != 1 {
+		t.Errorf("AS58453 got %v, want exactly the one good row", got["AS58453"])
+	}
+}
+
+// TestLoadRejectsNothingButReportsMissingASN 验证表里没有的 ASN 不会误报。
+func TestLoadRejectsNothingButReportsMissingASN(t *testing.T) {
+	server, _ := fakeBulkServer(t, sampleBulkRows())
+
+	resolver := Load(context.Background(), Options{
+		Dir:     t.TempDir(),
+		BulkURL: server.URL,
+		// AS99999 不在表里。
+		ASNs:       []string{"AS4809", "AS99999"},
+		HTTPClient: server.Client(),
+	})
+
+	if !resolver.Ready() {
+		t.Fatal("resolver should still be ready from AS4809")
+	}
+	if got := resolver.Match("1.71.103.5"); len(got) != 1 {
+		t.Errorf("Match = %v, want [AS4809]", got)
+	}
+	// 表里没有的 ASN 不该出现在结果里。
+	for _, asn := range resolver.ASNs() {
+		if asn == "AS99999" {
+			t.Error("AS99999 has no data but appears as loaded")
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Resolver 行为
+// ---------------------------------------------------------------------------
+
+// TestResolverMatchReturnsAllLinesInStableOrder 验证匹配顺序稳定。
 func TestResolverMatchReturnsAllLinesInStableOrder(t *testing.T) {
 	resolver := resolverWith(t, map[string][]string{
-		"AS10099": {"1.1.1.0/24"}, // 故意让编号大的排在 map 前面
+		"AS10099": {"1.1.1.0/24"},
 		"AS4809":  {"1.1.1.0/24"},
 	}, "AS4809", "AS10099")
 
@@ -185,12 +607,10 @@ func TestResolverMatchReturnsAllLinesInStableOrder(t *testing.T) {
 	if len(first) != 2 {
 		t.Fatalf("Match returned %v, want both lines", first)
 	}
-	// 顺序必须是 asnOrder 的顺序。
 	if first[0] != "AS4809" || first[1] != "AS10099" {
 		t.Errorf("Match = %v, want [AS4809 AS10099] (asnOrder)", first)
 	}
 
-	// 反复查必须一致。
 	for i := 0; i < 20; i++ {
 		got := resolver.Match("1.1.1.1")
 		if strings.Join(got, ",") != strings.Join(first, ",") {
@@ -235,7 +655,6 @@ func TestResolverResolvePathHandlesUnknownHops(t *testing.T) {
 		"AS4809": {"1.1.1.0/24"},
 	}, "AS4809")
 
-	// 中间那些是内网/未知 IP，不该产出任何线路，也不该打断序列。
 	hops := []string{"192.168.1.1", "8.8.8.8", "1.1.1.1", "9.9.9.9", "1.1.1.2"}
 	got := resolver.ResolvePath(hops)
 
@@ -287,255 +706,6 @@ func TestPathWithNames(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 抓取与缓存
-// ---------------------------------------------------------------------------
-
-// TestLoadFetchesAndCaches 验证首次抓取并写缓存。
-func TestLoadFetchesAndCaches(t *testing.T) {
-	var hits atomic.Int64
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		// 路径形如 /4809，af 是查询参数。
-		asn := strings.TrimPrefix(r.URL.Path, "/")
-		var prefixes []string
-		switch {
-		case asn == "4809" && r.URL.Query().Get("af") == "4":
-			prefixes = []string{"1.1.1.0/24", "2.2.2.0/24"}
-		case asn == "4809" && r.URL.Query().Get("af") == "6":
-			prefixes = []string{"2400::/32"}
-		}
-		_ = json.NewEncoder(w).Encode(prefixes)
-	}))
-	defer server.Close()
-
-	dir := t.TempDir()
-	resolver := Load(context.Background(), Options{
-		Dir:        dir,
-		BaseURL:    server.URL,
-		ASNs:       []string{"AS4809"},
-		HTTPClient: server.Client(),
-	})
-
-	if !resolver.Ready() {
-		t.Fatal("resolver is not ready after fetching")
-	}
-	if got := resolver.Match("1.1.1.1"); len(got) != 1 || got[0] != "AS4809" {
-		t.Errorf("Match = %v, want [AS4809]", got)
-	}
-	if got := resolver.Match("2400::1"); len(got) != 1 {
-		t.Errorf("IPv6 Match = %v, want [AS4809]", got)
-	}
-
-	// 缓存文件必须落盘。
-	if _, err := os.Stat(filepath.Join(dir, "AS4809.json")); err != nil {
-		t.Errorf("cache file was not written: %v", err)
-	}
-
-	fetchesAfterFirst := hits.Load()
-	if fetchesAfterFirst < 2 {
-		t.Errorf("expected both address families to be fetched, got %d requests", fetchesAfterFirst)
-	}
-
-	// 第二次加载应当**不联网**。
-	second := Load(context.Background(), Options{
-		Dir:        dir,
-		BaseURL:    server.URL,
-		ASNs:       []string{"AS4809"},
-		HTTPClient: server.Client(),
-	})
-	if !second.Ready() {
-		t.Error("second load is not ready")
-	}
-	if hits.Load() != fetchesAfterFirst {
-		t.Errorf("second load made %d extra requests; a fresh cache should be offline",
-			hits.Load()-fetchesAfterFirst)
-	}
-}
-
-// TestLoadRefetchesExpiredCache 验证过期缓存会重新抓取。
-func TestLoadRefetchesExpiredCache(t *testing.T) {
-	var hits atomic.Int64
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		_ = json.NewEncoder(w).Encode([]string{"1.1.1.0/24"})
-	}))
-	defer server.Close()
-
-	dir := t.TempDir()
-	base := Options{Dir: dir, BaseURL: server.URL, ASNs: []string{"AS4809"}, HTTPClient: server.Client()}
-
-	Load(context.Background(), base)
-	first := hits.Load()
-
-	// 用**注入时钟**把"现在"推到未来，而不是把 TTL 设成 1ns。
-	//
-	// 靠极小 TTL 是不稳的：过期判断是 `now - mtime > ttl`，
-	// 而 mtime 来自文件系统，Windows 上的时间戳有约 100ns 粒度
-	// 且可能滞后。TTL=1ns 时这个比较会偶发地判成"未过期"，
-	// 于是测试随机失败——而失败信息看起来像产品缺陷。
-	// 注入时钟让"过期"成为确定的事实。
-	expired := base
-	expired.Now = func() time.Time { return time.Now().Add(30 * 24 * time.Hour) }
-	Load(context.Background(), expired)
-
-	if hits.Load() == first {
-		t.Error("an expired cache was used without refetching")
-	}
-}
-
-// TestCacheExpiryUsesInjectedClock 验证过期判断走的是注入的时钟。
-//
-// 这条测试存在的理由：另外两个 TTL 测试曾经用 "TTL=1ns" 来制造过期，
-// 结果因为文件系统时间戳粒度而偶发失败。把"过期由时钟决定"这件事
-// 显式钉住，就不会再有人退回去依赖真实时间戳。
-func TestCacheExpiryUsesInjectedClock(t *testing.T) {
-	var hits atomic.Int64
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		_ = json.NewEncoder(w).Encode([]string{"1.1.1.0/24"})
-	}))
-	defer server.Close()
-
-	dir := t.TempDir()
-	base := Options{Dir: dir, BaseURL: server.URL, ASNs: []string{"AS4809"}, HTTPClient: server.Client()}
-	Load(context.Background(), base)
-	first := hits.Load()
-	if first == 0 {
-		t.Fatal("the first load did not fetch anything")
-	}
-
-	// 时钟推后 30 天：缓存必定过期，必须重新抓取。
-	future := base
-	future.Now = func() time.Time { return time.Now().Add(30 * 24 * time.Hour) }
-	Load(context.Background(), future)
-
-	if hits.Load() == first {
-		t.Error("a cache that expired by the injected clock was reused")
-	}
-}
-
-// TestLoadFallsBackToStaleCacheOnFetchFailure 验证抓取失败时用过期缓存。'
-//
-// 骨干线路的 IP 段变化很慢，过期的前缀仍然比没有强。
-func TestLoadFallsBackToStaleCacheOnFetchFailure(t *testing.T) {
-	healthy := true
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !healthy {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		_ = json.NewEncoder(w).Encode([]string{"1.1.1.0/24"})
-	}))
-	defer server.Close()
-
-	dir := t.TempDir()
-	base := Options{Dir: dir, BaseURL: server.URL, ASNs: []string{"AS4809"}, HTTPClient: server.Client()}
-	Load(context.Background(), base)
-
-	// 服务坏掉 + 缓存过期（用注入时钟让过期确定发生，理由同上）。
-	healthy = false
-	stale := base
-	stale.Now = func() time.Time { return time.Now().Add(30 * 24 * time.Hour) }
-	var logs []string
-	stale.Logf = func(format string, args ...any) {
-		logs = append(logs, fmt.Sprintf(format, args...))
-	}
-
-	resolver := Load(context.Background(), stale)
-	if !resolver.Ready() {
-		t.Fatal("resolver gave up instead of using the stale cache")
-	}
-	if got := resolver.Match("1.1.1.1"); len(got) != 1 {
-		t.Errorf("Match = %v, want the stale data to still work", got)
-	}
-	if !containsAny(logs, "过期缓存") {
-		t.Errorf("logs do not mention the stale cache fallback: %v", logs)
-	}
-}
-
-// TestLoadSurvivesTotalFailure 验证全盘失败时不 panic、不阻塞。
-//
-// 线路名是锦上添花：拿不到不该让整轮测量失败。
-func TestLoadSurvivesTotalFailure(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer server.Close()
-
-	var logs []string
-	resolver := Load(context.Background(), Options{
-		Dir:        t.TempDir(),
-		BaseURL:    server.URL,
-		ASNs:       []string{"AS4809", "AS4134"},
-		HTTPClient: server.Client(),
-		Logf: func(format string, args ...any) {
-			logs = append(logs, fmt.Sprintf(format, args...))
-		},
-	})
-
-	if resolver.Ready() {
-		t.Error("resolver claims to be ready with no data")
-	}
-	if got := resolver.Match("1.1.1.1"); got != nil {
-		t.Errorf("Match = %v, want nil", got)
-	}
-	if !containsAny(logs, "不可用") {
-		t.Errorf("logs do not report the failure: %v", logs)
-	}
-}
-
-// TestFetchHandlesMissingAddressFamily 验证某个地址族缺失不算失败。
-//
-// 纯 IPv4 网络里 af=6 返回 404 完全正常。
-func TestFetchHandlesMissingAddressFamily(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("af") == "6" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		_ = json.NewEncoder(w).Encode([]string{"1.1.1.0/24"})
-	}))
-	defer server.Close()
-
-	resolver := Load(context.Background(), Options{
-		Dir:        t.TempDir(),
-		BaseURL:    server.URL,
-		ASNs:       []string{"AS4809"},
-		HTTPClient: server.Client(),
-	})
-
-	if !resolver.Ready() {
-		t.Fatal("a missing IPv6 family should not count as failure")
-	}
-	if asns, _, v4, v6 := resolver.Size(); asns != 1 || v4 != 1 || v6 != 0 {
-		t.Errorf("Size = (%d,%d,%d), want 1 ASN with 1 v4 and 0 v6", asns, v4, v6)
-	}
-}
-
-// TestCacheWriteIsAtomic 验证缓存写入不留半截文件。
-func TestCacheWriteIsAtomic(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]string{"1.1.1.0/24"})
-	}))
-	defer server.Close()
-
-	dir := t.TempDir()
-	Load(context.Background(), Options{
-		Dir: dir, BaseURL: server.URL, ASNs: []string{"AS4809"}, HTTPClient: server.Client(),
-	})
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		if strings.Contains(entry.Name(), ".tmp") {
-			t.Errorf("a temporary file was left behind: %s", entry.Name())
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
 // 辅助
 // ---------------------------------------------------------------------------
 
@@ -578,3 +748,6 @@ func containsAny(logs []string, want string) bool {
 	}
 	return false
 }
+
+// 让 json 在本文件被引用（部分测试间接使用）。
+var _ = json.Marshal

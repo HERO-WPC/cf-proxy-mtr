@@ -506,7 +506,30 @@ func (s *Service) resolveTraceEngine(ctx context.Context, opts CSVScanOptions) (
 	if opts.traceEngineOverride != nil {
 		return opts.traceEngineOverride, nil
 	}
-	return s.buildTraceEngine(ctx, opts.TraceConfig)
+
+	traceOpts := opts.TraceConfig
+
+	// **没显式指定数据源、而本地前缀识别可用时，让引擎别去查 GeoIP。**
+	//
+	// 这条默认值很关键。引擎的 GeoIP 对我们已经是**冗余**的：
+	// 线路名由我们用 BGP 前缀自己判断（更准，而且来源是线路的
+	// IP 段而不是反查 IP 的归属）。可引擎那边只要还在查，
+	// 就会去要 PoW 令牌——令牌拿不到时它**直接以非零状态退出**，
+	// 于是整次跟踪被记成失败：
+	//
+	//   线路跟踪 x.x.x.x:443 失败：pow token fetch failed ...
+	//
+	// 那条错误看起来像"线路识别坏了"，而实际上我们本地识别完全正常，
+	// 只是引擎在做一件我们不需要的事。用 disable-geoip 把它关掉，
+	// PoW、IPinfo 额度、ip-api 频率限制这些问题就都不会出现。
+	//
+	// 使用者显式指定了数据源则完全尊重他们的选择。
+	if strings.TrimSpace(traceOpts.DataProvider) == "" && !opts.NoASNPrefix {
+		traceOpts.DataProvider = string(trace.ProviderDisabled)
+		s.log("scan: 本地 ASN 前缀识别已启用，引擎不再查询 GeoIP（避免 PoW/额度限制）")
+	}
+
+	return s.buildTraceEngine(ctx, traceOpts)
 }
 
 // startPrefixWarmup 在后台开始抓线路前缀，立即返回。

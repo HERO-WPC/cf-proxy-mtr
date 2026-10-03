@@ -3,15 +3,12 @@ package asnprefix
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/cf-route-tester/cf-route-tester/internal/asnmap"
@@ -19,36 +16,32 @@ import (
 
 // 默认参数。
 const (
-	// DefaultBaseURL 是 RouteViews 的 ASN→前缀查询接口。
-	//
-	// 选它的原因：不需要账号、不需要 token、没有 observed 限流，
-	// 而且数据直接来自 BGP 表（RouteViews 是公认的公共路由归档）。
-	DefaultBaseURL = "https://api.routeviews.org/asn"
-
 	// DefaultDir 是前缀缓存目录（相对工作目录）。
 	DefaultDir = "data/asnprefix"
 
 	// DefaultTTL 是缓存的有效期。
 	//
 	// 7 天是个折中：前缀会变，但一条骨干线路的 IP 段不会天天变；
-	// 而每次跟踪都去抓 30 个 ASN 的前缀，既慢又没必要。
+	// 而每次跟踪都去下载整张映射表，既慢又没必要。
 	DefaultTTL = 7 * 24 * time.Hour
 
-	// DefaultTimeout 是单次 HTTP 请求的超时。
+	// DefaultTimeout 是单次 HTTP 请求的超时（用于按 ASN 的备用源）。
 	DefaultTimeout = 20 * time.Second
 
-	// DefaultConcurrency 是并发抓取的 ASN 数。
+	// DefaultBulkTimeout 是全量映射表的下载超时。
 	//
-	// 抓取必须并发：30 个 ASN 各有 v4/v6 两个请求，共 60 次。
-	// 串行实测要 57 秒——而那段时间里跟踪阶段完全没开始，
-	// 使用者看到的是"TCP 秒完，然后卡住一分钟"。
-	//
-	// 取 8 而不是 30：每个 ASN 内部还有两个顺序请求，
-	// 因此实际并发约 16 个连接，既够快又不会把对端当压测。
-	DefaultConcurrency = 8
+	// 比单 ASN 的超时宽松得多：实测 8.6 MB 要 9 秒左右，
+	// 慢一点的网络需要更多余量。
+	DefaultBulkTimeout = 120 * time.Second
 
-	// maxResponseBytes 限制单个响应体大小，防止异常响应打爆内存。
-	maxResponseBytes = 8 << 20 // 8 MiB；实测最大约 200 KB
+	// fetchAttempts 是最大尝试次数。
+	//
+	// 上游会暂时性失败（实测同一批请求上一分钟失败、下一分钟正常），
+	// 而一次抖动就意味着某些线路的前缀整个缺失。
+	fetchAttempts = 3
+
+	// fetchBackoff 是首次重试前的等待，之后翻倍。
+	fetchBackoff = 400 * time.Millisecond
 )
 
 // Options 是构造 Resolver 的参数。
@@ -56,19 +49,16 @@ type Options struct {
 	// Dir 是缓存目录（空表示用 DefaultDir）。
 	Dir string
 
-	// BaseURL 是接口地址（空表示用 DefaultBaseURL）。
-	BaseURL string
+	// BulkURL 是全量映射表的地址（空表示用 DefaultBulkURL）。
+	BulkURL string
 
 	// TTL 是缓存有效期（<=0 表示用 DefaultTTL）。
 	TTL time.Duration
 
-	// Timeout 是单次请求超时（<=0 表示用 DefaultTimeout）。
-	Timeout time.Duration
+	// BulkTimeout 是下载全量映射表的超时（<=0 表示用 DefaultBulkTimeout）。
+	BulkTimeout time.Duration
 
-	// Concurrency 是并发抓取的 ASN 数（<=0 表示用 DefaultConcurrency）。
-	Concurrency int
-
-	// ASNs 是要抓取的 ASN 列表（空表示用 asnmap.Known()）。
+	// ASNs 是要识别的 ASN 列表（空表示用 asnmap.Known()）。
 	//
 	// 默认取自 asnmap 而不是另立一份清单：要认的线路就是
 	// asnmap 里那些，两边各存一份迟早不一致。
@@ -104,11 +94,22 @@ type Resolver struct {
 	opts Options
 }
 
-// Load 构造 Resolver：优先读缓存，缓存缺失或过期时抓取。
+// Load 构造 Resolver。
+//
+// 加载策略是"**先看缓存，缓存不全就整张表下载一次**"：
+//
+//  1. 30 个 ASN 的缓存全部新鲜 -> 直接返回，**不联网**；
+//  2. 否则下载一次全量映射表，从中抽出这 30 个 ASN 的段，
+//     并写进缓存；
+//  3. 下载失败则退回已有缓存（**过期也比没有强**）。
+//
+// 为什么不是"每个 ASN 查一次"：那样会得到**半成品**状态——
+// 60 个请求成功 18 个，于是 12 条线路静默失去识别能力，
+// 而使用者只看到"线路名少了几条"。整张表下载是**全有或全无**，
+// 而且请求数从 60 降到 1。
 //
 // 它**不返回错误**。理由：线路名是锦上添花，拿不到不该让
 // 整轮测量失败——探测结果是主要产出，而且已经在写 CSV 了。
-// 具体发生了什么通过 Logf 说明。
 func Load(ctx context.Context, opts Options) *Resolver {
 	opts = withDefaults(opts)
 
@@ -125,236 +126,129 @@ func Load(ctx context.Context, opts Options) *Resolver {
 		opts:     opts,
 	}
 
-	var (
-		fetched   atomic.Int64
-		fromCache atomic.Int64
-		failed    atomic.Int64
-	)
-
-	// **并发**加载：串行实测要 57 秒，而这段时间里跟踪完全没开始，
-	// 使用者看到的是"TCP 秒完，然后卡住一分钟"。
-	//
-	// 每个 ASN 一个任务，由固定数量的 worker 消费。
-	// 结果写进 byASN，因此必须加锁——Match 等读路径也用它。
-	workers := opts.Concurrency
-	if workers <= 0 {
-		workers = DefaultConcurrency
-	}
-	if workers > len(asns) {
-		workers = len(asns)
+	// ---- 1) 缓存全新鲜？那就完全不联网 ----
+	if resolver.loadAllFromFreshCache() {
+		opts.Logf("就绪 %d/%d 个 ASN（全部命中缓存，未联网）", len(resolver.byASN), len(asns))
+		return resolver
 	}
 
-	tasks := make(chan string)
-	var wg sync.WaitGroup
-
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for asn := range tasks {
-				set, src, err := resolver.loadOne(ctx, asn)
-				if err != nil {
-					failed.Add(1)
-					continue
-				}
-				if set == nil {
-					continue
-				}
-
-				resolver.mu.Lock()
-				resolver.byASN[asn] = set
-				resolver.mu.Unlock()
-
-				switch src {
-				case sourceNetwork:
-					fetched.Add(1)
-				case sourceCache:
-					fromCache.Add(1)
-				}
-			}
-		}()
-	}
-
-	canceled := false
+	// ---- 2) 整张表下载一次 ----
+	wanted := make(map[string]bool, len(asns))
 	for _, asn := range asns {
-		select {
-		case tasks <- asn:
-		case <-ctx.Done():
-			canceled = true
+		wanted[normalizeASNKey(asn)] = true
+	}
+
+	bulk, err := resolver.fetchBulk(ctx, wanted)
+	if err != nil {
+		opts.Logf("全量映射表不可用：%v", err)
+
+		// 退回已有缓存（含过期）。半份前缀仍然能认出部分线路，
+		// 比完全认不出来强。
+		resolver.loadAllFromAnyCache()
+		opts.Logf("退回本地缓存：就绪 %d/%d 个 ASN（线路名可能少认一些）",
+			len(resolver.byASN), len(asns))
+		return resolver
+	}
+
+	// ---- 3) 落到内存与磁盘 ----
+	var withData int
+	for _, asn := range asns {
+		key := normalizeASNKey(asn)
+		prefixes := bulk[key]
+
+		// 即使这个 ASN 在表里没有段也要写缓存（空数组）：
+		// 空结果同样是一次有效回答，否则每次运行都会重新下载整张表
+		// 只为再一次确认"它真的没有段"。
+		if writeErr := resolver.writeCache(asn, prefixes); writeErr != nil {
+			opts.Logf("缓存 %s 写入失败：%v", asn, writeErr)
 		}
-		if canceled {
-			break
+
+		if len(prefixes) == 0 {
+			continue
 		}
-	}
-	close(tasks)
-	wg.Wait()
+		set, _, buildErr := NewSet(prefixes)
+		if buildErr != nil {
+			continue
+		}
+		if set.Len() == 0 {
+			continue
+		}
 
-	failedCount := int(failed.Load())
-	if failedCount > 0 {
-		opts.Logf("%d/%d ASN 的前缀不可用（线路名会少认一些）", failedCount, len(asns))
+		resolver.mu.Lock()
+		resolver.byASN[asn] = set
+		resolver.mu.Unlock()
+		withData++
 	}
 
-	resolver.mu.RLock()
-	ready := len(resolver.byASN)
-	resolver.mu.RUnlock()
-
-	if canceled {
-		opts.Logf("抓取被取消：就绪 %d/%d 个 ASN", ready, len(asns))
-	} else {
-		opts.Logf("就绪 %d/%d 个 ASN（缓存 %d，新抓 %d）",
-			ready, len(asns), fromCache.Load(), fetched.Load())
-	}
-	if ready == 0 {
+	opts.Logf("就绪 %d/%d 个 ASN（本次下载全量映射表后推导）", withData, len(asns))
+	if withData == 0 {
 		opts.Logf("没有任何前缀数据，线路名将无法识别")
 	}
 
 	return resolver
 }
 
-// source 说明一份前缀是从哪儿来的（仅用于日志口径）。
-type source int
+// loadAllFromFreshCache 尝试只用新鲜缓存填满 resolver。
+//
+// 返回 true 表示**全部** ASN 都从新鲜缓存里拿到了（可以完全不联网）。
+// 只要有一个缺失或过期就返回 false——那时整张表下载一次更划算，
+// 也比"一部分新一部分旧"更可预测。
+func (r *Resolver) loadAllFromFreshCache() bool {
+	loaded := make(map[string]*Set, len(r.asnOrder))
 
-const (
-	sourceUnknown source = iota
-	sourceCache
-	sourceNetwork
-)
-
-// loadOne 取得一个 ASN 的前缀集合，并说明来源。
-func (r *Resolver) loadOne(ctx context.Context, asn string) (*Set, source, error) {
-	if prefixes, err := r.cachedPrefixes(asn); err == nil {
-		set, buildErr := buildSet(prefixes, r.opts.Logf)
-		if buildErr == nil {
-			return set, sourceCache, nil
-		}
-	}
-
-	fetched, fetchErr := r.fetch(ctx, asn)
-	if fetchErr != nil {
-		// 抓取失败时退回**过期缓存**：过期的前缀仍然比没有强，
-		// 因为骨干线路的 IP 段变化很慢。
-		if stale, staleErr := r.readCache(asn); staleErr == nil {
-			r.opts.Logf("%s 抓取失败（%v），使用过期缓存", asn, fetchErr)
-			set, buildErr := buildSet(stale, r.opts.Logf)
-			if buildErr == nil {
-				return set, sourceCache, nil
-			}
-		}
-		return nil, sourceUnknown, fetchErr
-	}
-
-	// 抓到了空列表（该 ASN 没有该地址族的前缀）也要缓存，
-	// 否则每次运行都会再去问一遍同一个"没有"。
-	if writeErr := r.writeCache(asn, fetched); writeErr != nil {
-		// 写不进缓存不影响本次使用，只影响下次。
-		r.opts.Logf("缓存 %s 写入失败：%v", asn, writeErr)
-	}
-
-	set, buildErr := buildSet(fetched, r.opts.Logf)
-	if buildErr != nil {
-		return nil, sourceUnknown, buildErr
-	}
-	return set, sourceNetwork, nil
-}
-
-// buildSet 把前缀列表变成集合。
-func buildSet(prefixes []string, logf func(string, ...any)) (*Set, error) {
-	set, skipped, err := NewSet(prefixes)
-	if err != nil {
-		return nil, err
-	}
-	if skipped > 0 {
-		logf("跳过 %d 条无法解析的前缀", skipped)
-	}
-	return set, nil
-}
-
-// fetch 从 RouteViews 抓一个 ASN 的 IPv4 与 IPv6 前缀。
-func (r *Resolver) fetch(ctx context.Context, asn string) ([]string, error) {
-	number := strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(asn)), "AS")
-	if number == "" {
-		return nil, fmt.Errorf("asnprefix: empty asn")
-	}
-
-	var all []string
-	var errs []error
-
-	// 两个地址族分开抓：接口按 af 参数区分，而一次请求拿不到两者。
-	for _, af := range []string{"4", "6"} {
-		prefixes, err := r.fetchOne(ctx, number, af)
+	for _, asn := range r.asnOrder {
+		prefixes, err := r.cachedPrefixes(asn)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("af=%s: %w", af, err))
+			return false
+		}
+		set, _, buildErr := NewSet(prefixes)
+		if buildErr != nil {
+			return false
+		}
+		loaded[asn] = set
+	}
+
+	r.mu.Lock()
+	r.byASN = loaded
+	r.mu.Unlock()
+	return true
+}
+
+// loadAllFromAnyCache 用**任何**可用的缓存填满 resolver（不检查有效期）。
+//
+// 只在下载失败时使用：此时过期的前缀仍然有价值。
+func (r *Resolver) loadAllFromAnyCache() {
+	for _, asn := range r.asnOrder {
+		if _, ok := r.byASN[asn]; ok {
 			continue
 		}
-		all = append(all, prefixes...)
-	}
-
-	// 两个地址族都失败才算失败；只有一个成功仍然有用
-	// （纯 IPv4 网络里 af=6 失败完全不影响）。
-	if len(all) == 0 && len(errs) > 0 {
-		return nil, errors.Join(errs...)
-	}
-	return all, nil
-}
-
-// fetchOne 抓一个 ASN 单个地址族的前缀。
-func (r *Resolver) fetchOne(ctx context.Context, number, af string) ([]string, error) {
-	url := fmt.Sprintf("%s/%s?af=%s", strings.TrimRight(r.opts.BaseURL, "/"), number, af)
-
-	reqCtx, cancel := context.WithTimeout(ctx, r.opts.Timeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	// 明确要求 JSON：这个接口默认就返回 JSON，但带上更稳妥。
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := r.httpClient().Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		// 404 表示这个 ASN 没有该地址族的前缀，不是错误。
-		if resp.StatusCode == http.StatusNotFound {
-			return nil, nil
+		prefixes, err := r.readCache(asn)
+		if err != nil {
+			continue
 		}
-		return nil, fmt.Errorf("http %d", resp.StatusCode)
+		set, _, buildErr := NewSet(prefixes)
+		if buildErr != nil || set.Len() == 0 {
+			continue
+		}
+		r.mu.Lock()
+		r.byASN[asn] = set
+		r.mu.Unlock()
 	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
-	if err != nil {
-		return nil, err
-	}
-	return decodePrefixes(body)
 }
 
-// decodePrefixes 解析接口返回的 JSON 数组。
+// normalizeASNKey 把 ASN 统一成 "AS<number>" 形式。
 //
-// 上游返回的是形如 ["1.71.103.0/24", ...] 的数组。
-// 也容忍空响应（当成"没有前缀"）。
-func decodePrefixes(body []byte) ([]string, error) {
-	trimmed := strings.TrimSpace(string(body))
+// asnmap 用 "AS4809"，而全量表里是裸数字 "4809"，
+// 两边对不上就会一个都匹配不到——那种错误不会有任何提示。
+func normalizeASNKey(asn string) string {
+	trimmed := strings.ToUpper(strings.TrimSpace(asn))
 	if trimmed == "" {
-		return nil, nil
+		return ""
 	}
-
-	var prefixes []string
-	if err := json.Unmarshal([]byte(trimmed), &prefixes); err != nil {
-		return nil, fmt.Errorf("asnprefix: decode response: %w", err)
+	if strings.HasPrefix(trimmed, "AS") {
+		return trimmed
 	}
-	return prefixes, nil
-}
-
-// httpClient 返回可用的 HTTP 客户端。
-func (r *Resolver) httpClient() *http.Client {
-	if r.opts.HTTPClient != nil {
-		return r.opts.HTTPClient
-	}
-	return &http.Client{Timeout: r.opts.Timeout}
+	return "AS" + trimmed
 }
 
 // ---------------------------------------------------------------------------
@@ -363,7 +257,9 @@ func (r *Resolver) httpClient() *http.Client {
 
 // cacheFile 返回某个 ASN 的缓存文件路径。
 func (r *Resolver) cacheFile(asn string) string {
-	name := strings.ToUpper(strings.TrimSpace(asn))
+	// 用规范化后的名字做文件名：asnmap 给的是 "AS4809"，
+	// 而手工构造时可能传 "4809"，两者必须落到同一个文件。
+	name := normalizeASNKey(asn)
 	return filepath.Join(r.opts.Dir, name+".json")
 }
 
@@ -380,6 +276,9 @@ func (r *Resolver) cachedPrefixes(asn string) ([]string, error) {
 }
 
 // readCache 读取缓存，不检查有效期。
+//
+// 空数组是合法内容（表示"这个 ASN 没有段"），因此不能用
+// "读到了但长度为 0"当成失败。
 func (r *Resolver) readCache(asn string) ([]string, error) {
 	blob, err := os.ReadFile(r.cacheFile(asn))
 	if err != nil {
@@ -396,7 +295,7 @@ func (r *Resolver) readCache(asn string) ([]string, error) {
 //
 // 先写临时文件再改名：直接覆盖时若中途失败（磁盘满、进程被杀），
 // 会留下一个半截的 JSON，而下次读取会把"缓存损坏"当成"没有缓存"，
-// 于是又要联网——原子写避免这一类无谓的重抓。
+// 于是又要下载整张表——原子写避免这一类无谓的重下。
 func (r *Resolver) writeCache(asn string, prefixes []string) error {
 	if err := os.MkdirAll(r.opts.Dir, 0o755); err != nil {
 		return err
@@ -426,25 +325,40 @@ func (r *Resolver) writeCache(asn string, prefixes []string) error {
 	return os.Rename(tempName, target)
 }
 
+// httpClient 返回可用的 HTTP 客户端。
+func (r *Resolver) httpClient() *http.Client {
+	if r.opts.HTTPClient != nil {
+		return r.opts.HTTPClient
+	}
+	return &http.Client{Timeout: r.opts.BulkTimeout}
+}
+
 // withDefaults 填默认值。
 func withDefaults(opts Options) Options {
 	if strings.TrimSpace(opts.Dir) == "" {
 		opts.Dir = DefaultDir
 	}
-	if strings.TrimSpace(opts.BaseURL) == "" {
-		opts.BaseURL = DefaultBaseURL
+	if strings.TrimSpace(opts.BulkURL) == "" {
+		opts.BulkURL = DefaultBulkURL
 	}
 	if opts.TTL <= 0 {
 		opts.TTL = DefaultTTL
 	}
-	if opts.Timeout <= 0 {
-		opts.Timeout = DefaultTimeout
+	if opts.BulkTimeout <= 0 {
+		opts.BulkTimeout = DefaultBulkTimeout
 	}
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
+	} else {
+		// 统一加模块前缀：调用方（service）只提供自己的 Logf，
+		// 不该被迫在每条消息里重复模块名。
+		inner := opts.Logf
+		opts.Logf = func(format string, args ...any) {
+			inner("asnprefix: "+format, args...)
+		}
 	}
 	return opts
 }

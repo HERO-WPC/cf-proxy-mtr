@@ -190,7 +190,8 @@
           <div>
             <label for="dataProvider">数据源（ASN / 运营商 / 地区）</label>
             <select id="dataProvider">
-              <option value="NextTrace-API">NextTrace-API（默认，最全；走 PoW 令牌，可能被限流）</option>
+              <option value="">自动（推荐：本地前缀识别时用 disable-geoip，不碰限流服务）</option>
+              <option value="NextTrace-API">NextTrace-API（走 PoW 令牌，可能被限流）</option>
               <option value="IPInfo">IPInfo</option>
               <option value="IP.SB">IP.SB</option>
               <option value="IPInsight">IPInsight</option>

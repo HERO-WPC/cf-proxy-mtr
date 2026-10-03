@@ -94,8 +94,8 @@ func traceFlagSet(p *traceParams) *flag.FlagSet {
 	fs.Var(&p.targets, "target", "要跟踪的 IP:Port（可重复；不传则取目标列表）")
 	fs.StringVar(&p.binary, "binary", trace.DefaultBinary, "nexttrace 可执行文件路径或名字")
 	fs.StringVar(&p.mode, "mode", string(trace.ModeTCP), "跟踪模式：tcp / icmp / udp")
-	fs.StringVar(&p.dataProvider, "data-provider", string(trace.DefaultDataProvider),
-		"GeoIP 数据源（ASN/运营商/地区的来源），可选："+providerList())
+	fs.StringVar(&p.dataProvider, "data-provider", "",
+		"GeoIP 数据源。留空=用 NextTrace 默认。可选："+providerList())
 	fs.StringVar(&p.powProvider, "pow-provider", "",
 		"NextTrace API v3 的 PoW 令牌源（仅 --data-provider NextTrace-API 时生效），可选："+powProviderList())
 	fs.IntVar(&p.workers, "workers", trace.DefaultWorkers,
