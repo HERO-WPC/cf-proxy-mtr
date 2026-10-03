@@ -3,13 +3,17 @@ package service
 import (
 	"context"
 	"encoding/csv"
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cf-route-tester/cf-route-tester/internal/csvstore"
+	"github.com/cf-route-tester/cf-route-tester/internal/probe"
 )
 
 // TestRunCSVScanWritesRows 验证扫描把结果写进 CSV。
@@ -78,14 +82,23 @@ func TestRunCSVScanNoDatabase(t *testing.T) {
 	}
 }
 
-// TestRunCSVScanKeepsResultsWithoutClose 验证进程被中断也不丢已完成的行。
+// TestRunCSVScanKeepsResultsOnInterrupt 验证中断不丢**已经写盘**的行。
 //
-// 用取消 context 模拟 Ctrl+C，然后**不开新文件**直接读——
-// 已经测完的目标必须都在。
+// 这个测试在探测改成并发之后重写过，原因值得记下来：
+//
+// 旧写法用 OnTarget 计数来掐取消时机（"测到第 2 个目标就取消"）。
+// 串行时成立；并发之后 OnTarget 会为多个目标几乎同时触发，
+// 于是取消发生在**任何探测完成之前**，文件里一行都没有，
+// 测试报告"结果丢了"——而实际上产品行为是对的，
+// 是测试的前提（"OnTarget 逐个串行触发"）失效了。
+//
+// 现在直接验证真正要守的性质：**取消不许让已经落盘的行消失，
+// 也不许把文件写坏**。做法是先让若干探测立刻成功、落盘，
+// 等到文件里确实有行之后再取消，然后比对前后行数。
 func TestRunCSVScanKeepsResultsOnInterrupt(t *testing.T) {
-	// 多个目标，保证有时间在中途取消。
-	ports := make([]int, 0, 6)
-	for i := 0; i < 6; i++ {
+	// 8 个目标；下面的拨号器让前 3 个立刻成功，其余的挂到超时。
+	ports := make([]int, 0, 8)
+	for i := 0; i < 8; i++ {
 		ports = append(ports, listenLocal(t))
 	}
 	svc := testService(t, writeCache(t, ports...))
@@ -93,23 +106,36 @@ func TestRunCSVScanKeepsResultsOnInterrupt(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "results.csv")
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// 测到第二个目标时就取消。
-	seen := 0
+	cfg := probe.DefaultConfig()
+	cfg.Workers = 4
+	cfg.Timeout = 5 * time.Second // 足够长，保证取消时确实有在途探测
+	cfg.Dialer = succeedThenBlockDialer(3)
+
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		_, _ = svc.RunCSVScan(ctx, CSVScanOptions{
-			OutputPath: out,
-			Timeout:    200 * time.Millisecond,
-			OnTarget: func(string) {
-				seen++
-				if seen == 2 {
-					cancel()
-				}
-			},
+			OutputPath:    out,
+			probeOverride: &cfg,
 		})
 	}()
+
+	// 等文件里出现至少一行数据，然后取消。
+	var rowsAtCancel int
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if count, err := countDataRows(out); err == nil && count >= 1 {
+			rowsAtCancel = count
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if rowsAtCancel == 0 {
+		t.Fatal("no row was written before the interrupt; the test premise did not hold")
+	}
+	cancel()
 
 	select {
 	case <-done:
@@ -117,16 +143,72 @@ func TestRunCSVScanKeepsResultsOnInterrupt(t *testing.T) {
 		t.Fatal("scan did not return after cancel")
 	}
 
-	// 现在直接读文件（不依赖任何 Close 语义）。
+	// 取消之后直接读文件（不依赖任何 Close 语义）。
 	records := readCSVFile(t, out)
 	if len(records) < 2 {
-		t.Fatalf("csv rows = %d; results measured before the interrupt were lost", len(records))
+		t.Fatalf("csv rows = %d; results written before the interrupt were lost", len(records))
 	}
-	// 表头必须仍然只有一行。
+
+	// 表头必须仍然只有一行，且是第一行。
 	if records[0][0] != csvstore.Header[0] {
 		t.Errorf("first row is not the header: %v", records[0])
 	}
-	t.Logf("中断后文件里有 %d 行数据", len(records)-1)
+
+	// 落盘的行只能增加，绝不能因为取消而减少——这是本测试的核心断言。
+	after := len(records) - 1
+	if after < rowsAtCancel {
+		t.Errorf("data rows went from %d to %d after the interrupt; flushed rows must survive",
+			rowsAtCancel, after)
+	}
+
+	// 每一行都必须是完整的：取消若发生在写一行的中途，
+	// 会留下列数不对的残行，那种文件用 pandas 读会报错。
+	for i, record := range records {
+		if len(record) != len(csvstore.Header) {
+			t.Errorf("row %d has %d columns, want %d (a partial write survived the interrupt)",
+				i, len(record), len(csvstore.Header))
+		}
+	}
+	t.Logf("取消时已落盘 %d 行，取消后 %d 行（只增不减）", rowsAtCancel, after)
+}
+
+// countDataRows 数 CSV 里的数据行数（不含表头）。
+func countDataRows(path string) (int, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = file.Close() }()
+
+	reader := csv.NewReader(file)
+	reader.FieldsPerRecord = -1 // 中断时可能有半行，不要为此报错
+	records, err := reader.ReadAll()
+	if err != nil {
+		return 0, err
+	}
+	if len(records) <= 1 {
+		return 0, nil
+	}
+	return len(records) - 1, nil
+}
+
+// succeedThenBlockDialer 让前 successes 次拨号立刻成功，其余挂到超时。
+//
+// 用途是把"已完成的测量"与"在途的测量"同时制造出来，
+// 这样中断测试才能验证"前者保留、后者丢弃"。
+func succeedThenBlockDialer(successes int) probe.DialContextFunc {
+	var calls atomic.Int64
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		if calls.Add(1) <= int64(successes) {
+			// net.Pipe 给出一对真实连接：客户端拿到一端，
+			// 另一端立刻关掉。探测只做握手/关闭，因此够用。
+			client, server := net.Pipe()
+			_ = server.Close()
+			return client, nil
+		}
+		<-ctx.Done()
+		return nil, errors.New("dialer: blocked until deadline")
+	}
 }
 
 // TestRunCSVScanRejectsEmptyPath 验证没给输出路径时明确报错。

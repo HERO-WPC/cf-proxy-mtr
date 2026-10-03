@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cf-route-tester/cf-route-tester/internal/asnmap"
@@ -12,6 +13,7 @@ import (
 	"github.com/cf-route-tester/cf-route-tester/internal/probe"
 	"github.com/cf-route-tester/cf-route-tester/internal/trace"
 	"github.com/cf-route-tester/cf-route-tester/internal/version"
+	"github.com/cf-route-tester/cf-route-tester/internal/worker"
 )
 
 // CSVScanOptions 是一次"只写 CSV"的扫描参数。
@@ -48,6 +50,12 @@ type CSVScanOptions struct {
 
 	// OnTrace 在一条线路跟踪完成后调用（可为 nil）。
 	OnTrace func(target string, result *trace.TraceResult)
+
+	// probeOverride 允许测试替换探测配置（并发性测试需要
+	// 一个"每个目标都恰好耗时 timeout"的确定性拨号器）。
+	//
+	// 刻意不导出：它是测试接缝，不是使用者的选项。
+	probeOverride *probe.Config
 }
 
 // CSVScanResult 是扫描结果摘要。
@@ -173,26 +181,50 @@ func (s *Service) RunCSVScan(ctx context.Context, opts CSVScanOptions) (*CSVScan
 		StartedAt:       time.Now().UTC(),
 	}
 
-	prober := probe.New(probeConfig(opts))
+	// ---- 4) 探测（并发） ----
+	//
+	// **必须走 Runner 的 worker 池**。这里曾经是一个 `for targets` 循环
+	// 直接调用 prober.Probe：语义上没错，但完全串行——60 个目标实测
+	// 32 秒，而 100 并发的预期是 2~3 秒。更糟的是 CLI 照样打印
+	// "workers: 100"，让使用者以为并发已经生效。
+	//
+	// 结果通过 channel 回来，所以每拿到一条就立刻写盘，
+	// "中断不丢已完成结果"的性质保持不变。
+	runner := probe.NewRunner(probe.RunnerConfig{
+		Probe: probeConfig(opts),
+		OnTarget: func(target model.Target) {
+			if opts.OnTarget != nil {
+				opts.OnTarget(target.ID)
+			}
+		},
+	})
+
+	handle := runner.Start(ctx, targets)
 
 	// 探测成功的目标（后面要跟踪的那些）。
 	successful := make([]string, 0, len(targets))
 
-	for index, target := range targets {
-		if ctx.Err() != nil {
-			result.Interrupted = true
-			break
+	// 只需要 ID → Target 的映射，供写行与跟踪阶段使用。
+	byID := make(map[string]model.Target, len(targets))
+	for _, target := range targets {
+		byID[target.ID] = target
+	}
+
+	completed := 0
+	for probeResult := range handle.Results() {
+		target, ok := byID[probeResult.TargetID]
+		if !ok {
+			// 理论上不会发生；真发生了要如实记录，
+			// 而不是写一行不知道是谁的结果。
+			s.log("scan: probe result for unknown target %q dropped", probeResult.TargetID)
+			continue
 		}
 
-		if opts.OnTarget != nil {
-			opts.OnTarget(target.ID)
-		}
-
-		probeResult := prober.Probe(ctx, target)
+		completed++
 		result.Probed++
 		if probeResult.Success {
 			result.Succeeded++
-			successful = append(successful, target.ID)
+			successful = append(successful, probeResult.TargetID)
 		} else {
 			result.Failed++
 		}
@@ -208,13 +240,25 @@ func (s *Service) RunCSVScan(ctx context.Context, opts CSVScanOptions) (*CSVScan
 		if opts.Progress != nil {
 			opts.Progress(ProgressEvent{
 				Phase:         "probe",
-				Completed:     index + 1,
+				Completed:     completed,
 				Total:         len(targets),
 				Success:       result.Succeeded,
 				Failed:        result.Failed,
 				CurrentTarget: target.ID,
 			})
 		}
+	}
+
+	// 收尾统计（也负责等待全部 worker 退出）。
+	probeStats := handle.Wait()
+
+	// 用到渠道丢弃的目标（消费者提前退出）：如实计入"未测"，
+	// 否则汇总里的数字加起来对不上总数。
+	if probeStats.Dropped > 0 {
+		s.log("scan: %d probe result(s) were dropped (consumer stopped early)", probeStats.Dropped)
+	}
+	if ctx.Err() != nil {
+		result.Interrupted = true
 	}
 
 	// ---- 5) 线路跟踪（只对成功的目标） ----
@@ -242,7 +286,14 @@ func (s *Service) RunCSVScan(ctx context.Context, opts CSVScanOptions) (*CSVScan
 	return result, nil
 }
 
-// runTracePhase 对成功的目标逐个跟踪，并把线路信息写进 CSV。
+// runTracePhase 对成功的目标做线路跟踪，并把线路信息写进 CSV。
+//
+// **并发执行**：一次 traceroute 要十几秒（实测平均 17 秒），
+// 串行跟踪 10 个目标就是近 3 分钟。每个目标各自启动一个外部进程，
+// 彼此完全独立，因此用有界 worker 池并行——并发度由
+// `--trace-workers` 控制（默认 10），刻意远低于 TCP 的 100：
+// 每个 worker 都要 fork 一个进程，且多数跟踪模式需要管理员权限
+// 与 WinDivert 驱动，开太大只会互相拖慢。
 func (s *Service) runTracePhase(
 	ctx context.Context,
 	store *csvstore.Store,
@@ -258,69 +309,144 @@ func (s *Service) runTracePhase(
 		byID[target.ID] = target
 	}
 
-	for index, id := range successful {
-		if ctx.Err() != nil {
-			result.Interrupted = true
+	workers := opts.TraceConfig.Workers
+	if workers <= 0 {
+		workers = trace.DefaultWorkers
+	}
+	total := len(successful)
+
+	// 队列大小取 2×workers：够让 worker 一直有活干，
+	// 又不会在取消时留下一大堆没人处理的待办。
+	queueSize := workers * 2
+
+	// 进度的共享计数：worker 并发更新，必须加锁。
+	var (
+		mu        sync.Mutex
+		completed int
+		successN  int
+		failN     int
+	)
+
+	emitProgress := func(id string) {
+		if opts.Progress == nil {
 			return
 		}
+		mu.Lock()
+		done, ok, bad := completed, successN, failN
+		mu.Unlock()
+		opts.Progress(ProgressEvent{
+			Phase: "trace", Completed: done, Total: total,
+			Success: ok, Failed: bad, CurrentTarget: id,
+		})
+	}
 
-		target, ok := byID[id]
-		if !ok {
-			continue
-		}
-
-		traceResult, traceErr := engine.Trace(ctx, target)
-		result.Traced++
-		if traceErr != nil {
-			result.Errors++
-			s.log("scan: tracing %s failed: %v", id, traceErr)
-			if opts.Progress != nil {
-				opts.Progress(ProgressEvent{
-					Phase: "trace", Completed: index + 1, Total: len(successful),
-					CurrentTarget: id,
-				})
+	stats := worker.Run(ctx, workers, queueSize,
+		func(ctx context.Context, send func(string) bool) int {
+			sent := 0
+			for _, id := range successful {
+				if !send(id) {
+					break
+				}
+				sent++
 			}
-			continue
-		}
-		if traceResult.Success {
-			result.TracedOK++
-		}
+			return sent
+		},
+		func(ctx context.Context, id string, _ func(traceOutcome)) error {
+			target, ok := byID[id]
+			if !ok {
+				return nil
+			}
 
-		if opts.OnTrace != nil {
-			opts.OnTrace(id, traceResult)
-		}
+			traceResult, traceErr := engine.Trace(ctx, target)
 
-		if err := store.Append(traceRow(target, traceResult)); err != nil {
-			result.Errors++
-			s.log("scan: writing trace row for %s failed: %v", id, err)
-		} else {
-			result.RowsWritten++
-		}
+			mu.Lock()
+			result.Traced++
+			completed++
+			switch {
+			case traceErr != nil:
+				failN++
+			case traceResult != nil && traceResult.Success:
+				successN++
+			default:
+				failN++
+			}
+			mu.Unlock()
 
-		if opts.Progress != nil {
-			opts.Progress(ProgressEvent{
-				Phase: "trace", Completed: index + 1, Total: len(successful),
-				Success: result.TracedOK, Failed: result.Traced - result.TracedOK,
-				CurrentTarget: id,
-			})
-		}
+			if traceErr != nil {
+				mu.Lock()
+				result.Errors++
+				mu.Unlock()
+				s.log("scan: tracing %s failed: %v", id, traceErr)
+				emitProgress(id)
+				return nil
+			}
+
+			if opts.OnTrace != nil {
+				opts.OnTrace(id, traceResult)
+			}
+
+			// 每行拿到就立刻写盘，与探测阶段同样的性质：
+			// 中断时已完成的线路不会丢。
+			if err := store.Append(traceRow(target, traceResult)); err != nil {
+				mu.Lock()
+				result.Errors++
+				mu.Unlock()
+				s.log("scan: writing trace row for %s failed: %v", id, err)
+			} else {
+				mu.Lock()
+				result.RowsWritten++
+				mu.Unlock()
+			}
+
+			emitProgress(id)
+			return nil
+		},
+		func(traceOutcome) {},
+	)
+
+	// 收尾：把共享计数写回结果（这些字段在并发期间只被锁保护地更新）。
+	mu.Lock()
+	result.TracedOK = successN
+	result.Interrupted = ctx.Err() != nil
+	mu.Unlock()
+
+	if stats.Skipped > 0 {
+		s.log("scan: %d target(s) were not traced because the scan stopped early", stats.Skipped)
 	}
 }
 
+// traceOutcome 是跟踪阶段的"结果类型"。
+//
+// worker.Run 要求一个结果类型 R，但这个阶段的产物是**直接写进 CSV**
+// 的，没有需要交付给消费者的结构化结果。用一个空结构体占位，
+// 比为了满足签名而把结果绕一圈再丢弃更诚实。
+type traceOutcome struct{}
+
 // probeRow 把探测结果转成 CSV 行。
 func probeRow(target model.Target, result probe.ProbeResult) csvstore.Row {
-	row := csvstore.Row{
+	// 只有成功时才写延迟。
+	//
+	// probe 包**故意**在失败时也记录"等待了多久"（用来区分
+	// "立即被拒"与"等到超时"，那是有价值的诊断信息）。但那是
+	// 内部语义，不该原样进结果文件：超时 1 秒的目标会写成
+	// latency_ms=1000，看起来像"延迟 1 秒"，而它根本没连上。
+	// 那种行会被平均延迟、分位数全部算进去，把统计拉偏。
+	latency := 0.0
+	if result.Success {
+		latency = result.LatencyMS
+	}
+
+	return csvstore.Row{
 		Timestamp:     time.Now().UTC(),
 		Target:        target.ID,
 		IP:            target.IP,
 		Port:          target.Port,
 		Success:       result.Success,
-		LatencyMS:     result.LatencyMS,
+		LatencyMS:     latency,
 		ErrorType:     string(result.ErrorType),
 		ErrorMessage:  result.ErrorMessage,
 		ClientVersion: version.Version,
 	}
-	return row
 }
 
 // traceRow 把跟踪结果转成 CSV 行。
@@ -387,6 +513,13 @@ func formatHops(hops []trace.Hop) string {
 
 // probeConfig 组装探测配置。
 func probeConfig(opts CSVScanOptions) probe.Config {
+	if opts.probeOverride != nil {
+		// 测试接缝：完全用给定配置，不再叠加下面的覆盖项，
+		// 否则"注入的拨号器"可能被默认值悄悄换掉。
+		cfg := *opts.probeOverride
+		return cfg
+	}
+
 	cfg := probe.DefaultConfig()
 	if opts.Workers > 0 {
 		cfg.Workers = opts.Workers
