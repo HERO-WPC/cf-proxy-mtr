@@ -140,6 +140,9 @@ func CheckAvailability(ctx context.Context, binaryPath string) Availability {
 	defer cancel()
 
 	cmd := exec.CommandContext(checkCtx, path, "--version")
+	// 不弹控制台窗口：图形界面下每次跟踪都会调用引擎，
+	// 一个黑框一闪而过会让人以为程序出了问题。
+	hideSubprocessWindow(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return Availability{
@@ -475,6 +478,10 @@ func (e *NextTraceEngine) execute(ctx context.Context, args []string) (stdout, s
 	}
 
 	cmd := exec.CommandContext(ctx, e.resolvedPath, args...)
+
+	// 同上：NextTrace 是控制台程序，在无控制台的宿主里启动它
+	// 会为每个目标弹出（或留下）一个控制台窗口。
+	hideSubprocessWindow(cmd)
 
 	// 不用 CombinedOutput：stdout 是 JSON（必须干净），
 	// stderr 是诊断信息（要分开收集，不能混进 JSON）。

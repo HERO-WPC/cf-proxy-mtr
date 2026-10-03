@@ -178,6 +178,31 @@ Windows 上直接双击 `cf-route-tester-gui-*.exe` 也可以——那是用
 `-H=windowsgui` 构建的入口，**不会弹出控制台黑窗口**，工作目录自动
 切到 exe 所在目录，因此数据库与日志都落在 exe 旁边（`data/`）。
 
+双击后会看到一个常驻小窗口：
+
+```text
+┌─ cf-route-tester ──────────────────────────┐
+│  服务已启动，界面在浏览器中打开。            │
+│  关闭这个窗口即退出程序。                    │
+│  http://127.0.0.1:8236                     │
+│                                            │
+│  [ 打开界面 ]   [ 退出 ]                    │
+└────────────────────────────────────────────┘
+```
+
+**为什么必须有这个窗口**：没有控制台的程序在后台跑起来之后，用户
+看不到任何东西——不知道是否启动成功、不知道界面地址，也没有正常
+途径关掉它，只能去任务管理器杀进程。留一个小窗口比这好得多：
+它显示状态与地址，**关掉窗口即退出程序**（点「退出」或右上角 × 都一样）。
+
+窗口里刻意**不显示访问令牌**：它容易被截图或录屏，令牌不该出现在
+画面里。需要完整地址时看日志文件。
+
+跟踪时**不会闪出黑框**：NextTrace 是控制台程序，在无控制台的宿主里
+启动它会让每个目标都弹出一个控制台窗口。启动子进程时加了
+`CREATE_NO_WINDOW`（见 `internal/trace/exec_windows.go`），
+实测跟踪 2 个目标（21 秒）期间新增控制台窗口为 0。
+
 启动后终端会打印一个带令牌的地址：
 
 ```text
@@ -1724,7 +1749,9 @@ cf-route-tester/
 | 文件 | 作用 |
 | --- | --- |
 | `cmd/cf-route-tester/main.go` | 命令行入口：构造 `cli.Env`、调用 `cli.Run`、把退出码交给操作系统。**这里没有业务逻辑**，因此不需要测试。 |
-| `cmd/cf-route-tester-gui/main.go` | 无控制台的图形入口（用 `-H=windowsgui` 构建）。负责两件有副作用的事：把工作目录切到 exe 所在目录（否则双击启动时数据库与日志会散落在 `C:\Windows` 之类），以及标记 `Env.Detached`（告诉 web 命令"没有可用的 stderr，请只写日志文件"）。不带参数时直接启动图形界面，带子命令时仍走完整 CLI。 |
+| `cmd/cf-route-tester-gui/main.go` | 无控制台的图形入口（用 `-H=windowsgui` 构建）。负责三件有副作用的事：把工作目录切到 exe 所在目录（否则双击启动时数据库与日志会散落在 `C:\Windows` 之类）、标记 `Env.Detached`（告诉 web 命令"没有可用的 stderr，请只写日志文件"）、以及通过 `Env.OnServerReady` 创建常驻窗口。不带参数时直接启动图形界面，带子命令时仍走完整 CLI。 |
+| `cmd/cf-route-tester-gui/window_windows.go` | 常驻小窗口：直接调 Win32（`user32` / `gdi32` / `shell32`，`syscall.NewLazyDLL`），不引入任何 GUI 框架，因此不破坏 `CGO_ENABLED=0`。显示状态与地址，提供「打开界面」「退出」，关窗即退出。**注意字体必须逐个控件发 `WM_SETFONT`**（发给顶层窗口无效），以及 `GetStockObject` 在 `gdi32` 而不是 `user32`——这两处都踩过，且都不报错/直接 panic。 |
+| `cmd/cf-route-tester-gui/window_other.go` | 非 Windows 的同名桩函数。只为让本命令在所有平台都能编译（CI 的交叉编译步骤会跑）。 |
 
 ### `internal/applog/` — 日志
 
@@ -1816,6 +1843,8 @@ cf-route-tester/
 | `parser.go` | NextTrace JSON → `TraceResult` 的归一化。**含纳秒→毫秒换算**、二维 `Hops` 聚合、乱码 `*_en` 字段优先。 |
 | `testdata/nexttrace_v1.7.3_icmp.json` | **真实** NextTrace v1.7.3 输出夹具。解析契约的依据；有测试断言它没被手工改过。 |
 | `trace_test.go` | 用真实夹具锁定解析契约、参数构造（端口必须用目标自己的）、失败分类、超时、假二进制端到端。 |
+| `exec_windows.go` | 启动 NextTrace 子进程时加 `CREATE_NO_WINDOW` + `HideWindow`：它是控制台程序，在无控制台的宿主里启动会让每个目标都弹出一个黑框。 |
+| `exec_unix.go` | 非 Windows 的同名空操作（Unix 下启动子进程本来就不会开终端窗口）。 |
 
 ### `internal/detect/` — 本机地区 / 运营商检测
 

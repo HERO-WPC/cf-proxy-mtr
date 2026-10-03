@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/cf-route-tester/cf-route-tester/internal/version"
+	"github.com/cf-route-tester/cf-route-tester/internal/webui"
 )
 
 // 退出码约定。
@@ -96,6 +97,15 @@ type Env struct {
 	// 而是把该说的都写进日志文件。这个区分是踩过坑之后加的——
 	// GUI 入口启动后日志文件里一条记录都没有，只剩端口在监听。
 	Detached bool
+
+	// OnServerReady 在 web 服务开始监听后被调用，用来启动平台相关的
+	// 界面外壳（Windows 上是一个常驻小窗口）。
+	//
+	// 返回值是一个在"外壳应当关闭"时关闭的通道；web 命令会等它，
+	// 因此**不会**出现"服务在跑但没有可见窗口可以关掉它"的局面。
+	//
+	// 返回 nil 表示没有外壳（命令行运行），此时只等信号。
+	OnServerReady func(*webui.Server) <-chan struct{}
 }
 
 // NewEnv 使用真实进程环境构造 Env。

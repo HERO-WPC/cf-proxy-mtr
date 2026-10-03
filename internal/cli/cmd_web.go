@@ -182,15 +182,23 @@ func runWeb(env *Env, args []string) error {
 		fmt.Fprint(env.Stdout, webReadyMessage(server))
 	}
 
-	// 等 Ctrl+C 或终止信号。
+	// 等 Ctrl+C、窗口关闭或终止信号。
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+
+	// 等窗口关闭的通道（GUI 入口提供）。为 nil 时该分支永不触发。
+	var windowClosed <-chan struct{}
+	if env != nil && env.OnServerReady != nil {
+		windowClosed = env.OnServerReady(server)
+	}
 
 	select {
 	case <-ctx.Done():
 		if p.console {
 			fmt.Fprintln(env.Stdout, "\n正在关闭…")
 		}
+	case <-windowClosed:
+		logger.Info("web: window closed, shutting down")
 	case <-server.Done():
 		// 服务自己退出了（异常路径）。
 	}
