@@ -43,6 +43,7 @@ Phase 10 ⏸️ GitHub 上传（按用户要求暂缓：先把全部流程在本
 Phase 11 ✅ 数据聚合（aggregate 包：按目标 × 地区 × 运营商分组、跨节点对比）
 Phase 12 ✅ 查询与统计（query 包 + query 命令：单目标跨地区画像）
 Phase 13 ✅ 跨平台打包与发布（tools/release：6 平台交叉编译 + 校验和 + 清单）
+Phase 14 ✅ 图形界面（webui + service + applog：内置本地网页、令牌与 CSRF 防护、脱离命令行的 GUI 入口）
 ```
 
 已实现的功能（可运行）：
@@ -50,6 +51,7 @@ Phase 13 ✅ 跨平台打包与发布（tools/release：6 平台交叉编译 + �
 ```text
 cf-route-tester --help
 cf-route-tester version
+cf-route-tester web            # 启动图形界面（本地网页，数据不出本机）
 cf-route-tester fetch          # 下载 / 缓存 / 解析 all.json，输出目标数量
 cf-route-tester detect         # 检测测量者所在地区与运营商，写入本地标识
 cf-route-tester probe          # 对全部 IP:Port 做 TCP 连通性与延迟测量
@@ -115,8 +117,7 @@ bin\cf-route-tester.exe version
 ### 生成完整发布包
 
 `tools/release` 是一个 Go 程序（任何平台都能跑，只需要 Go 工具链），
-它会先跑 gofmt / vet / test，再交叉编译 6 个平台，
-最后生成校验和与发布清单：
+它会先跑 gofmt / vet / test，再交叉编译发布目标，最后生成校验和与发布清单：
 
 ```bash
 go run ./tools/release              # 版本号从源码读取
@@ -124,15 +125,20 @@ go run ./tools/release -version 0.2.0
 ```
 
 ```text
-cf-route-tester-0.1.0-windows-amd64.exe    11.26 MiB
-cf-route-tester-0.1.0-windows-arm64.exe    10.48 MiB
-cf-route-tester-0.1.0-linux-amd64          11.16 MiB
-cf-route-tester-0.1.0-linux-arm64          10.56 MiB
-cf-route-tester-0.1.0-darwin-amd64         11.16 MiB
-cf-route-tester-0.1.0-darwin-arm64         10.62 MiB
-SHA256SUMS      # 与 sha256sum -c 兼容
+cf-route-tester-0.1.0-windows-amd64.exe         11.96 MiB   # 命令行
+cf-route-tester-gui-0.1.0-windows-amd64.exe     11.97 MiB   # 图形界面（无控制台窗口）
+cf-route-tester-0.1.0-windows-arm64.exe         11.12 MiB
+cf-route-tester-gui-0.1.0-windows-arm64.exe     11.13 MiB
+cf-route-tester-0.1.0-linux-amd64               11.85 MiB
+cf-route-tester-0.1.0-linux-arm64               11.25 MiB
+cf-route-tester-0.1.0-darwin-amd64              11.86 MiB
+cf-route-tester-0.1.0-darwin-arm64              11.26 MiB
+SHA256SUMS      # 8 个产物，与 sha256sum -c 兼容
 release.json    # 版本 / commit / 每个产物的哈希与大小
 ```
+
+图形界面入口**只有 Windows 需要**：其它平台的启动器（`.app`/`.desktop`）
+本来就不会显示终端窗口，多一份产物只会让用户困惑该下哪个。
 
 为什么构建工具用 Go 而不是 shell 脚本：一个 `.ps1` Linux 用户跑不了，
 一个 `.sh` Windows 用户跑不了，两套脚本必然漂移（命名规则、校验和格式、
@@ -154,6 +160,76 @@ go build -trimpath -ldflags "\
 
 最终产物是**单个可执行文件**，`CGO_ENABLED=0` 下即可构建，
 不需要 Python / Node.js / Java。
+
+---
+
+## 图形界面（web）
+
+不想用命令行的话，用图形界面：
+
+```bash
+cf-route-tester web                  # 启动并自动打开浏览器
+cf-route-tester web --no-browser     # 只启动服务（无桌面环境）
+cf-route-tester web --verbose        # 同时在终端显示日志
+cf-route-tester web --listen 127.0.0.1:8123   # 固定端口
+```
+
+Windows 上直接双击 `cf-route-tester-gui-*.exe` 也可以——那是用
+`-H=windowsgui` 构建的入口，**不会弹出控制台黑窗口**，工作目录自动
+切到 exe 所在目录，因此数据库与日志都落在 exe 旁边（`data/`）。
+
+启动后终端会打印一个带令牌的地址：
+
+```text
+log:        data/logs/cf-route-tester.log
+listening:  http://127.0.0.1:8236
+
+请在浏览器中打开（地址里带有本次运行的访问令牌）：
+  http://127.0.0.1:8236/?token=65fa66747f4219fec23d688daecccfd2c41d2df527a1a8e9fca73101fdb81890
+
+令牌只对本次运行有效，重启后会换一个；它不会写入磁盘。
+```
+
+界面能看数据库概览、启动/停止扫描（实时进度）、查看最近一次扫描的
+结果。**所有数据都只写本机**；上传功能尚未实现，因此没有任何数据会
+离开这台机器。
+
+### 为什么是"内置网页"而不是原生窗口
+
+原生界面框架要么需要 CGO（会破坏 `CGO_ENABLED=0` 的交叉编译与
+"Windows 双击即用"），要么需要随包分发平台运行库；Wails 之类还会
+把 npm 构建链带进仓库，新贡献者就得先装 Node 才能构建。内置 Web 服务
+加 `go:embed` 的页面没有这些代价：仍然是单文件二进制，
+`clone + go build` 依然足够。前端是原生 HTML/CSS/JS，不用框架。
+
+### 安全（单机也一样要做）
+
+**绑定 127.0.0.1 不等于只有本机能访问**：浏览器里任何网页都能向
+`http://127.0.0.1:<port>` 发请求，而本工具的能力是"对外发起大量网络
+连接"。因此三件事默认开启、不提供关闭开关：
+
+1. 每次启动生成**进程级随机令牌**，所有 `/api` 请求都要带（用常数时间比较）；
+2. 校验 `Host` 必须是回环地址——防 DNS rebinding（攻击者让
+   `evil.com` 解析到 127.0.0.1，浏览器发出的请求看起来是访问本机）；
+3. 变更类请求校验 `Origin`——防 CSRF。同源策略只阻止**读取**响应，
+   不阻止**发起**请求，而启动一次扫描的副作用已经发生了。
+
+`--listen 0.0.0.0:8123` 能把服务暴露到局域网，那等于把这台机器发起
+网络扫描的能力借给别人，请确认你确实需要。
+
+### 关于日志
+
+图形界面脱离命令行运行时**没有终端**，所以：
+
+- 日志默认写入 `data/logs/cf-route-tester.log`（可用 `--log-dir` /
+  `--log-file` 调整），并按 5 MiB 轮转、保留 3 个历史文件；
+- **带令牌的地址也会写进日志**。无控制台的进程里 stdout 是无效句柄，
+  写进去的内容会丢失，而这个地址是进入界面的唯一凭据；
+- 启动时终端会打印日志文件的完整路径。
+
+日志与命令行输出是**两条线**，刻意不合并：日志给排查用（时间戳、级别、
+结构化字段），`scan` 之类的进度与汇总给使用者看。
+把每一行进度都塞进日志只会让真正重要的信息被淹没。
 
 ---
 
@@ -181,7 +257,7 @@ version:        0.1.0
 schema_version: 1
 commit:         unknown
 build_date:     unknown
-go_version:     go1.21.x
+go_version:     go1.26.5
 platform:       windows/amd64
 ```
 
@@ -1357,6 +1433,7 @@ Go 工具链   modernc.org/sqlite 自身要求 go 1.26，因此 go.mod 的
 
 | 命令 | 作用 |
 | --- | --- |
+| `web` | 启动图形界面（本地网页，数据不出本机） |
 | `fetch` | 下载 / 缓存 / 解析 `all.json` |
 | `detect` | 检测本机地区与运营商，写入本地标识文件 |
 | `probe` | TCP 连通性与延迟测量 |
@@ -1513,9 +1590,14 @@ latency / loss / samples / success_rate / path / timestamp
 
 ```text
 cf-route-tester/
-├── cmd/cf-route-tester/          程序入口
-├── internal/                     全部业务逻辑（15 个包）
+├── cmd/
+│   ├── cf-route-tester/          命令行入口（web 是它的一个子命令）
+│   └── cf-route-tester-gui/      无控制台的图形入口（Windows 双击用）
+├── internal/                     全部业务逻辑（19 个包）
 │   ├── cli/                      命令分发、帮助、退出码、各子命令
+│   ├── service/                  **与界面无关**的编排（CLI 与图形界面共用）
+│   ├── webui/                    图形界面：HTTP 服务 + 嵌入式页面
+│   ├── applog/                   日志（文件 + 控制台双写、大小轮转）
 │   ├── version/                  程序版本与公开数据 schema 版本
 │   ├── model/                    核心数据模型与不变量
 │   ├── source/                   all.json 获取、解析、缓存
@@ -1540,7 +1622,7 @@ cf-route-tester/
 ├── configs/config.example.yaml   配置设计草案（**当前未被读取**）
 ├── data/                         本地数据目录（内容不提交）
 ├── dist/                         构建产物（不提交）
-├── LICENSE                       许可证状态（**尚未选定，见下文**）
+├── LICENSE                       GPL-3.0 全文 + 第三方组件说明
 └── README.md / doc.go / go.mod / go.sum / .gitignore / .gitattributes
 ```
 
@@ -1576,7 +1658,33 @@ cf-route-tester/
 
 | 文件 | 作用 |
 | --- | --- |
-| `cmd/cf-route-tester/main.go` | 入口：构造 `cli.Env`、调用 `cli.Run`、把退出码交给操作系统。**这里没有业务逻辑**，因此不需要测试。 |
+| `cmd/cf-route-tester/main.go` | 命令行入口：构造 `cli.Env`、调用 `cli.Run`、把退出码交给操作系统。**这里没有业务逻辑**，因此不需要测试。 |
+| `cmd/cf-route-tester-gui/main.go` | 无控制台的图形入口（用 `-H=windowsgui` 构建）。负责两件有副作用的事：把工作目录切到 exe 所在目录（否则双击启动时数据库与日志会散落在 `C:\Windows` 之类），以及标记 `Env.Detached`（告诉 web 命令"没有可用的 stderr，请只写日志文件"）。不带参数时直接启动图形界面，带子命令时仍走完整 CLI。 |
+
+### `internal/applog/` — 日志
+
+| 文件 | 作用 |
+| --- | --- |
+| `applog.go` | 文件 + 控制台双写、按大小轮转（5 MiB × 3 个备份）、级别过滤、nil 安全的级别方法。文件名/父目录不存在时自动创建；**打不开日志文件也不让程序起不来**，而是退化成只写控制台并说明原因。 |
+| `applog_test.go` | 双写、轮转与备份上限、**不截断日志行**、启动时发现超大文件先轮转、目录不可写时优雅降级、重复 Close 幂等。 |
+
+### `internal/service/` — 与界面无关的编排
+
+| 文件 | 作用 |
+| --- | --- |
+| `service.go` | `RunScan` / `Stats` / `ProgressHub`。把"加载目标 → 开库 → 决定会话 → 跑调度器 → 记录会话"从 CLI 里抽出来，让命令行与图形界面共用同一份实现（复制一份的代价是两边的续测判据迟早分叉，而那是**静默的数据错误**）。含错误分类（用法 / 无目标 / 无会话）供调用方选择退出码或 HTTP 状态码。 |
+| `service_test.go` | 真实本机监听 + 真实 SQLite：测量与落库、limit 取前 N 个、**参数校验发生在任何副作用之前**、续测不产生重复行、进度回调、引擎不可用时仍完成 TCP 测量、画像覆盖优先于本地文件。 |
+
+### `internal/webui/` — 图形界面
+
+| 文件 | 作用 |
+| --- | --- |
+| `server.go` | HTTP 服务：路由、内嵌页面、SSE 进度推送、单次扫描约束、优雅关闭。安全默认开启且**不提供关闭开关**：进程级随机令牌（常数时间比较）、`Host` 回环校验（防 DNS rebinding）、变更请求的 `Origin` 校验（防 CSRF）。 |
+| `assets/index.html` | 界面本体，原生 HTML/CSS/JS（不用框架，因此不需要 Node 工具链），通过 `go:embed` 打进二进制。 |
+| `browser_windows.go` | 用默认浏览器打开地址（`cmd /c start` 需要一个空标题参数，否则 URL 会被当成窗口标题而不打开）。 |
+| `browser_darwin.go` | 用 `open` 打开。 |
+| `browser_unix.go` | 依次尝试 `xdg-open` / `gio open` / `x-www-browser` / `sensible-browser`；全失败时返回错误，由调用方降级为"打印地址让用户自己点"（服务器上这是常态）。 |
+| `server_test.go` | 令牌缺失/错误/正确/查询参数、**非回环 Host 被拒**、**跨站 POST 被拒**、同源与无 Origin 放行、页面与安全响应头、扫描启动到结果、并发扫描被拒、用法错误映射、SSE 端到端送达进度、`Done()` 的两个方向。 |
 
 ### `internal/version/` — 版本信息
 
@@ -1735,6 +1843,8 @@ cf-route-tester/
 | `cmd_export.go` | `export` | 导出公开 JSONL，含 `--dry-run`、`--list-sessions`、格式与隐私报告。 |
 | `cmd_aggregate.go` | `aggregate` | 聚合报告（text / json / jsonl）。 |
 | `cmd_query.go` | `query` | 单目标画像；位置参数与选项可任意交错。 |
+| `cmd_web.go` | `web` | 启动图形界面；同时提供 `RunDefault`（无子命令时的入口）与 `Env.Detached` 的处理。 |
+| `cmd_source.go` | — | 各命令共用的数据源 flag，以及 `sourceParams.toConfig()`（避免每个命令各写一套转换规则而漂移）。 |
 
 测试（全部在包内，用真实本机监听与真实 SQLite）：
 
@@ -1750,6 +1860,7 @@ cf-route-tester/
 | `cmd_export_test.go` | 导出：隐私报告、gzip 可解、拒绝覆盖、zstd 明确拒绝并给替代方案。 |
 | `cmd_query_test.go` | 查询：两个数据源互斥、交错参数、JSON 结构、`--hops` / `--series` / `--stats` / `--list-targets`。 |
 | `cmd_db_test.go` | `db` 子命令：统计口径、迁移幂等、vacuum 行为。 |
+| `cmd_web_test.go` | `web` 命令表面：帮助里说明了安全边界与日志位置、**默认只绑回环**、默认会写日志文件、未知参数与空 `--db` 被拒、不在"规划中命令"里。 |
 | `cmd_fetch_test.go` | `fetch` 参数与输出。 |
 | `cmd_fetch_cache_test.go` | 缓存命中路径（离线）。 |
 | `cmd_fetch_e2e_test.go` | 端到端：下载 → 缓存 → 解析，使用本地 HTTP 服务器，不依赖外网。 |
@@ -1794,7 +1905,7 @@ cf-route-tester/
 | `data/*.db` | 视使用而定 | 本地测量数据库（个人数据），绝不提交。 |
 | `data/collector.json` | 约 235 B | 本地匿名标识。虽然不含隐私信息，但它是**这台机器**的身份，提交它会让不同人的数据混在同一个 ID 下。 |
 
-因此别人 `git clone` 下来只有 **107 个文件 / 约 1.3 MB**（源码 + 测试 + 文档），
+因此别人 `git clone` 下来只有 **120 个文件 / 约 1.5 MB**（源码 + 测试 + 文档），
 不含任何数据与二进制。这一点已实测：把仓库克隆到临时目录后，
 `go build ./...`、`go vet ./...`、`go test ./...` 全部通过
 （16 个包全绿），说明**没有遗漏任何构建所需的文件**。

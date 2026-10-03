@@ -6,9 +6,17 @@
 // 结果匿名汇总后形成按 地区 × 运营商 × 时间 组织的长期线路数据库。
 //
 // 本文件只用于承载仓库级文档，没有可执行代码。
-// 可执行入口在 cmd/cf-route-tester，业务逻辑在 internal/ 下：
+// 可执行入口有两个（共用同一份 internal/ 实现）：
+//
+//	cmd/cf-route-tester       完整命令行（web 是它的一个子命令）
+//	cmd/cf-route-tester-gui   无控制台的图形入口，供 Windows 双击启动
+//
+// 业务逻辑在 internal/ 下：
 //
 //	internal/cli       命令分发、帮助、退出码、子命令参数解析
+//	internal/service   与界面无关的编排（CLI 与图形界面共用同一份）
+//	internal/webui     图形界面：HTTP 服务、SSE 进度、嵌入式页面
+//	internal/applog    日志：文件 + 控制台双写、按大小轮转
 //	internal/version   版本与公开数据 schema 版本
 //	internal/model     Target / Location / ColoInfo / CollectorProfile
 //	internal/source    all.json / all.txt 的下载、容错解析与本地缓存
@@ -23,6 +31,11 @@
 //	internal/aggregate 数据聚合（目标 × 地区 × 运营商分组、延迟直方图）
 //	internal/query     单目标线路画像查询（本地库或公开 JSONL）
 //	internal/identity  本地匿名标识 collector_id（随机生成，非硬件指纹）
+//
+// 分层原则：internal/cli 与 internal/webui 都只负责"界面"，
+// 真正的编排在 internal/service，能力在各自的 internal/<能力包>。
+// 这样命令行与图形界面不会各自演化出一套逻辑——那类分叉在这条链路上
+// 表现为静默的数据错误，而不是崩溃。
 //
 // 后续阶段的包（upload）会随对应 Phase 逐步加入；
 // upload 目前按用户要求暂缓，先确保本地链路完整可用。
