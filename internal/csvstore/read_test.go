@@ -275,8 +275,105 @@ func TestSortByRouteGroupsSameRoute(t *testing.T) {
 	}
 }
 
-// TestSortIsStableForEqualLatency 验证延迟相同时顺序稳定。
+// ---------------------------------------------------------------------------
+// 优先线路置顶
+// ---------------------------------------------------------------------------
+
+// TestSortByRoutePinsPremiumRoutes 验证 CMIN2 / CN2 / 9929 排在最上面，
+// 且次序固定。
 //
+// 这三条是大陆方向的优质线路（移动 CMIN2、电信 CN2、联通 9929/CUII）。
+// 使用者测一堆目标，真正想先看的就是"哪些走了这三条"，
+// 而按延迟排的话它们可能被埋在一堆更快的普通线路后面。
+func TestSortByRoutePinsPremiumRoutes(t *testing.T) {
+	rows := []Row{
+		// 普通线路，延迟还更低——按纯延迟排它会排第一。
+		{Target: "plain:443", LatencyMS: 10, ASPath: "CMNET > Cogent"},
+		{Target: "cmin2:443", LatencyMS: 300, ASPath: "CMNET > CMIN2"},
+		{Target: "cn2:443", LatencyMS: 200, ASPath: "163 > CN2"},
+		{Target: "cuii:443", LatencyMS: 100, ASPath: "169 > 9929/CUII"},
+		{Target: "none:443", LatencyMS: 5}, // 没跟到线路
+	}
+
+	Sort(rows, SortRoute)
+
+	want := []string{"cmin2:443", "cn2:443", "cuii:443", "plain:443", "none:443"}
+	if got := targets(rows); !equal(got, want) {
+		t.Fatalf("order = %v, want %v\n"+
+			"（优先线路按 CMIN2 → CN2 → 9929 置顶，其余仍按原有规则，"+
+			"没有线路信息的排最后）", got, want)
+	}
+
+	// 优先线路内部也要按延迟排：同一等级里快的在前。
+	inner := []Row{
+		{Target: "slow:443", LatencyMS: 400, ASPath: "CMIN2"},
+		{Target: "fast:443", LatencyMS: 50, ASPath: "CMIN2"},
+	}
+	Sort(inner, SortRoute)
+	if inner[0].Target != "fast:443" {
+		t.Errorf("within a premium group the fastest should come first, got %v", targets(inner))
+	}
+}
+
+// TestSortByRouteMatchesWholeSegments 验证匹配的是**整段线路名**，
+// 不是子串。
+//
+// 子串匹配会让一个恰好包含 "CN2" 的名字（例如将来的某个 "CN2X"）
+// 被误判成优先线路。那种错误只会表现为"排序看着不太对"，极难排查。
+func TestSortByRouteMatchesWholeSegments(t *testing.T) {
+	rows := []Row{
+		{Target: "lookalike:443", LatencyMS: 10, ASPath: "CMNET > CMI2"},
+		{Target: "real:443", LatencyMS: 500, ASPath: "CMNET > CN2"},
+	}
+
+	Sort(rows, SortRoute)
+	if rows[0].Target != "real:443" {
+		t.Errorf("order = %v; only an exact route-name segment should be pinned", targets(rows))
+	}
+}
+
+// TestPremiumRankTakesHighestPriorityInPath 验证一条路径经过多条优先线路时
+// 取等级最高的那条——它确实走了更好的线路。
+func TestPremiumRankTakesHighestPriorityInPath(t *testing.T) {
+	cases := map[string]int{
+		"CMIN2":                  0,
+		"CN2":                    1,
+		"9929/CUII":              2,
+		"9929":                   2, // 别名
+		"CMNET > CMIN2 > Cogent": 0,
+		"163 > CN2 > Cloudflare": 1,
+		"CN2 > CMIN2":            0, // 两条都有 → 取更高的
+		"CMNET > CMI":            -1,
+		"":                       -1,
+		"CMNET > CMI2":           -1,
+	}
+
+	for path, want := range cases {
+		row := Row{Target: "x:443", ASPath: path}
+		if got := premiumRank(row); got != want {
+			t.Errorf("premiumRank(%q) = %d, want %d", path, got, want)
+		}
+	}
+}
+
+// TestSortByLatencyIgnoresPremiumRoutes 验证**只有按线路排序**时才置顶。
+//
+// "按延迟排序"是一个明确的承诺：最快的就是第一个。在其中偷偷把
+// 优先线路提上来，会让那个标签变成假话，而且使用者无法察觉——
+// 他只会觉得"这个延迟排序怎么不太准"。
+func TestSortByLatencyIgnoresPremiumRoutes(t *testing.T) {
+	rows := []Row{
+		{Target: "plain:443", LatencyMS: 10, ASPath: "CMNET > Cogent"},
+		{Target: "cmin2:443", LatencyMS: 300, ASPath: "CMNET > CMIN2"},
+	}
+
+	Sort(rows, SortLatency)
+	if rows[0].Target != "plain:443" {
+		t.Errorf("order = %v; sorting by latency must stay strictly by latency", targets(rows))
+	}
+}
+
+// TestSortIsStableForEqualLatency 验证延迟相同时顺序稳定。//
 // 不稳定的话，界面每次刷新行序都可能不同，看起来像数据在跳。
 func TestSortIsStableForEqualLatency(t *testing.T) {
 	rows := []Row{

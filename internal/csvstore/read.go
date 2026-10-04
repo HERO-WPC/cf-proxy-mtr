@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -174,8 +173,41 @@ const (
 func Sort(rows []Row, by SortBy) {
 	switch by {
 	case SortRoute:
+		// 组内最快延迟**先算一次**。
+		//
+		// 原来的写法是在比较函数里现算（每次比较都扫一遍全表），
+		// 那是 O(n² log n)：两千行就是几千万次扫描。这里顺手改掉，
+		// 因为下面新增的优先线路判断会让比较次数再涨。
+		bestLatency := make(map[string]float64, len(rows))
+		for _, row := range rows {
+			group := routeGroupKey(row)
+			if group == "" || row.LatencyMS <= 0 {
+				continue
+			}
+			if current, ok := bestLatency[group]; !ok || row.LatencyMS < current {
+				bestLatency[group] = row.LatencyMS
+			}
+		}
+
 		sort.SliceStable(rows, func(i, j int) bool {
 			left, right := rows[i], rows[j]
+
+			// 优先线路（走 CMIN2 / CN2 / 9929 的那些）置顶，
+			// 次序按 premiumRank 的定义。
+			//
+			// 放在"有没有线路信息"之前判断：优先线路本身就是有线路的，
+			// 两种规则不会互相干扰，先判它更直观。
+			leftRank, rightRank := premiumRank(left), premiumRank(right)
+			if leftRank != rightRank {
+				if leftRank < 0 {
+					return false
+				}
+				if rightRank < 0 {
+					return true
+				}
+				return leftRank < rightRank
+			}
+
 			leftGroup, rightGroup := routeGroupKey(left), routeGroupKey(right)
 
 			// 没有线路信息的排最后。
@@ -185,7 +217,7 @@ func Sort(rows []Row, by SortBy) {
 			if leftGroup != rightGroup {
 				// 组间按组内最快延迟排，而不是按组名字典序：
 				// 使用者关心的是"哪条线路更快"。
-				return groupBestLatency(rows, leftGroup) < groupBestLatency(rows, rightGroup)
+				return bestLatency[leftGroup] < bestLatency[rightGroup]
 			}
 			return latencyLess(left, right)
 		})
@@ -196,6 +228,63 @@ func Sort(rows []Row, by SortBy) {
 	default: // SortLatency
 		sort.SliceStable(rows, func(i, j int) bool { return latencyLess(rows[i], rows[j]) })
 	}
+}
+
+// premiumRouteGroups 是"优先线路"，按优先级从高到低排列。
+//
+// 名字必须与 asnmap 里的线路名**逐字一致**：CSV 的 as_path 写的就是
+// 那些短名（例如 "CMNET > CMI > CN2"），匹配靠的是切分后的整段相等，
+// 而不是子串包含——子串会让 CN2 命中 CMIN2 之类的东西（本例正好不会，
+// 但换个名字就会），那种错误只会表现为"排序看起来不太对"，很难查。
+//
+// 每组的多个写法是别名：同一个 ASN 在不同数据里可能只写编号
+// （例如 "9929" 与 "9929/CUII"）。
+var premiumRouteGroups = [][]string{
+	{"CMIN2"},
+	{"CN2"},
+	{"9929/CUII", "9929"},
+}
+
+// premiumRank 返回该行所属的优先线路等级，-1 表示不是优先线路。
+//
+// 一条路径可能同时经过多条优先线路（例如 "CN2 > CMIN2"），
+// 这时取**等级最高**的那个——它确实走了那条更好的线路。
+func premiumRank(row Row) int {
+	segments := routeSegments(row.ASPath)
+	if len(segments) == 0 {
+		return -1
+	}
+
+	for rank, names := range premiumRouteGroups {
+		for _, segment := range segments {
+			for _, name := range names {
+				if strings.EqualFold(segment, name) {
+					return rank
+				}
+			}
+		}
+	}
+	return -1
+}
+
+// routeSegments 把 as_path 拆成线路名。
+//
+// 分隔符是 " > "（写入时就是 ShortPath 拼的），这里按分隔符切开并
+// 去掉首尾空白。刻意不按单个字符切：线路名里本来就可能带 "/"（9929/CUII）。
+func routeSegments(path string) []string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+
+	parts := strings.Split(path, ">")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 // latencyLess 是"按延迟升序、没测到的最后"的单一实现点。
@@ -221,22 +310,6 @@ func latencyLess(left, right Row) bool {
 // 空串表示"没有线路信息"（没跟踪，或跟踪失败）。
 func routeGroupKey(row Row) string {
 	return strings.TrimSpace(row.ASPath)
-}
-
-// groupBestLatency 返回某条线路里最快的延迟。
-//
-// 没有可用延迟时返回正无穷，使该组排在最后。
-func groupBestLatency(rows []Row, group string) float64 {
-	best := math.Inf(1)
-	for _, row := range rows {
-		if routeGroupKey(row) != group {
-			continue
-		}
-		if row.LatencyMS > 0 && row.LatencyMS < best {
-			best = row.LatencyMS
-		}
-	}
-	return best
 }
 
 // Countries 返回行里出现过的国家及计数，按数量倒序。
