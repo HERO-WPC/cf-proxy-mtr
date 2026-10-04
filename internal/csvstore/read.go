@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cf-route-tester/cf-route-tester/internal/asnmap"
 )
 
 // 本文件是 CSV 的**读取**侧。
@@ -230,41 +232,28 @@ func Sort(rows []Row, by SortBy) {
 	}
 }
 
-// premiumRouteGroups 是"优先线路"，按优先级从高到低排列。
-//
-// 名字必须与 asnmap 里的线路名**逐字一致**：CSV 的 as_path 写的就是
-// 那些短名（例如 "CMNET > CMI > CN2"），匹配靠的是切分后的整段相等，
-// 而不是子串包含——子串会让 CN2 命中 CMIN2 之类的东西（本例正好不会，
-// 但换个名字就会），那种错误只会表现为"排序看起来不太对"，很难查。
-//
-// 每组的多个写法是别名：同一个 ASN 在不同数据里可能只写编号
-// （例如 "9929" 与 "9929/CUII"）。
-var premiumRouteGroups = [][]string{
-	{"CMIN2"},
-	{"CN2"},
-	{"9929/CUII", "9929"},
-}
-
 // premiumRank 返回该行所属的优先线路等级，-1 表示不是优先线路。
 //
+// 清单在 asnmap 里（线路名的权威来源），这里只是按整段线路名去查。
+// 不在本包再抄一份：两份清单必然漂移，而漂移只表现为"日志标红了但
+// 表格没置顶"这类没有报错的怪现象。
+//
+// 匹配的是**切分后的整段**而不是子串：子串会让一个恰好包含 "CN2"
+// 的名字被误判（本例正好不会，但换个名字就会），而那种错误只表现为
+// "排序看起来不太对"，极难排查。
+//
 // 一条路径可能同时经过多条优先线路（例如 "CN2 > CMIN2"），
-// 这时取**等级最高**的那个——它确实走了那条更好的线路。
+// 这时取**等级最高**的那个。
 func premiumRank(row Row) int {
-	segments := routeSegments(row.ASPath)
-	if len(segments) == 0 {
-		return -1
-	}
-
-	for rank, names := range premiumRouteGroups {
-		for _, segment := range segments {
-			for _, name := range names {
-				if strings.EqualFold(segment, name) {
-					return rank
-				}
+	best := -1
+	for _, segment := range routeSegments(row.ASPath) {
+		if rank := asnmap.PremiumNameRank(segment); rank >= 0 {
+			if best < 0 || rank < best {
+				best = rank
 			}
 		}
 	}
-	return -1
+	return best
 }
 
 // routeSegments 把 as_path 拆成线路名。

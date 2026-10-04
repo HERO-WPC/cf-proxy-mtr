@@ -124,6 +124,20 @@
   .logline.error .m { color: #ff8f95; }
   #logBox .empty { color: #5b6377; }
 
+  /* ---- 优质线路（CMIN2 / CN2 / 9929）的日志行 ----
+     与级别正交，因此**叠加**在级别配色之上，而不是替换它：
+     左边一条红杠 + 淡红底色，线路本身加粗。
+     刻意不把整行文字改成红色——那个颜色在下面已经属于 error，
+     同一行同时意味着"出错了"和"线路很好"会让人误判。 */
+  .logline.highlight {
+    background: rgba(242, 84, 91, .09);
+    border-left: 3px solid var(--err);
+    margin-left: -3px; padding-left: 6px;
+    border-radius: 3px;
+  }
+  .logline.highlight .m { color: #ff9aa0; font-weight: 600; }
+  .logline.highlight .t { color: #8d6a6e; }
+
   /* ---- 三段式流程：选国家 → 看逐条结果 → 确认后跟踪线路 ---- */
 
   /* 结果表格的行数最多几百行，滚动容器把它限制在固定高度内，
@@ -1462,6 +1476,10 @@ function appendLog(ev) {
 
   const line = document.createElement('div');
   line.className = 'logline ' + (ev.level || 'info');
+  // highlight 与级别**正交**：级别决定基础配色，它再叠一层标记。
+  // 后端判定（走了 CMIN2 / CN2 / 9929），前端不解析文本——
+  // 让界面拿字符串猜线路，日志格式一改就会悄悄失效。
+  if (ev.highlight) line.className += ' highlight';
 
   const t = document.createElement('span');
   t.className = 't';

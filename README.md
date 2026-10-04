@@ -121,7 +121,7 @@ bin\cf-route-tester.exe version
 # 1) 同步源码里的版本号与文档里的产物清单
 #    （tools/release 会打印真实体积，README / docs/INSTALL.md 按它更新）
 # 2) 提交
-git tag -a v0.1.12 -m "v0.1.12" && git push origin v0.1.12
+git tag -a v0.1.13 -m "v0.1.13" && git push origin v0.1.13
 ```
 
 版本号必须与 tag 一致：工作流按 tag 注入版本，而源码里的常量用于
@@ -139,14 +139,14 @@ go run ./tools/release -version 0.2.0
 ```
 
 ```text
-cf-route-tester-0.1.12-windows-amd64.exe    12.63 MiB  # 命令行
-cf-route-tester-gui-0.1.12-windows-amd64.exe12.65 MiB  # 图形界面（无控制台窗口）
-cf-route-tester-0.1.12-windows-arm64.exe    11.77 MiB
-cf-route-tester-gui-0.1.12-windows-arm64.exe11.78 MiB
-cf-route-tester-0.1.12-linux-amd64          12.41 MiB
-cf-route-tester-0.1.12-linux-arm64          11.75 MiB
-cf-route-tester-0.1.12-darwin-amd64         12.43 MiB
-cf-route-tester-0.1.12-darwin-arm64         11.82 MiB
+cf-route-tester-0.1.13-windows-amd64.exe    12.64 MiB  # 命令行
+cf-route-tester-gui-0.1.13-windows-amd64.exe12.65 MiB  # 图形界面（无控制台窗口）
+cf-route-tester-0.1.13-windows-arm64.exe    11.77 MiB
+cf-route-tester-gui-0.1.13-windows-arm64.exe11.78 MiB
+cf-route-tester-0.1.13-linux-amd64          12.41 MiB
+cf-route-tester-0.1.13-linux-arm64          11.75 MiB
+cf-route-tester-0.1.13-darwin-amd64         12.43 MiB
+cf-route-tester-0.1.13-darwin-arm64         11.84 MiB
 SHA256SUMS      # 8 个产物，与 sha256sum -c 兼容
 release.json    # 版本 / commit / 每个产物的哈希与大小
 ```
@@ -235,7 +235,7 @@ Windows 上直接双击 `cf-route-tester-gui-*.exe` 也可以——那是用
 启动后终端会打印一个带令牌的地址：
 
 ```text
-time="..." level=INFO msg="web: starting" version=0.1.12 platform=windows/amd64 results=data/results.db
+time="..." level=INFO msg="web: starting" version=0.1.13 platform=windows/amd64 results=data/results.db
 time="..." level=INFO msg="webui: listening" url=http://127.0.0.1:8236
 
 请在浏览器中打开（地址里带有本次运行的访问令牌）：
@@ -300,14 +300,14 @@ cf-route-tester --version
 
 ```text
 cf-route-tester
-version: 0.1.12
+version: 0.1.13
 ```
 
 `version --verbose` 输出（含构建细节，便于排查“结果来自哪个版本”）：
 
 ```text
 client:         cf-route-tester
-version:        0.1.12
+version:        0.1.13
 schema_version: 1
 commit:         unknown
 build_date:     unknown
@@ -518,7 +518,7 @@ failures by type:
 `--json` 每条结果一行（自带 `schema_version` 与 `client_version`）：
 
 ```json
-{"schema_version":1,"client_version":"0.1.12","target_id":"45.63.67.144:443","ip":"45.63.67.144","port":443,"success":true,"latency_ms":252.3158,"timestamp":"2026-10-03T11:35:21.8611931Z"}
+{"schema_version":1,"client_version":"0.1.13","target_id":"45.63.67.144:443","ip":"45.63.67.144","port":443,"success":true,"latency_ms":252.3158,"timestamp":"2026-10-03T11:35:21.8611931Z"}
 ```
 
 失败分类（数据库与分析的价值就在于"分得清是哪一种失败"）：
@@ -656,8 +656,8 @@ error_type, error_message, hop_count, as_path, hops, client_version, cca2
 真实数据行：
 
 ```csv
-2026-10-03T18:00:17Z,159.60.146.81:443,159.60.146.81,443,true,284.683,,,,,,0.1.12,US
-2026-10-03T18:00:18Z,45.63.67.144:443,45.63.67.144,443,false,,timeout,dial tcp4 45.63.67.144:443: i/o timeout,,,,0.1.12,US
+2026-10-03T18:00:17Z,159.60.146.81:443,159.60.146.81,443,true,284.683,,,,,,0.1.13,US
+2026-10-03T18:00:18Z,45.63.67.144:443,45.63.67.144,443,false,,timeout,dial tcp4 45.63.67.144:443: i/o timeout,,,,0.1.13,US
 ```
 
 **失败时 `latency_ms` 是空单元格，不是 `0`。** 这一点很重要：
@@ -768,6 +768,23 @@ TCP 探测完成：5 个目标，成功 5，失败 0
 `dial tcp4 217.177.35.182:8443: i/o timeout`，每一行都重复一遍目标
 地址，逐行看很吵。分类足以说明问题，**完整原因留在 CSV 的
 `error_message` 列**里，需要时查得到。
+
+跟踪出了**优质线路**（CMIN2 / CN2 / 9929/CUII）的那一行会被特别标出：
+
+```text
+线路 45.63.67.144:443：20 跳，CMNET(AS56046) > CN2(AS4809) > Vultr(AS20473)  落地 US/...
+```
+
+判定发生在服务端而不是界面：线路本来就是在那一层解析出来的（手里就是
+ASN 列表），让界面拿日志文本再猜一次既重复，又会随格式调整而悄悄失效——
+而失效后的表现只是"某些行不再被标出"，没有人会去核对。界面照着一个
+`highlight` 字段上色即可。
+
+标记与**级别**是两件事，因此叠加而不是替换：级别（info / good / warn /
+error）说的是"这条消息有多严重"，只有四档；"走了好线路"不是一种严重
+程度。把两者混在一起会让红色同时意味着"出错了"和"线路很好"。
+失败的跟踪**不会**被标出——那会让人以为"这条路走了好线路"，而实际上
+这次跟踪根本没成。
 
 跟踪阶段输出**ASN 编号 + 线路名称 + 落地地区**（真实输出）：
 
@@ -1402,7 +1419,7 @@ IDENTICAL — export is reproducible
 {
   "schema_version": 1,
   "kind": "measurement",
-  "client_version": "0.1.12",
+  "client_version": "0.1.13",
   "target_id": "159.60.146.81:443",
   "ip": "159.60.146.81",
   "port": 443,
@@ -2147,6 +2164,7 @@ cf-route-tester/
 | `server.go` | HTTP 服务：路由、内嵌页面、SSE 进度推送、单次扫描约束、优雅关闭。安全默认开启且**不提供关闭开关**：进程级随机令牌（常数时间比较）、`Host` 回环校验（防 DNS rebinding）、变更请求的 `Origin` 校验（防 CSRF）。 |
 | `results.go` | 两段式流程的接口：`/api/countries`（目标列表的国家分布）、`/api/results`（读 CSV 返回排好序的行，**排序在截断之前做**，否则「最快的那个」会取决于文件顺序）、`/api/trace/preview`、`/api/trace`。跟踪只收**筛选条件**而不收目标列表：CSV 是唯一数据源，让界面回传目标等于承认「界面手里那份」才是真相。 |
 | `results_test.go` | 结果表格与国家清单的口径：**可选项清单不随筛选收缩**（勾了美国之后清单里不能只剩美国，否则想换一个国家也无从选起——这正是前端曾被迫多发一次请求绕过去的原因）、同一目标的探测行与跟踪行合并成一行、结果文件不存在不算错误。请求走真实 HTTP，因此顺带覆盖 Host 必须是本机与 token 两道访问控制。 |
+| `log_test.go` | 优质线路的日志行带高亮标记、普通线路不带（一屏全红等于没标）、**失败**的跟踪不带（那会让人以为「这条路走了好线路」）、没识别出线路时不带；以及标记真的被序列化进发给界面的 JSON（少一个 tag 界面就永远收不到，而表现只是「某些行没变红」）。 |
 | `resultspath.go` | 管理当前结果文件。三种操作含义不同，**不能共用一个静态默认值**：测量要新文件（不覆盖的落点）、跟踪要追加到刚测出的那份、读取要当前那份。`ResultsDir` 从配置的文件路径里取**目录**——直接当目录用会得到 `data/results.csv/results-....csv` 这种把文件当目录的嵌套路径（实测踩过）。 |
 | `resultspath_test.go` | 目录推导（含空路径与只有文件名的回退）、当前文件稳定不跳动、测量每次要新文件（**即使同一秒**）、显式路径优先且空值不覆盖它、按名字排序即按时间排序。 |
 | `assets/index.html` | 界面本体，原生 HTML/CSS/JS（不用框架，因此不需要 Node 工具链），通过 `go:embed` 打进二进制。 |
@@ -2163,7 +2181,7 @@ cf-route-tester/
 
 | 文件 | 作用 |
 | --- | --- |
-| `version.go` | 程序版本（`0.1.12`）、公开数据 schema 版本（`1`）、构建期注入的 commit 与构建时间。`SchemaVersion` 独立于程序版本：程序可以频繁升级，公开数据结构不变它就不变。 |
+| `version.go` | 程序版本（`0.1.13`）、公开数据 schema 版本（`1`）、构建期注入的 commit 与构建时间。`SchemaVersion` 独立于程序版本：程序可以频繁升级，公开数据结构不变它就不变。 |
 | `version_test.go` | 保证版本字段永不为空（公开数据里不能出现空字符串版本号）。 |
 
 ### `internal/model/` — 核心数据模型
@@ -2306,6 +2324,8 @@ cf-route-tester/
 | 文件 | 作用 |
 | --- | --- |
 | `asnmap.go` | `routes` 表（163 / CN2 / 169 / 9929 / CMNET / CMI / CMIN2 / CUG 等）、`Normalize`、`Lookup`、`Label`、`ShortPath` / `FullPath`。**只翻名字，不给评分**；未知 ASN 返回空名称而不是猜一个。 |
+| `premium.go` | 优质线路（CMIN2 / CN2 / 9929）的定义，**只有这一份**。两个使用者吃的东西不同：service 手里是 ASN（日志要不要标红），csvstore 手里是 CSV 短名（表格要不要置顶）。两处各存一份必然漂移，而漂移的表现只是「日志标红了但表格没置顶」这类没有报错的怪现象。 |
+| `premium_test.go` | 清单里的 ASN 与名字确实存在于线路表（写错一位不会报错，只会永远匹配不上）、按 ASN 判定、多线路取等级最高的、按短名判定、**不做子串匹配**。 |
 | `asnmap_test.go` | 用户给出的八条映射逐条固定、各种 ASN 写法归一化、拒绝路径串等非 ASN、未知不编名、短路径略去未知项、相邻去重但**保留不相邻重复**、CMI 与 CMIN2 必须能区分。 |
 
 ### `internal/asnprefix/` — 用线路的 IP 段识别线路

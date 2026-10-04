@@ -505,13 +505,21 @@ func (s *Service) runTracePhase(
 			}
 
 			if opts.OnTrace != nil {
+				// 线路只解析一次，日志与"是否优质"共用它。
+				//
+				// 解析两次（routeSummary 里一次、判定再一次）不仅多花
+				// 一遍前缀匹配，更要紧的是两者可能因为参数不同而给出
+				// 不一致的结论——日志说走了 CN2、标记却没亮。
+				route := resolveRoute(traceResult, prefixes)
+
 				// 并发调用：多个 worker 会同时进入这里，
 				// 回调实现必须自己保证线程安全。
 				opts.OnTrace(TraceOutcome{
 					Target:       id,
 					Landing:      landing(target),
 					HopCount:     traceResult.HopCount(),
-					Route:        routeSummary(traceResult, prefixes),
+					Route:        asnprefix.PathWithNames(route, asnmap.Name),
+					Premium:      asnmap.PremiumPathRank(route) >= 0,
 					Success:      traceResult.Success,
 					ErrorType:    string(traceResult.ErrorType),
 					ErrorMessage: traceResult.ErrorMessage,
@@ -679,6 +687,13 @@ type TraceOutcome struct {
 	// 光有"163"无法确认到底是不是 AS4134，而光有编号
 	// 又认不出这条线路意味着什么。两者都要。
 	Route string
+
+	// Premium 表示这条路径走了**优质线路**（CMIN2 / CN2 / 9929）。
+	//
+	// 由这里判定而不是让界面去解析 Route 的文本：线路是在这一层
+	// 解析出来的（手里就是 ASN 列表），让界面拿字符串再猜一次
+	// 既重复又容易随格式变化而失效。界面只需要照着标出来。
+	Premium bool
 
 	// Success 表示这次跟踪是否成功拿到路径。
 	Success bool

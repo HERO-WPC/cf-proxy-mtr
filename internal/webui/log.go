@@ -186,8 +186,19 @@ func (s *Server) emitTrace(outcome service.TraceOutcome) {
 		return
 	}
 
-	s.events.Emit(levelGood, fmt.Sprintf("线路 %s：%d 跳，%s%s",
-		outcome.Target, outcome.HopCount, outcome.Route, location))
+	text := fmt.Sprintf("线路 %s：%d 跳，%s%s",
+		outcome.Target, outcome.HopCount, outcome.Route, location)
+
+	// 走了优质线路（CMIN2 / CN2 / 9929）的行特别标出。
+	//
+	// 由 service 判定并通过 outcome.Premium 带过来，界面不解析文本：
+	// 线路是在那一层解析出来的，让界面拿字符串再猜一次既重复，
+	// 又会随日志格式的调整而悄悄失效。
+	if outcome.Premium {
+		s.events.EmitHighlighted(levelGood, text)
+		return
+	}
+	s.events.Emit(levelGood, text)
 }
 
 // landingSuffix 把落地地区格式化成日志行尾的补充说明。

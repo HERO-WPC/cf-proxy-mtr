@@ -31,6 +31,15 @@ type uiEvent struct {
 
 	// Text 是要显示的一行。
 	Text string `json:"text"`
+
+	// Highlight 表示这一行值得被**特别标出**（例如走了优质线路）。
+	//
+	// 刻意不做成第五个 Level：级别是"这条消息有多严重"，只有四档，
+	// 而那四档的含义已经固定（info 普通、good 正常结果、warn 需要注意、
+	// error 出错）。"走了好线路"不是一种严重程度，而是与级别正交的
+	// 一件事——把它塞进级别会让"这行是红的"同时意味着"出错了"和
+	// "线路很好"，两种相反的信号共用一个颜色。
+	Highlight bool `json:"highlight,omitempty"`
 }
 
 // 级别常量。
@@ -76,6 +85,18 @@ func newEventBroker() *eventBroker {
 // 而不是让扫描停下来等一个慢页面。这是刻意的取舍——
 // 事件是"告知"，不是"数据"；卡住测量去送日志是不可接受的。
 func (b *eventBroker) Emit(level, text string) {
+	b.emit(level, text, false)
+}
+
+// EmitHighlighted 与 Emit 相同，但这一行会被界面特别标出。
+//
+// 用于"走了优质线路"这类**好消息里的重点**：级别仍然是 good，
+// 只是额外加一层视觉标记。见 uiEvent.Highlight 的说明。
+func (b *eventBroker) EmitHighlighted(level, text string) {
+	b.emit(level, text, true)
+}
+
+func (b *eventBroker) emit(level, text string, highlight bool) {
 	if b == nil || strings.TrimSpace(text) == "" {
 		return
 	}
@@ -83,10 +104,11 @@ func (b *eventBroker) Emit(level, text string) {
 	b.mu.Lock()
 	b.seq++
 	event := uiEvent{
-		Seq:   b.seq,
-		Time:  time.Now().UTC().Format(time.RFC3339),
-		Level: level,
-		Text:  text,
+		Seq:       b.seq,
+		Time:      time.Now().UTC().Format(time.RFC3339),
+		Level:     level,
+		Text:      text,
+		Highlight: highlight,
 	}
 
 	// 追加历史并裁剪。
