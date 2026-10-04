@@ -768,19 +768,55 @@ func TestStatsRates(t *testing.T) {
 //
 // 同时验证另一半：调用方如果**提前**停止读取，运行必须能结束，
 // 而不是让 worker 卡在无人接收的 channel 上（那会让 Ctrl+C 失效）。
+//
+// == 为什么不能靠"读几条就走"来逼出丢弃 ==
+//
+// 交付那一步是一个 select：
+//
+//	select {
+//	case results <- result:   // 交付
+//	case <-ctx.Done():        // 丢弃并计数
+//	}
+//
+// 取消之后，只要 channel 缓冲区还有空位，**两个分支同时就绪**，
+// Go 会随机选一个。于是 Dropped 是不是 0 全看掷硬币——这条测试
+// 因此偶发失败（CI 上 `-race` 更慢，更容易翻到另一边）：
+//
+//	--- FAIL: TestRunnerAbandonedResultsDoesNotHang
+//	    worker_test.go:818: Dropped = 0, want > 0
+//
+// 所以这里**先把缓冲区填满**再取消：让 workers 全部卡在拨号里、
+// 一个结果都不读，然后取消。放行后每个 worker 各产出一条结果，
+// 而缓冲区只有 2 格、又没人消费，因此至少 2 条只能走丢弃分支——
+// 这是必然，不再取决于调度。
 func TestRunnerAbandonedResultsDoesNotHang(t *testing.T) {
+	const workers = 4
+
 	targets, cleanup := startLocalListeners(t, 4)
 	defer cleanup()
 
-	// 造一批目标，让结果数量明显多于 channel 缓冲。
 	jobs := make([]model.Target, 0, 200)
 	for i := 0; i < 200; i++ {
 		jobs = append(jobs, targets[i%len(targets)])
 	}
 
+	// 拨号器：进去就卡住并计数，直到 ctx 结束才返回。
+	// 计数让我们能确认"所有 worker 都已经在飞"，然后才取消。
+	var inFlight atomic.Int64
+	dialer := dialerFunc(func(ctx context.Context, network, address string) (net.Conn, error) {
+		inFlight.Add(1)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+
 	runner := NewRunner(RunnerConfig{
-		Probe:     Config{Workers: 4, Timeout: time.Second},
-		QueueSize: 2, // 故意很小，逼出"无人消费"的场景
+		Probe: Config{
+			Workers: workers,
+			// 超时给足，保证拨号不会自己先返回——返回时机要由取消决定。
+			Timeout: 10 * time.Second,
+			Dialer:  dialer,
+		},
+		QueueSize: 2, // 故意很小：放行后结果必然溢出
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -788,15 +824,20 @@ func TestRunnerAbandonedResultsDoesNotHang(t *testing.T) {
 
 	handle := runner.Start(ctx, jobs)
 
-	// 只读 3 条就放弃，然后取消，模拟"调用方提前退出"。
-	read := 0
-	for range handle.Results() {
-		read++
-		if read == 3 {
-			cancel()
-			break
+	// 等所有 worker 都卡在拨号里。
+	// 这一步是确定性的关键：它保证取消之后**必然**有 workers 产出结果，
+	// 而不是"可能还没开始探测就被取消了"（那才是不确定性的来源）。
+	deadline := time.Now().Add(5 * time.Second)
+	for inFlight.Load() < workers {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of %d workers started dialing; the pool is not feeding them",
+				inFlight.Load(), workers)
 		}
+		time.Sleep(2 * time.Millisecond)
 	}
+
+	// 调用方放弃读取，同时取消。
+	cancel()
 
 	done := make(chan Stats, 1)
 	go func() { done <- handle.Wait() }()
@@ -806,6 +847,10 @@ func TestRunnerAbandonedResultsDoesNotHang(t *testing.T) {
 		if stats.Total != len(jobs) {
 			t.Errorf("Total = %d, want %d", stats.Total, len(jobs))
 		}
+		// 4 个 worker 各产出一条结果——"结果确实被交付"这半仍然被锁住。
+		if stats.Completed == 0 {
+			t.Error("Completed = 0: no result was ever produced")
+		}
 		if stats.Completed >= len(jobs) {
 			t.Errorf("Completed = %d, want < %d after abandoning the results", stats.Completed, len(jobs))
 		}
@@ -814,8 +859,11 @@ func TestRunnerAbandonedResultsDoesNotHang(t *testing.T) {
 		}
 		// 已经测到但没能交付的结果必须被计数：否则汇总里的
 		// Completed 会莫名其妙偏小，而上层无法分辨原因。
+		//
+		// 必定大于 0：缓冲区只有 2 格、没人消费，而产出至少 4 条。
 		if stats.Dropped == 0 {
-			t.Error("Dropped = 0, want > 0 when the consumer abandoned the results")
+			t.Errorf("Dropped = 0, want > 0: %d result(s) were produced with a 2-slot "+
+				"buffer and no consumer, so some had to be dropped", stats.Completed)
 		}
 		// 会计关系：测到并交付 + 测到但丢弃 <= 目标总数。
 		// 差额是"因为取消而根本没被处理"的目标（已投喂但未处理，
