@@ -211,16 +211,44 @@ func succeedThenBlockDialer(successes int) probe.DialContextFunc {
 	}
 }
 
-// TestRunCSVScanRejectsEmptyPath 验证没给输出路径时明确报错。
-func TestRunCSVScanRejectsEmptyPath(t *testing.T) {
+// TestRunCSVScanAutoNamesResultFile 验证没给输出路径时**自动按日期时间命名**。
+//
+// 这条测试的契约变过一次：以前空路径是用法错误，两个调用方只好各自
+// 填一个固定的 data/results.csv——于是每跑一轮就覆盖上一轮，而且没有
+// 任何提示。现在空路径表示"自动命名"，每轮一个独立文件。
+func TestRunCSVScanAutoNamesResultFile(t *testing.T) {
+	// 换到临时工作目录再跑。
+	//
+	// 自动命名用的是相对目录 `data`，而 `go test` 的工作目录就是**包目录**：
+	// 不换的话这个测试会把结果文件写进 internal/service/data/，
+	// 也就是往仓库里丢垃圾（实测踩过，审计才发现的）。
+	t.Chdir(t.TempDir())
+
 	svc := testService(t, writeCache(t, listenLocal(t)))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if _, err := svc.RunCSVScan(ctx, CSVScanOptions{}); !IsUsage(err) {
-		t.Errorf("error = %v, want a usage error", err)
+	result, err := svc.RunCSVScan(ctx, CSVScanOptions{})
+	if err != nil {
+		t.Fatalf("RunCSVScan with an empty path should auto-name, got %v", err)
 	}
+	if result.OutputPath == "" {
+		t.Fatal("OutputPath is empty; the caller cannot tell where the result went")
+	}
+	if !strings.HasSuffix(result.OutputPath, ".csv") {
+		t.Errorf("OutputPath = %q, want a .csv path", result.OutputPath)
+	}
+	// 名字要带时间戳，否则"每轮一个文件"就无从谈起。
+	base := filepath.Base(result.OutputPath)
+	if !strings.HasPrefix(base, "results-") {
+		t.Errorf("base name = %q, want a results-<timestamp>.csv name", base)
+	}
+	// 而且必须真的写出来了（表头也算：文件在探测之前就打开了）。
+	if _, statErr := os.Stat(result.OutputPath); statErr != nil {
+		t.Errorf("auto-named file was not created: %v", statErr)
+	}
+	t.Cleanup(func() { _ = os.Remove(result.OutputPath) })
 }
 
 // TestRunCSVScanValidatesTraceModeFirst 验证参数校验发生在副作用之前。

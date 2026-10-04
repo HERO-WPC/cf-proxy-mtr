@@ -103,9 +103,9 @@ func runWeb(env *Env, args []string) error {
 	// 时只写文件，因为写 stderr 等于丢弃。
 	p.console = env == nil || !env.Detached
 
-	if strings.TrimSpace(p.out) == "" {
-		return usageError("--out must not be empty")
-	}
+	// --out 留空是**允许**的：结果文件按日期时间自动命名（见 csvstore.TimestampedPath）。
+	// 这里曾经拦它，而调用方只好填一个固定的 data/results.csv，
+	// 于是每跑一轮就覆盖上一轮。
 
 	// 日志：**先建日志再干别的**。
 	//

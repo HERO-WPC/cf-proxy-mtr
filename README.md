@@ -55,7 +55,7 @@ cf-route-tester web            # 启动图形界面（本地网页，数据不�
 cf-route-tester fetch          # 下载 / 缓存 / 解析 all.json，输出目标数量
 cf-route-tester detect         # 检测测量者所在地区与运营商，写入本地标识
 cf-route-tester probe          # 对全部 IP:Port 做 TCP 连通性与延迟测量
-cf-route-tester scan           # 全量扫描：结果**实时写入 CSV**（默认 data/results.csv）
+cf-route-tester scan           # 全量扫描：结果**实时写入 CSV**（默认按日期时间命名，见下）
 cf-route-tester scan --append  # 追加到已有结果文件（默认每次覆盖）
 cf-route-tester scan --trace   # 扫描后对**探测成功**的目标做线路跟踪
 cf-route-tester trace --target 1.1.1.1:443   # 单独跟踪一个目标
@@ -121,7 +121,7 @@ bin\cf-route-tester.exe version
 # 1) 同步源码里的版本号与文档里的产物清单
 #    （tools/release 会打印真实体积，README / docs/INSTALL.md 按它更新）
 # 2) 提交
-git tag -a v0.1.11 -m "v0.1.11" && git push origin v0.1.11
+git tag -a v0.1.12 -m "v0.1.12" && git push origin v0.1.12
 ```
 
 版本号必须与 tag 一致：工作流按 tag 注入版本，而源码里的常量用于
@@ -139,14 +139,14 @@ go run ./tools/release -version 0.2.0
 ```
 
 ```text
-cf-route-tester-0.1.11-windows-amd64.exe    12.63 MiB  # 命令行
-cf-route-tester-gui-0.1.11-windows-amd64.exe12.64 MiB  # 图形界面（无控制台窗口）
-cf-route-tester-0.1.11-windows-arm64.exe    11.76 MiB
-cf-route-tester-gui-0.1.11-windows-arm64.exe11.77 MiB
-cf-route-tester-0.1.11-linux-amd64          12.41 MiB
-cf-route-tester-0.1.11-linux-arm64          11.75 MiB
-cf-route-tester-0.1.11-darwin-amd64         12.42 MiB
-cf-route-tester-0.1.11-darwin-arm64         11.81 MiB
+cf-route-tester-0.1.12-windows-amd64.exe    12.63 MiB  # 命令行
+cf-route-tester-gui-0.1.12-windows-amd64.exe12.65 MiB  # 图形界面（无控制台窗口）
+cf-route-tester-0.1.12-windows-arm64.exe    11.77 MiB
+cf-route-tester-gui-0.1.12-windows-arm64.exe11.78 MiB
+cf-route-tester-0.1.12-linux-amd64          12.41 MiB
+cf-route-tester-0.1.12-linux-arm64          11.75 MiB
+cf-route-tester-0.1.12-darwin-amd64         12.43 MiB
+cf-route-tester-0.1.12-darwin-arm64         11.82 MiB
 SHA256SUMS      # 8 个产物，与 sha256sum -c 兼容
 release.json    # 版本 / commit / 每个产物的哈希与大小
 ```
@@ -235,7 +235,7 @@ Windows 上直接双击 `cf-route-tester-gui-*.exe` 也可以——那是用
 启动后终端会打印一个带令牌的地址：
 
 ```text
-time="..." level=INFO msg="web: starting" version=0.1.11 platform=windows/amd64 results=data/results.db
+time="..." level=INFO msg="web: starting" version=0.1.12 platform=windows/amd64 results=data/results.db
 time="..." level=INFO msg="webui: listening" url=http://127.0.0.1:8236
 
 请在浏览器中打开（地址里带有本次运行的访问令牌）：
@@ -300,14 +300,14 @@ cf-route-tester --version
 
 ```text
 cf-route-tester
-version: 0.1.11
+version: 0.1.12
 ```
 
 `version --verbose` 输出（含构建细节，便于排查“结果来自哪个版本”）：
 
 ```text
 client:         cf-route-tester
-version:        0.1.11
+version:        0.1.12
 schema_version: 1
 commit:         unknown
 build_date:     unknown
@@ -518,7 +518,7 @@ failures by type:
 `--json` 每条结果一行（自带 `schema_version` 与 `client_version`）：
 
 ```json
-{"schema_version":1,"client_version":"0.1.11","target_id":"45.63.67.144:443","ip":"45.63.67.144","port":443,"success":true,"latency_ms":252.3158,"timestamp":"2026-10-03T11:35:21.8611931Z"}
+{"schema_version":1,"client_version":"0.1.12","target_id":"45.63.67.144:443","ip":"45.63.67.144","port":443,"success":true,"latency_ms":252.3158,"timestamp":"2026-10-03T11:35:21.8611931Z"}
 ```
 
 失败分类（数据库与分析的价值就在于"分得清是哪一种失败"）：
@@ -548,10 +548,10 @@ Unix 用 POSIX errno（`ECONNREFUSED` = 111），而且 Go 在 Windows 上
 ### scan：全量扫描，结果实时写入 CSV
 
 ```bash
-cf-route-tester scan                       # 全部目标测一遍，写入 data/results.csv
+cf-route-tester scan                       # 全部目标测一遍，按日期时间命名结果文件
 cf-route-tester scan --limit 300           # 只扫前 300 个（先验证链路是否通）
 cf-route-tester scan --out my.csv          # 换一个结果文件
-cf-route-tester scan --append              # 追加到已有文件（默认每次覆盖）
+cf-route-tester scan --append              # 追加到指定文件（需配合 --out）
 
 # 先按国家测 TCP，再按延迟挑一批跟踪——不必一次跟几千个。
 cf-route-tester scan  --target-country DE --out de.csv   # 只测德国
@@ -560,6 +560,25 @@ cf-route-tester scan --trace               # 对**探测成功**的目标做线�
 cf-route-tester scan --country cn --province Sample Province --city Sample City \
                     --isp "China Mobile" --asn 9808
 ```
+
+#### 结果文件默认按日期时间命名
+
+`--out` **留空**（默认）时，结果写到 `data/results-<日期时间>.csv`：
+
+```text
+data/results-20261005-031500.csv
+```
+
+**每跑一轮就是一个新文件，不会覆盖上一轮。** 这一点是刻意的：以前默认
+写死 `data/results.csv`，而"覆盖"又是默认行为，于是想对比不同国家、不同
+并发下的表现时就只能重测——两轮的条件也不可能完全一致。现在直接在文件
+管理器里并排看即可，按文件名排序就是按时间排序。
+
+同一秒内跑两轮也不会撞车（`--limit 1` 的扫描几百毫秒就结束，脚本里连着
+跑很常见），这时第二个文件带 `-2` 后缀。
+
+想写进同一个文件才需要显式给 `--out` 并加 `--append`。
+
 
 输出示例（真实运行结果）：
 
@@ -587,7 +606,7 @@ elapsed:     3.07s
 
 因此 `scan` 与图形界面的扫描：
 
-- **不写数据库**。跑完只有 `data/results.csv`（以及日志），不会有 `.db` 文件；
+- **不写数据库**。跑完只有一份 `data/results-<日期时间>.csv`（以及日志），不会有 `.db` 文件；
 - **没有会话（session）**。每次 scan 就是一次独立的测量，没有会话 ID 这回事；
 - **没有续测（resume）**。中断就是中断，工具不假装知道你想不想接着跑；
 - **不做去重**。重跑就再写一遍，想保留多轮结果就加 `--append`。
@@ -606,7 +625,7 @@ Ctrl+C / 进程被杀 / 断电
 
 ```text
 $ scan --limit 12 ... &        # 中途 Ctrl+C
-$ wc -l data/results.csv
+$ wc -l data/results-*.csv
 3                              # 表头 + 2 行，已完成的两条都在
 ```
 
@@ -637,8 +656,8 @@ error_type, error_message, hop_count, as_path, hops, client_version, cca2
 真实数据行：
 
 ```csv
-2026-10-03T18:00:17Z,159.60.146.81:443,159.60.146.81,443,true,284.683,,,,,,0.1.11,US
-2026-10-03T18:00:18Z,45.63.67.144:443,45.63.67.144,443,false,,timeout,dial tcp4 45.63.67.144:443: i/o timeout,,,,0.1.11,US
+2026-10-03T18:00:17Z,159.60.146.81:443,159.60.146.81,443,true,284.683,,,,,,0.1.12,US
+2026-10-03T18:00:18Z,45.63.67.144:443,45.63.67.144,443,false,,timeout,dial tcp4 45.63.67.144:443: i/o timeout,,,,0.1.12,US
 ```
 
 **失败时 `latency_ms` 是空单元格，不是 `0`。** 这一点很重要：
@@ -736,7 +755,7 @@ traced:      10 (ok 10)   <- Level 2: 只对那 10 个成功的
 连通 45.63.67.144:443  258.5 ms  落地 US/Illinois/Elk Grove Village
 TCP 探测完成：5 个目标，成功 5，失败 0
 测量完成：用时 0.3s，成功 5，失败 0，写入 5 行
-结果文件：data/results.csv
+结果文件：data/results-20261005-031500.csv
 ```
 
 失败时给出**分类**（`timeout` / `refused` / …）而不是整条错误信息：
@@ -1383,7 +1402,7 @@ IDENTICAL — export is reproducible
 {
   "schema_version": 1,
   "kind": "measurement",
-  "client_version": "0.1.11",
+  "client_version": "0.1.12",
   "target_id": "159.60.146.81:443",
   "ip": "159.60.146.81",
   "port": 443,
@@ -2116,6 +2135,8 @@ cf-route-tester/
 | --- | --- |
 | `csvstore.go` | 结果文件的追加写入器。三条约定：**每行写完立即 `Flush`**（中断不丢已完成结果）、**表头只在文件为空时写一次**（追加模式不重复写，否则表头会落在文件中间）、**不做会话与恢复**。未测到的延迟写空单元格而不是 `0`（0ms 与"没测到"在表格里含义不同）。`SanitizeErrorMessage` 在写入前去掉本机文件路径，但保留目标地址。 |
 | `read.go` | CSV 的**读取**侧：`ReadAll`（按列名定位，因此老文件缺 `cca2` 也能读；坏行跳过而不是让整份结果打不开）、`Sort`（延迟/线路/目标，没测到的一律排最后）、`Countries`（按国家统计）、`CollapseByTarget`（把同一目标的探测行与跟踪行合并成一行，否则表格里同一目标会出现两次、其中一次「线路是空的」）。 |
+| `path.go` | 结果文件默认按日期时间命名（`results-20261005-031500.csv`）：**每轮一个独立文件**。以前默认写死 `data/results.csv` 且不追加，于是每跑一轮就静默覆盖上一轮。`UniquePathAmong` 处理同一秒跑两轮的情况——时间戳只到秒，而 `--limit 1` 几百毫秒就结束，光查磁盘也不够（名字是测量前定的，文件要到写第一行时才创建）。 |
+| `path_test.go` | 名字可排序（按文件名排序即按时间）、格式钉住（**不能有冒号**，Windows 上非法）、同名时换名字、目录也算被占用、连续取两次名字不重复。 |
 | `read_test.go` | 写出去再读回来一致、**老文件少一列也不错位**、末行被写坏时前面的行完好、未闭合引号的行为（CSV 语义会吞掉余下内容，这里固定住事实）、排序把「没测到」排最后且顺序稳定、国家统计、合并规则（取最快延迟、保留线路、成功过就不留失败原因）。 |
 | `csvstore_test.go` | 表头与列数、**不调用 Close 也不丢数据**（模拟进程被杀）、追加不重复表头、未测延迟为空、并发写入不丢行不串行、特殊字符转义、路径清洗（含 `i/o` 不被误判为路径）、超长信息按 rune 边界截断、父目录自动创建、重复 Close 幂等。 |
 
@@ -2126,6 +2147,8 @@ cf-route-tester/
 | `server.go` | HTTP 服务：路由、内嵌页面、SSE 进度推送、单次扫描约束、优雅关闭。安全默认开启且**不提供关闭开关**：进程级随机令牌（常数时间比较）、`Host` 回环校验（防 DNS rebinding）、变更请求的 `Origin` 校验（防 CSRF）。 |
 | `results.go` | 两段式流程的接口：`/api/countries`（目标列表的国家分布）、`/api/results`（读 CSV 返回排好序的行，**排序在截断之前做**，否则「最快的那个」会取决于文件顺序）、`/api/trace/preview`、`/api/trace`。跟踪只收**筛选条件**而不收目标列表：CSV 是唯一数据源，让界面回传目标等于承认「界面手里那份」才是真相。 |
 | `results_test.go` | 结果表格与国家清单的口径：**可选项清单不随筛选收缩**（勾了美国之后清单里不能只剩美国，否则想换一个国家也无从选起——这正是前端曾被迫多发一次请求绕过去的原因）、同一目标的探测行与跟踪行合并成一行、结果文件不存在不算错误。请求走真实 HTTP，因此顺带覆盖 Host 必须是本机与 token 两道访问控制。 |
+| `resultspath.go` | 管理当前结果文件。三种操作含义不同，**不能共用一个静态默认值**：测量要新文件（不覆盖的落点）、跟踪要追加到刚测出的那份、读取要当前那份。`ResultsDir` 从配置的文件路径里取**目录**——直接当目录用会得到 `data/results.csv/results-....csv` 这种把文件当目录的嵌套路径（实测踩过）。 |
+| `resultspath_test.go` | 目录推导（含空路径与只有文件名的回退）、当前文件稳定不跳动、测量每次要新文件（**即使同一秒**）、显式路径优先且空值不覆盖它、按名字排序即按时间排序。 |
 | `assets/index.html` | 界面本体，原生 HTML/CSS/JS（不用框架，因此不需要 Node 工具链），通过 `go:embed` 打进二进制。 |
 | `browser_windows.go` | 用默认浏览器打开地址（`cmd /c start` 需要一个空标题参数，否则 URL 会被当成窗口标题而不打开）。 |
 | `browser_darwin.go` | 用 `open` 打开。 |
@@ -2140,7 +2163,7 @@ cf-route-tester/
 
 | 文件 | 作用 |
 | --- | --- |
-| `version.go` | 程序版本（`0.1.11`）、公开数据 schema 版本（`1`）、构建期注入的 commit 与构建时间。`SchemaVersion` 独立于程序版本：程序可以频繁升级，公开数据结构不变它就不变。 |
+| `version.go` | 程序版本（`0.1.12`）、公开数据 schema 版本（`1`）、构建期注入的 commit 与构建时间。`SchemaVersion` 独立于程序版本：程序可以频繁升级，公开数据结构不变它就不变。 |
 | `version_test.go` | 保证版本字段永不为空（公开数据里不能出现空字符串版本号）。 |
 
 ### `internal/model/` — 核心数据模型

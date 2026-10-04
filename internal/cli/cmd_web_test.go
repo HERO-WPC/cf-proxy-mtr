@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -100,24 +99,19 @@ func TestWebRejectsUnknownFlag(t *testing.T) {
 	}
 }
 
-// TestWebRejectsEmptyOut 验证空 --out 被拒绝。
+// web 的 --out 曾经要求必填，那条断言已经删除。
 //
-// 结果要写进 CSV，空路径会让数据无处可去。
-func TestWebRejectsEmptyOut(t *testing.T) {
-	// 用一个必然空闲的端口并且不打开浏览器，避免真的弹窗；
-	// 但校验发生在起服务之前，因此这里不会真的监听。
-	code, _, stderr := runCLI("web",
-		"--out", "",
-		"--no-browser",
-		"--listen", "127.0.0.1:0",
-		"--log-dir", filepath.Join(t.TempDir(), "logs"))
-	if code != ExitCodeUsage {
-		t.Fatalf("exit code = %d, want %d (stderr=%q)", code, ExitCodeUsage, stderr)
-	}
-	if !strings.Contains(stderr, "--out") {
-		t.Errorf("stderr = %q, want it to name --out", stderr)
-	}
-}
+// 为什么不是改成"断言它被接受"：web 命令的职责就是**一直运行**的
+// 本地服务，runCLI 会一直阻塞下去（实测把 cli 包的测试拖到 240 秒超时）。
+// 而这条路径真正需要验证的是"空路径时结果文件落在哪"，
+// 那件事在它自己的位置上测更直接：
+//
+//   - webui.TestResultsDirTakesDirectoryOfConfiguredPath
+//     空配置 → data 目录
+//   - csvstore.TestTimestampedPathIsSortable / TestUniquePathAvoidsOverwriting
+//     自动命名的格式，以及同名时换一个名字
+//
+// 现在留空表示"按日期时间自动命名"，每轮一份独立结果，不再覆盖。
 
 // TestWebIsNotInRoadmap 验证 web 已经实现，
 // 不再出现在"规划中的命令"里。

@@ -177,8 +177,12 @@ type ProgressEvent struct {
 //   - **跟踪只对成功的目标做**：连不上的目标追了也没意义。
 func (s *Service) RunCSVScan(ctx context.Context, opts CSVScanOptions) (*CSVScanResult, error) {
 	// ---- 1) 参数校验（在任何副作用之前） ----
+	//
+	// 路径留空**不是错误**：那是"按日期时间自动命名"的意思。
+	// 以前这里要求必填，而两个调用方都各自填了一个固定的
+	// data/results.csv —— 于是每跑一轮就覆盖上一轮，且没有任何提示。
 	if strings.TrimSpace(opts.OutputPath) == "" {
-		return nil, fmt.Errorf("%w: an output CSV path is required", ErrUsage)
+		opts.OutputPath = csvstore.UniquePath(csvstore.TimestampedPath(csvstore.DefaultDir, time.Now()))
 	}
 	if opts.Limit < 0 {
 		return nil, fmt.Errorf("%w: limit must not be negative", ErrUsage)

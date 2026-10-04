@@ -122,6 +122,12 @@ type Server struct {
 	currentMu     sync.Mutex
 	currentTarget string
 
+	// resultsPath 是"当前结果文件"：测量时生成新的，跟踪与读取用它。
+	//
+	// 见 resultspath.go 的说明：测量要新文件，跟踪要追加到刚测出的那份，
+	// 读取要当前那份——三者含义不同，不能共用一个静态默认值。
+	resultsFile resultsPathState
+
 	httpServer *http.Server
 	listener   net.Listener
 
@@ -459,7 +465,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	payload := map[string]any{
-		"path":        s.resultsPath(),
+		"path":        s.defaultCSVPath(),
 		"scanning":    s.isScanning(),
 		"last_scan":   s.lastOutcome(),
 		"rows":        int64(0),
@@ -467,12 +473,12 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"modified_at": "",
 	}
 
-	info, err := os.Stat(s.resultsPath())
+	info, err := os.Stat(s.defaultCSVPath())
 	if err == nil {
 		payload["size_bytes"] = info.Size()
 		payload["modified_at"] = info.ModTime().UTC().Format(time.RFC3339)
 		// 行数减 1 是表头；文件里只有表头时算 0 行。
-		if rows, countErr := countCSVRows(s.resultsPath()); countErr == nil {
+		if rows, countErr := countCSVRows(s.defaultCSVPath()); countErr == nil {
 			if rows > 0 {
 				rows--
 			}
@@ -481,14 +487,6 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, payload)
-}
-
-// resultsPath 返回当前结果文件路径。
-func (s *Server) resultsPath() string {
-	if path := strings.TrimSpace(s.cfg.DefaultCSVPath); path != "" {
-		return path
-	}
-	return DefaultCSVPath
 }
 
 // countCSVRows 数一个 CSV 的数据行数（含表头）。
@@ -616,12 +614,15 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 func (s *Server) runScan(ctx context.Context, req scanRequest, cancel context.CancelFunc) {
 	defer cancel()
 
+	// 路径留空 = **新文件**（按日期时间命名）。
+	//
+	// 这是"不覆盖上一轮"的落点：测量天然产生一份独立结果。
+	// 显式给了路径就尊重它，并记为当前文件，供跟踪与读取使用。
 	outputPath := strings.TrimSpace(req.OutputPath)
 	if outputPath == "" {
-		outputPath = s.cfg.DefaultCSVPath
-	}
-	if strings.TrimSpace(outputPath) == "" {
-		outputPath = DefaultCSVPath
+		outputPath = s.resultsFile.next(ResultsDir(s.cfg.DefaultCSVPath))
+	} else {
+		s.resultsFile.set(outputPath)
 	}
 
 	opts := service.CSVScanOptions{

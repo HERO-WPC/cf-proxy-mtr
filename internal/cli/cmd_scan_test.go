@@ -157,22 +157,34 @@ func TestScanDoesNotCreateDatabase(t *testing.T) {
 	}
 }
 
-// TestScanRejectsEmptyOut 验证空 --out 被拒绝。
+// TestScanEmptyOutAutoNames 验证空 --out 不再报错，而是自动命名。
 //
-// 结果无处可去时必须明确报错，而不是静默测完什么也没留下。
-func TestScanRejectsEmptyOut(t *testing.T) {
+// 契约变过一次：以前空 --out 是用法错误，默认值又写死成
+// data/results.csv，于是每跑一轮覆盖上一轮且没有提示。现在留空表示
+// "按日期时间自动命名"，每轮一份独立结果。
+func TestScanEmptyOutAutoNames(t *testing.T) {
+	// 同 service 那条：自动命名是相对路径，会把文件写进包目录。
+	t.Chdir(t.TempDir())
+
 	body, listeners := probeFixture(t, []int{0})
 	defer closeAll(listeners)
 
 	cache := writeScanCache(t, body)
 	dir := t.TempDir()
 
-	code, _, stderr := runCLI(scanCSVArgs(cache, "", filepath.Join(dir, "collector.json"))...)
-	if code != ExitCodeUsage {
-		t.Fatalf("exit code = %d, want %d (stderr=%q)", code, ExitCodeUsage, stderr)
+	code, stdout, stderr := runCLI(scanCSVArgs(cache, "", filepath.Join(dir, "collector.json"))...)
+	if code != ExitCodeOK {
+		t.Fatalf("exit code = %d, want %d (stderr=%q)", code, ExitCodeOK, stderr)
 	}
-	if !strings.Contains(stderr, "--out") {
-		t.Errorf("stderr = %q, want it to name --out", stderr)
+
+	// 使用者必须能从输出里知道结果落在哪——自动命名不能让文件"找不到"。
+	if !strings.Contains(stdout+stderr, "results-") {
+		t.Errorf("output does not report the auto-generated file name:\nstdout=%s\nstderr=%s",
+			stdout, stderr)
+	}
+	// 扫描开始前那句提示也不能说"覆盖"：那会让人以为上一轮要没了。
+	if strings.Contains(stdout, "（覆盖）") {
+		t.Errorf("stdout still claims it will overwrite:\n%s", stdout)
 	}
 }
 

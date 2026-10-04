@@ -71,3 +71,8 @@ coverage.html
 *~
 .DS_Store
 Thumbs.db
+
+# 测试若用到相对的默认目录，会在包目录下生成 data/。
+# 那属于测试残留，不该进版本库（根目录的 data/ 另有自己的 .gitignore）。
+internal/*/data/
+internal/*/*/data/

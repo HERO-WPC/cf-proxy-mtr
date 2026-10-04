@@ -244,9 +244,16 @@ func (s *Server) handleTrace(w http.ResponseWriter, r *http.Request) {
 func (s *Server) runTrace(ctx context.Context, req traceRequest, cancel context.CancelFunc) {
 	defer cancel()
 
+	// 跟踪要**追加到当前结果文件**，而不是新建一份。
+	//
+	// 这里刻意不用 next()：跟踪是在给刚测出的那份结果补线路信息，
+	// 写成另一个文件会让结果表格突然找不到自己的线路——而且使用者
+	// 看着"跟踪成功了"却看不到任何变化。
 	path := strings.TrimSpace(req.OutputPath)
 	if path == "" {
 		path = s.defaultCSVPath()
+	} else {
+		s.resultsFile.set(path)
 	}
 
 	started := time.Now().UTC()
@@ -301,12 +308,13 @@ func (s *Server) runTrace(ctx context.Context, req traceRequest, cancel context.
 	s.currentMu.Unlock()
 }
 
-// defaultCSVPath 返回结果 CSV 的路径。
+// defaultCSVPath 返回**当前**结果文件的路径。
+//
+// 调用方没给 path 时用它。一轮都没跑过时返回一个尚不存在的名字
+// （读取接口会如实报告 exists=false），而不是回落到一个固定名字——
+// 固定名字会让"读哪一份"取决于上一次是谁写的。
 func (s *Server) defaultCSVPath() string {
-	if path := strings.TrimSpace(s.cfg.DefaultCSVPath); path != "" {
-		return path
-	}
-	return DefaultCSVPath
+	return s.resultsFile.current(ResultsDir(s.cfg.DefaultCSVPath))
 }
 
 // resultsResponse 是 /api/results 的响应。

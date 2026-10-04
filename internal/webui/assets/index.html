@@ -235,14 +235,14 @@
         </div>
         <div>
           <label for="output">结果文件（CSV）</label>
-          <input type="text" id="output" placeholder="data/results.csv">
+          <input type="text" id="output" placeholder="留空 = 按日期时间自动命名">
         </div>
       </div>
 
       <div style="margin-top:12px">
         <div class="check">
           <input type="checkbox" id="append">
-          <label for="append" style="margin:0">追加到已有文件（不选则覆盖）</label>
+          <label for="append" style="margin:0">追加到指定文件（仅在填了上面的路径时有意义）</label>
         </div>
       </div>
 
@@ -253,7 +253,10 @@
       </div>
       <div class="hint">
         每测完一个目标就立刻写入 CSV，所以中途停掉也不会丢已经测完的结果。结果<b>只</b>写 CSV，
-        不使用数据库。想保留上一轮结果就勾选「追加」。
+        不使用数据库。<br>
+        路径<b>留空</b>时按日期时间自动命名（如 <code>data/results-20261005-031500.csv</code>），
+        因此<b>每跑一轮都是一个独立文件，不会覆盖上一轮</b>——想对比不同国家、不同并发的
+        结果时直接并排看。想写进同一个文件才需要填路径并勾上「追加」。
       </div>
     </div>
   </section>

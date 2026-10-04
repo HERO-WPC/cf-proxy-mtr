@@ -111,10 +111,13 @@ func scanFlagSet(p *scanParams) *flag.FlagSet {
 	fs.Var(&p.timeout, "timeout", "单个 TCP 连接超时（默认 "+probe.DefaultTimeout.String()+"）")
 	fs.IntVar(&p.limit, "limit", 0, "只扫描前 N 个目标（0 表示全部，用于快速验证）")
 
-	fs.StringVar(&p.out, "out", "data/results.csv", "结果 CSV 路径（每测完一个目标就写入一行）")
+	fs.StringVar(&p.out, "out", "",
+		"结果 CSV 路径（每测完一个目标就写入一行）。留空 = 按日期时间自动命名"+
+			"（如 data/results-20261005-031500.csv），因此不会覆盖上一轮")
 	fs.StringVar(&p.identityPath, "identity", identity.DefaultPath, "本地匿名标识文件路径（collector_id）")
 
-	fs.BoolVar(&p.appendOut, "append", false, "追加到已有结果文件（默认覆盖）")
+	// 自动命名之后"覆盖"已经不会发生，这个开关只在显式指定路径时才有意义。
+	fs.BoolVar(&p.appendOut, "append", false, "追加到指定文件（仅在显式给了 --out 时有意义）")
 
 	fs.BoolVar(&p.trace, "trace", false, "对**探测成功**的目标执行线路跟踪（需要 NextTrace）")
 	fs.StringVar(&p.traceBinary, "trace-binary", trace.DefaultBinary,
@@ -238,9 +241,8 @@ func runScan(env *Env, args []string) error {
 	if p.limit < 0 {
 		return usageError("--limit must not be negative")
 	}
-	if strings.TrimSpace(p.out) == "" {
-		return usageError("--out must not be empty (scan writes its results to a CSV file)")
-	}
+	// --out 留空是**允许**的：service 会按日期时间自动命名。
+	// 这里不再拦它——那正是"不会覆盖上一轮"的实现方式。
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -363,13 +365,23 @@ func runScan(env *Env, args []string) error {
 
 // printCSVScanHeader 在扫描开始前说明将要做什么。
 func printCSVScanHeader(w io.Writer, p scanParams) {
-	fmt.Fprintf(w, "output:      %s", p.out)
-	if p.appendOut {
-		fmt.Fprintf(w, "（追加）")
+	if strings.TrimSpace(p.out) == "" {
+		// 路径留空 = 由 service 按日期时间自动命名。
+		//
+		// 这里不能沿用下面的"（覆盖）"：那会让使用者以为要覆盖，
+		// 而实际上恰恰相反——这正是这个默认值要消除的担心。
+		// 具体文件名在扫描结束时由结果汇总打印。
+		fmt.Fprintf(w, "output:      按日期时间自动命名（如 data/results-%s.csv）\n",
+			time.Now().Format("20060102-150405"))
 	} else {
-		fmt.Fprintf(w, "（覆盖）")
+		fmt.Fprintf(w, "output:      %s", p.out)
+		if p.appendOut {
+			fmt.Fprintf(w, "（追加）")
+		} else {
+			fmt.Fprintf(w, "（覆盖）")
+		}
+		fmt.Fprintln(w)
 	}
-	fmt.Fprintln(w)
 
 	if p.limit > 0 {
 		fmt.Fprintf(w, "limit:       %d 个目标\n", p.limit)
