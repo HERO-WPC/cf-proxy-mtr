@@ -379,6 +379,34 @@ func TestDownloadRejectsUnsupportedTarget(t *testing.T) {
 // 与引擎构造的配合
 // ---------------------------------------------------------------------------
 
+// TestResolveBinaryFindsUpstreamAssetName 验证**上游资源名**也能被找到。
+//
+// 这条测试是一次真实缺陷的回归护栏：自动下载存的是上游的文件名
+// （`nexttrace_windows_amd64.exe`），而查找只认 `nexttrace` /
+// `nexttrace.exe`，于是下一次启动找不到、**每次运行都重下 32 MB**。
+// 同样地，按上游说明手工下载后放进 data/bin 的文件也该被发现。
+func TestResolveBinaryFindsUpstreamAssetName(t *testing.T) {
+	asset, err := AssetName("", "")
+	if err != nil {
+		t.Fatalf("AssetName: %v", err)
+	}
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, asset)
+	if err := os.WriteFile(target, []byte("stub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 用默认名字查找：目录里只有上游命名的那份。
+	got, err := resolveBinary(DefaultBinary, []string{dir})
+	if err != nil {
+		t.Fatalf("resolveBinary could not find the downloaded asset name: %v", err)
+	}
+	if filepath.Clean(got) != filepath.Clean(target) {
+		t.Errorf("resolveBinary = %q, want %q", got, target)
+	}
+}
+
 // TestEngineDoesNotDownloadWhenNotAsked 验证默认**不**下载。
 //
 // 这是测试能安全运行的前提：单元测试里构造一个不存在的引擎时

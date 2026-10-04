@@ -208,26 +208,56 @@ func resolveBinary(binaryPath string, searchDirs []string) (string, error) {
 	// 顺序是刻意的：绿色版把 nexttrace 与本程序放在一起时，
 	// 那个文件就是"使用者自己的那份"，比 PATH 里可能存在的
 	// 另一个版本更该被选中。
+	names := candidateNames(binaryPath)
 	for _, dir := range searchDirs {
-		if candidate, ok := lookInDir(dir, binaryPath); ok {
-			return candidate, nil
+		for _, name := range names {
+			if candidate, ok := lookInDir(dir, name); ok {
+				return candidate, nil
+			}
 		}
 	}
 
-	if found, err := exec.LookPath(binaryPath); err == nil {
-		return found, nil
-	}
-
-	// Windows 上 exec.LookPath 已经会补 .exe；这里再兜一次，
-	// 因为用户可能把文件放在当前目录而不是 PATH 里。
-	if runtime.GOOS == "windows" && !strings.HasSuffix(strings.ToLower(binaryPath), ".exe") {
-		if found, err := exec.LookPath(binaryPath + ".exe"); err == nil {
+	for _, name := range names {
+		if found, err := exec.LookPath(name); err == nil {
 			return found, nil
 		}
 	}
 
 	return "", fmt.Errorf("%w: %q not found in the program directory, data/bin, or PATH",
 		fs.ErrNotExist, binaryPath)
+}
+
+// candidateNames 返回查找时应当尝试的文件名。
+//
+// 除了使用者写下的名字，还要认**上游的发布物名**
+// （`nexttrace_windows_amd64.exe` 这种）。两个原因：
+//
+//  1. 自动下载存的就是上游那个名字。若不认它，下次启动就找不到，
+//     于是**每次运行都重下 32 MB**——这是一个真实发生过的缺陷。
+//  2. 使用者按上游说明手工下载后放进 data/bin 时，文件名也是那个。
+func candidateNames(binaryPath string) []string {
+	name := strings.TrimSpace(binaryPath)
+	if name == "" {
+		name = DefaultBinary
+	}
+
+	names := []string{name}
+	if runtime.GOOS == "windows" && !strings.HasSuffix(strings.ToLower(name), ".exe") {
+		names = append(names, name+".exe")
+	}
+
+	// 上游资源名只在"使用者没写扩展名"时补，避免把
+	// nexttrace.exe 也当成别名而多试几次无谓的 stat。
+	if !strings.ContainsAny(name, `/\`) {
+		stem := strings.TrimSuffix(strings.TrimSuffix(name, ".exe"), ".EXE")
+		if stem == DefaultBinary {
+			if asset, err := AssetName("", ""); err == nil && asset != name {
+				names = append(names, asset)
+			}
+		}
+	}
+
+	return names
 }
 
 // lookInDir 在指定目录里找一个可执行文件。
@@ -445,6 +475,31 @@ func NewNextTraceEngine(ctx context.Context, opts EngineOptions) (*NextTraceEngi
 	}
 	engine.resolvedPath = path
 
+	// Windows 的 TCP/UDP 模式还需要 WinDivert 的两个文件。
+	//
+	// 只在**该模式真的需要**时才下载：它是内核驱动，给只用 ICMP
+	// 的人装一个驱动是不合适的。失败也不算致命——ICMP 模式与
+	// TCP 探测都不受影响，因此这里只提示，不返回错误。
+	if opts.AutoDownload && runtime.GOOS == "windows" && WindivertNeeded(engine.Mode) {
+		dir := strings.TrimSpace(opts.DownloadDir)
+		if dir == "" {
+			// 与 nexttrace 放一起：nexttrace 就是从自己所在目录
+			// 找 WinDivert 的。
+			dir = filepath.Dir(path)
+		}
+		if missing := MissingWindivert(dir); len(missing) > 0 {
+			if _, windivertErr := DownloadWindivert(ctx, WindivertOptions{
+				Dir:  dir,
+				GOOS: runtime.GOOS,
+				Logf: opts.Logf,
+			}); windivertErr != nil {
+				logf(opts.Logf,
+					"trace: WinDivert 未能就绪（%v）；TCP/UDP 模式可能失败，ICMP 模式不受影响",
+					windivertErr)
+			}
+		}
+	}
+
 	if !opts.SkipVersionCheck {
 		if avail := checkAvailabilityIn(ctx, path, opts.SearchDirs); avail.Found {
 			engine.version = avail.Version
@@ -453,6 +508,13 @@ func NewNextTraceEngine(ctx context.Context, opts EngineOptions) (*NextTraceEngi
 	}
 
 	return engine, nil
+}
+
+// logf 在 Logf 为空时安全地什么都不做。
+func logf(fn func(string, ...any), format string, args ...any) {
+	if fn != nil {
+		fn(format, args...)
+	}
 }
 
 // explicitPath 报告使用者是否**显式指定了文件路径**。

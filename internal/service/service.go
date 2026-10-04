@@ -170,6 +170,13 @@ type TraceOptions struct {
 	// DownloadDir 是自动下载的落点（空表示程序目录下的 data/bin）。
 	DownloadDir string
 
+	// Logf 接收引擎的进度说明（例如"正在下载 nexttrace / WinDivert"）。
+	//
+	// 引擎把下载进度与下载失败都通过它报告。不接就等于把这些信息
+	// 丢掉——实测踩过：WinDivert 没能下载，而使用者只看到一句
+	// "跟踪失败"，完全不知道原因是驱动缺失。
+	Logf func(format string, args ...any)
+
 	// Workers 是跟踪并发数（<=0 用默认值）。
 	Workers int
 
@@ -455,6 +462,7 @@ func (s *Service) buildTraceEngine(ctx context.Context, opts TraceOptions) (*tra
 	// 自动下载：由调用方决定（零值不下载，见 TraceOptions 的说明）。
 	engineOpts.AutoDownload = opts.AutoDownload
 	engineOpts.DownloadDir = opts.DownloadDir
+	engineOpts.Logf = opts.Logf
 
 	return trace.NewNextTraceEngine(ctx, engineOpts)
 }

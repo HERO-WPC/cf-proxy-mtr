@@ -124,14 +124,14 @@ go run ./tools/release -version 0.2.0
 ```
 
 ```text
-cf-route-tester-0.1.1-windows-amd64.exe     12.40 MiB  # 命令行
-cf-route-tester-gui-0.1.1-windows-amd64.exe 12.41 MiB  # 图形界面（无控制台窗口）
-cf-route-tester-0.1.1-windows-arm64.exe     11.55 MiB
-cf-route-tester-gui-0.1.1-windows-arm64.exe 11.57 MiB
-cf-route-tester-0.1.1-linux-amd64           12.27 MiB
-cf-route-tester-0.1.1-linux-arm64           11.69 MiB
-cf-route-tester-0.1.1-darwin-amd64          12.28 MiB
-cf-route-tester-0.1.1-darwin-arm64          11.69 MiB
+cf-route-tester-0.1.2-windows-amd64.exe     12.50 MiB  # 命令行
+cf-route-tester-gui-0.1.2-windows-amd64.exe 12.52 MiB  # 图形界面（无控制台窗口）
+cf-route-tester-0.1.2-windows-arm64.exe     11.65 MiB
+cf-route-tester-gui-0.1.2-windows-arm64.exe 11.66 MiB
+cf-route-tester-0.1.2-linux-amd64           12.28 MiB
+cf-route-tester-0.1.2-linux-arm64           11.69 MiB
+cf-route-tester-0.1.2-darwin-amd64          12.30 MiB
+cf-route-tester-0.1.2-darwin-arm64          11.71 MiB
 SHA256SUMS      # 8 个产物，与 sha256sum -c 兼容
 release.json    # 版本 / commit / 每个产物的哈希与大小
 ```
@@ -205,7 +205,7 @@ Windows 上直接双击 `cf-route-tester-gui-*.exe` 也可以——那是用
 启动后终端会打印一个带令牌的地址：
 
 ```text
-time="..." level=INFO msg="web: starting" version=0.1.1 platform=windows/amd64 results=data/results.db
+time="..." level=INFO msg="web: starting" version=0.1.2 platform=windows/amd64 results=data/results.db
 time="..." level=INFO msg="webui: listening" url=http://127.0.0.1:8236
 
 请在浏览器中打开（地址里带有本次运行的访问令牌）：
@@ -270,14 +270,14 @@ cf-route-tester --version
 
 ```text
 cf-route-tester
-version: 0.1.1
+version: 0.1.2
 ```
 
 `version --verbose` 输出（含构建细节，便于排查“结果来自哪个版本”）：
 
 ```text
 client:         cf-route-tester
-version:        0.1.1
+version:        0.1.2
 schema_version: 1
 commit:         unknown
 build_date:     unknown
@@ -482,7 +482,7 @@ failures by type:
 `--json` 每条结果一行（自带 `schema_version` 与 `client_version`）：
 
 ```json
-{"schema_version":1,"client_version":"0.1.1","target_id":"45.63.67.144:443","ip":"45.63.67.144","port":443,"success":true,"latency_ms":252.3158,"timestamp":"2026-10-03T11:35:21.8611931Z"}
+{"schema_version":1,"client_version":"0.1.2","target_id":"45.63.67.144:443","ip":"45.63.67.144","port":443,"success":true,"latency_ms":252.3158,"timestamp":"2026-10-03T11:35:21.8611931Z"}
 ```
 
 失败分类（数据库与分析的价值就在于"分得清是哪一种失败"）：
@@ -587,8 +587,8 @@ error_type, error_message, hop_count, as_path, hops, client_version
 真实数据行：
 
 ```csv
-2026-10-03T18:00:17Z,159.60.146.81:443,159.60.146.81,443,true,284.683,,,,,,0.1.1
-2026-10-03T18:00:18Z,45.63.67.144:443,45.63.67.144,443,false,,timeout,dial tcp4 45.63.67.144:443: i/o timeout,,,,0.1.1
+2026-10-03T18:00:17Z,159.60.146.81:443,159.60.146.81,443,true,284.683,,,,,,0.1.2
+2026-10-03T18:00:18Z,45.63.67.144:443,45.63.67.144,443,false,,timeout,dial tcp4 45.63.67.144:443: i/o timeout,,,,0.1.2
 ```
 
 **失败时 `latency_ms` 是空单元格，不是 `0`。** 这一点很重要：
@@ -856,6 +856,43 @@ cf-route-tester scan --trace --trace-download-dir /opt/nt   # 换落点
 ```
 
 图形界面里是跟踪选项下的一个勾选框。
+
+**Windows 的 TCP/UDP 模式：WinDivert 也会自动下载。**
+
+这两个模式要靠 WinDivert 抓包，需要 `WinDivert.dll`（用户态）与
+`WinDivert64.sys`（内核驱动）与 nexttrace 放在同一目录。上游 nexttrace
+的发布物里**只有二进制本体**（实测 v1.7.3 的 99 个资源全是可执行文件，
+没有任何压缩包），所以这两个文件从 WinDivert 自己的发布里取：
+
+```text
+TCP/UDP 模式需要 WinDivert，正在下载 WinDivert-2.2.2-A.zip
+压缩包哈希校验通过
+已安装 .../data/bin/WinDivert.dll（46.5 KB）
+已安装 .../data/bin/WinDivert64.sys（91.9 KB）
+```
+
+**只在 `--trace-mode tcp` / `udp` 且文件缺失时才下载**。ICMP 模式用系统
+自带能力，不需要它——给只用 ICMP 的人装一个内核驱动是不合适的。
+
+下载后比对**钉住的 SHA256**：
+
+```text
+trace: WinDivert 压缩包哈希不符，已放弃
+  期望 63cb4176...
+  实际 ...
+这可能意味着下载被中间人替换。
+```
+
+这是一个会被以管理员权限加载的**内核驱动**，而上游不提供校验和
+（GitHub API 的 `digest` 字段为空），所以由我们记下核对过的哈希。
+走代理时这一点尤其重要：HTTPS 只能证明"来自 github.com"，不能证明
+"是未被改动的原件"。哈希不符是**硬失败**，不会降级成警告，也不会落盘。
+
+WinDivert 是独立项目（[basil00/WinDivert](https://github.com/basil00/WinDivert)），
+有自己的许可证：本项目**不重新分发**它，只在使用者机器上按需下载。
+
+**TCP/UDP 模式仍然需要管理员权限**（内核驱动要加载），所以即使文件齐了，
+普通权限下跟踪也会报 `permission_denied`。想省事就用 ICMP 模式。
 
 **两个边界**：
 
@@ -1296,7 +1333,7 @@ IDENTICAL — export is reproducible
 {
   "schema_version": 1,
   "kind": "measurement",
-  "client_version": "0.1.1",
+  "client_version": "0.1.2",
   "target_id": "159.60.146.81:443",
   "ip": "159.60.146.81",
   "port": 443,
@@ -2045,7 +2082,7 @@ cf-route-tester/
 
 | 文件 | 作用 |
 | --- | --- |
-| `version.go` | 程序版本（`0.1.1`）、公开数据 schema 版本（`1`）、构建期注入的 commit 与构建时间。`SchemaVersion` 独立于程序版本：程序可以频繁升级，公开数据结构不变它就不变。 |
+| `version.go` | 程序版本（`0.1.2`）、公开数据 schema 版本（`1`）、构建期注入的 commit 与构建时间。`SchemaVersion` 独立于程序版本：程序可以频繁升级，公开数据结构不变它就不变。 |
 | `version_test.go` | 保证版本字段永不为空（公开数据里不能出现空字符串版本号）。 |
 
 ### `internal/model/` — 核心数据模型
@@ -2101,6 +2138,8 @@ cf-route-tester/
 | `engine.go` | `TraceEngine` 接口、`Hop` / `TraceResult`、失败分类（含"引擎不存在""权限不足"这类**环境问题**，它们不算线路质量）。 |
 | `ntrace.go` | 外部进程调用：路径解析（PATH / 绝对路径 / 补 `.exe`）、参数构造（含数据源与 PoW 源）、超时、版本查询。 |
 | `fetch.go` | nexttrace 的查找与自动下载。`SearchDirs`（同目录 → `data/bin` → cwd/data/bin）、`AssetName`（上游命名 `nexttrace_<os>_<arch>[.exe]`）、`Download`（原子落盘、体积下限挡住错误页、下载后真的跑一次 `--version`、失败则删掉残骸）。固定版本 `v1.7.3`：跟随 latest 意味着上游某天改了 JSON 结构，使用者的线路名会在毫无征兆的情况下变成空。 |
+| `windivert.go` | Windows TCP/UDP 模式需要的 WinDivert。上游 nexttrace 的发布物里没有它，因此从 WinDivert 官方发布取 zip 并解出 `x64/` 那两份（用后缀匹配，不写死带版本号的顶层目录）。**只在 TCP/UDP 模式且文件缺失时下载**；下载后比对钉住的 SHA256——它是内核驱动，而上游不提供校验和，代理链路上被替换是现实风险，因此哈希不符是硬失败且不落盘。解压先写临时文件再改名，中断不会留下可能被加载的半截驱动。 |
+| `windivert_test.go` | ICMP 模式下**不**下载（判错会让所有 ICMP 用户平白多一个驱动）、解出的是 x64 而非 x86、坏 zip 与缺文件的包被拒、**哈希不符是硬失败且不落盘**、非 Windows 上**一次请求都不发**、缺失检测，以及两个项目的默认版本号都带 `v` 前缀（曾把 `v2.2.2` 写成 `2.2.2`，症状只是一个 404）。 |
 | `fetch_test.go` | 资源名与上游一致、不支持的平台在联网前就被拒绝、同目录优先于 `PATH`、`data/bin` 也在查找范围、`PATH` 兜底仍在、**找不到时的错误列出全部搜索位置**、显式路径判定、下载成功路径、**拒绝 HTML 错误页且不留残骸**、非 200 报错、跑不起来的二进制被清理、以及两条边界：未启用时**一次网络请求都不发**、显式路径失败时不下载别的。 |
 | `provider.go` | 两个「源」选项：`DataProvider`（9 个 GeoIP 源）与 `PowProvider`（NextTrace API v3 的令牌源）。做成受校验类型而不是透传字符串，因为 **nexttrace 拿到不认识的源名不报错、而是换一个源继续跑**——那会让人以为在用 IPInfo 而实际不是，从结果上看不出来。含大小写不敏感与常见简写（`ipinfo` / `ipapi` / `leomoeapi` / `none` …）。 |
 | `parser.go` | NextTrace JSON → `TraceResult` 的归一化。**含纳秒→毫秒换算**、二维 `Hops` 聚合、乱码 `*_en` 字段优先。 |

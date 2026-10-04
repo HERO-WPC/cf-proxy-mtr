@@ -529,6 +529,13 @@ func (s *Service) resolveTraceEngine(ctx context.Context, opts CSVScanOptions) (
 		s.log("scan: 本地 ASN 前缀识别已启用，引擎不再查询 GeoIP（避免 PoW/额度限制）")
 	}
 
+	// 把日志接到引擎上。
+	//
+	// 引擎会借它报告"正在下载 nexttrace / WinDivert"以及下载失败。
+	// 不接的话这些信息全部丢掉——实测踩过：WinDivert 没下下来，
+	// 而使用者只看到"跟踪失败"，完全不知道原因是驱动缺失。
+	traceOpts.Logf = s.log
+
 	return s.buildTraceEngine(ctx, traceOpts)
 }
 
