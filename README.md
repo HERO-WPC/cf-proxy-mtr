@@ -113,7 +113,22 @@ go build -o bin\cf-route-tester.exe .\cmd\cf-route-tester
 bin\cf-route-tester.exe version
 ```
 
-### 生成完整发布包
+**发版约定：每完成一次改动就打一个 tag。** 打 tag 即构建并发布，
+因此"改完了"与"发出去了"之间没有人工步骤——攒着不发会让使用者手上的
+版本悄悄落后于代码，而 issue 里描述的往往是已经修好的行为。
+
+```bash
+# 1) 同步源码里的版本号与文档里的产物清单
+#    （tools/release 会打印真实体积，README / docs/INSTALL.md 按它更新）
+# 2) 提交
+git tag -a v0.1.6 -m "v0.1.6" && git push origin v0.1.6
+```
+
+版本号必须与 tag 一致：工作流按 tag 注入版本，而源码里的常量用于
+`--version`。两者不同会让"二进制自报的版本"与"代码里写的版本"对不上，
+排查问题时非常误导（这一点踩过）。
+
+#### 生成完整发布包
 
 `tools/release` 是一个 Go 程序（任何平台都能跑，只需要 Go 工具链），
 它会先跑 gofmt / vet / test，再交叉编译发布目标，最后生成校验和与发布清单：
@@ -124,14 +139,14 @@ go run ./tools/release -version 0.2.0
 ```
 
 ```text
-cf-route-tester-0.1.4-windows-amd64.exe     12.61 MiB  # 命令行
-cf-route-tester-gui-0.1.4-windows-amd64.exe 12.63 MiB  # 图形界面（无控制台窗口）
-cf-route-tester-0.1.4-windows-arm64.exe     11.75 MiB
-cf-route-tester-gui-0.1.4-windows-arm64.exe 11.76 MiB
-cf-route-tester-0.1.4-linux-amd64           12.39 MiB
-cf-route-tester-0.1.4-linux-arm64           11.75 MiB
-cf-route-tester-0.1.4-darwin-amd64          12.41 MiB
-cf-route-tester-0.1.4-darwin-arm64          11.79 MiB
+cf-route-tester-0.1.5-windows-amd64.exe     12.62 MiB  # 命令行
+cf-route-tester-gui-0.1.5-windows-amd64.exe 12.63 MiB  # 图形界面（无控制台窗口）
+cf-route-tester-0.1.5-windows-arm64.exe     11.75 MiB
+cf-route-tester-gui-0.1.5-windows-arm64.exe 11.77 MiB
+cf-route-tester-0.1.5-linux-amd64           12.39 MiB
+cf-route-tester-0.1.5-linux-arm64           11.75 MiB
+cf-route-tester-0.1.5-darwin-amd64          12.41 MiB
+cf-route-tester-0.1.5-darwin-arm64          11.81 MiB
 SHA256SUMS      # 8 个产物，与 sha256sum -c 兼容
 release.json    # 版本 / commit / 每个产物的哈希与大小
 ```
@@ -220,7 +235,7 @@ Windows 上直接双击 `cf-route-tester-gui-*.exe` 也可以——那是用
 启动后终端会打印一个带令牌的地址：
 
 ```text
-time="..." level=INFO msg="web: starting" version=0.1.4 platform=windows/amd64 results=data/results.db
+time="..." level=INFO msg="web: starting" version=0.1.5 platform=windows/amd64 results=data/results.db
 time="..." level=INFO msg="webui: listening" url=http://127.0.0.1:8236
 
 请在浏览器中打开（地址里带有本次运行的访问令牌）：
@@ -285,14 +300,14 @@ cf-route-tester --version
 
 ```text
 cf-route-tester
-version: 0.1.4
+version: 0.1.5
 ```
 
 `version --verbose` 输出（含构建细节，便于排查“结果来自哪个版本”）：
 
 ```text
 client:         cf-route-tester
-version:        0.1.4
+version:        0.1.5
 schema_version: 1
 commit:         unknown
 build_date:     unknown
@@ -503,7 +518,7 @@ failures by type:
 `--json` 每条结果一行（自带 `schema_version` 与 `client_version`）：
 
 ```json
-{"schema_version":1,"client_version":"0.1.4","target_id":"45.63.67.144:443","ip":"45.63.67.144","port":443,"success":true,"latency_ms":252.3158,"timestamp":"2026-10-03T11:35:21.8611931Z"}
+{"schema_version":1,"client_version":"0.1.5","target_id":"45.63.67.144:443","ip":"45.63.67.144","port":443,"success":true,"latency_ms":252.3158,"timestamp":"2026-10-03T11:35:21.8611931Z"}
 ```
 
 失败分类（数据库与分析的价值就在于"分得清是哪一种失败"）：
@@ -622,8 +637,8 @@ error_type, error_message, hop_count, as_path, hops, client_version, cca2
 真实数据行：
 
 ```csv
-2026-10-03T18:00:17Z,159.60.146.81:443,159.60.146.81,443,true,284.683,,,,,,0.1.4,US
-2026-10-03T18:00:18Z,45.63.67.144:443,45.63.67.144,443,false,,timeout,dial tcp4 45.63.67.144:443: i/o timeout,,,,0.1.4,US
+2026-10-03T18:00:17Z,159.60.146.81:443,159.60.146.81,443,true,284.683,,,,,,0.1.5,US
+2026-10-03T18:00:18Z,45.63.67.144:443,45.63.67.144,443,false,,timeout,dial tcp4 45.63.67.144:443: i/o timeout,,,,0.1.5,US
 ```
 
 **失败时 `latency_ms` 是空单元格，不是 `0`。** 这一点很重要：
@@ -1368,7 +1383,7 @@ IDENTICAL — export is reproducible
 {
   "schema_version": 1,
   "kind": "measurement",
-  "client_version": "0.1.4",
+  "client_version": "0.1.5",
   "target_id": "159.60.146.81:443",
   "ip": "159.60.146.81",
   "port": 443,
@@ -2123,7 +2138,7 @@ cf-route-tester/
 
 | 文件 | 作用 |
 | --- | --- |
-| `version.go` | 程序版本（`0.1.4`）、公开数据 schema 版本（`1`）、构建期注入的 commit 与构建时间。`SchemaVersion` 独立于程序版本：程序可以频繁升级，公开数据结构不变它就不变。 |
+| `version.go` | 程序版本（`0.1.5`）、公开数据 schema 版本（`1`）、构建期注入的 commit 与构建时间。`SchemaVersion` 独立于程序版本：程序可以频繁升级，公开数据结构不变它就不变。 |
 | `version_test.go` | 保证版本字段永不为空（公开数据里不能出现空字符串版本号）。 |
 
 ### `internal/model/` — 核心数据模型
