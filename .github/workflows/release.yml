@@ -101,7 +101,27 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 正文 = 固定的"该下哪个"指引 + 上一个 tag 以来的完整变更链接。
+          #
+          # 不用 gh 的 --generate-notes：它只给一行 changelog，而使用者
+          # 真正需要知道的是"四个 exe 里该下哪个"。实测有人下成了命令行版
+          # 然后双击，只看到一个闪过的黑框。
+          #
+          # 变更链接自己拼而不是靠 gh：需要上一个 tag，用 git describe 取。
+          prev="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          {
+            cat .github/release-notes.md
+            echo
+            echo "## 完整变更"
+            echo
+            if [ -n "$prev" ]; then
+              echo "https://github.com/${GITHUB_REPOSITORY}/compare/${prev}...${GITHUB_REF_NAME}"
+            else
+              echo "这是第一个版本。"
+            fi
+          } > /tmp/release-notes.md
+
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
+            --notes-file /tmp/release-notes.md \
             dist/release/*

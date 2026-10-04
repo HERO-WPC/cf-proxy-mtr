@@ -124,17 +124,32 @@ go run ./tools/release -version 0.2.0
 ```
 
 ```text
-cf-route-tester-0.1.2-windows-amd64.exe     12.50 MiB  # 命令行
-cf-route-tester-gui-0.1.2-windows-amd64.exe 12.52 MiB  # 图形界面（无控制台窗口）
-cf-route-tester-0.1.2-windows-arm64.exe     11.65 MiB
-cf-route-tester-gui-0.1.2-windows-arm64.exe 11.66 MiB
-cf-route-tester-0.1.2-linux-amd64           12.28 MiB
-cf-route-tester-0.1.2-linux-arm64           11.69 MiB
-cf-route-tester-0.1.2-darwin-amd64          12.30 MiB
-cf-route-tester-0.1.2-darwin-arm64          11.71 MiB
+cf-route-tester-0.1.3-windows-amd64.exe     12.50 MiB  # 命令行
+cf-route-tester-gui-0.1.3-windows-amd64.exe 12.52 MiB  # 图形界面（无控制台窗口）
+cf-route-tester-0.1.3-windows-arm64.exe     11.65 MiB
+cf-route-tester-gui-0.1.3-windows-arm64.exe 11.66 MiB
+cf-route-tester-0.1.3-linux-amd64           12.28 MiB
+cf-route-tester-0.1.3-linux-arm64           11.69 MiB
+cf-route-tester-0.1.3-darwin-amd64          12.30 MiB
+cf-route-tester-0.1.3-darwin-arm64          11.71 MiB
 SHA256SUMS      # 8 个产物，与 sha256sum -c 兼容
 release.json    # 版本 / commit / 每个产物的哈希与大小
 ```
+
+**下载哪个文件？** Windows 上有两个名字很像的可执行文件：
+
+| 文件 | 用法 |
+| --- | --- |
+| `cf-route-tester-gui-<版本>-windows-amd64.exe` | **图形界面：双击这个** |
+| `cf-route-tester-<版本>-windows-amd64.exe` | 命令行：必须带子命令运行 |
+
+双击**命令行版**只会看到黑框一闪——它需要参数，没有参数就只能打印用法后
+退出，而窗口随进程结束立刻关闭。为了不至于让人一脸茫然，命令行版在
+"专为自己新建的控制台里运行且没有参数"（也就是双击）时会**停下来**，
+给出该下哪个文件的提示并等按键；在已有终端里运行则不会停，以免打断脚本。
+
+Linux / macOS 只有命令行版：这些平台的启动方式本来就不会为程序新开一个
+退出即消失的终端窗口，多一个产物只会让人犹豫该下哪个。
 
 图形界面入口**只有 Windows 需要**：其它平台的启动器（`.app`/`.desktop`）
 本来就不会显示终端窗口，多一份产物只会让用户困惑该下哪个。
@@ -205,7 +220,7 @@ Windows 上直接双击 `cf-route-tester-gui-*.exe` 也可以——那是用
 启动后终端会打印一个带令牌的地址：
 
 ```text
-time="..." level=INFO msg="web: starting" version=0.1.2 platform=windows/amd64 results=data/results.db
+time="..." level=INFO msg="web: starting" version=0.1.3 platform=windows/amd64 results=data/results.db
 time="..." level=INFO msg="webui: listening" url=http://127.0.0.1:8236
 
 请在浏览器中打开（地址里带有本次运行的访问令牌）：
@@ -270,14 +285,14 @@ cf-route-tester --version
 
 ```text
 cf-route-tester
-version: 0.1.2
+version: 0.1.3
 ```
 
 `version --verbose` 输出（含构建细节，便于排查“结果来自哪个版本”）：
 
 ```text
 client:         cf-route-tester
-version:        0.1.2
+version:        0.1.3
 schema_version: 1
 commit:         unknown
 build_date:     unknown
@@ -482,7 +497,7 @@ failures by type:
 `--json` 每条结果一行（自带 `schema_version` 与 `client_version`）：
 
 ```json
-{"schema_version":1,"client_version":"0.1.2","target_id":"45.63.67.144:443","ip":"45.63.67.144","port":443,"success":true,"latency_ms":252.3158,"timestamp":"2026-10-03T11:35:21.8611931Z"}
+{"schema_version":1,"client_version":"0.1.3","target_id":"45.63.67.144:443","ip":"45.63.67.144","port":443,"success":true,"latency_ms":252.3158,"timestamp":"2026-10-03T11:35:21.8611931Z"}
 ```
 
 失败分类（数据库与分析的价值就在于"分得清是哪一种失败"）：
@@ -587,8 +602,8 @@ error_type, error_message, hop_count, as_path, hops, client_version
 真实数据行：
 
 ```csv
-2026-10-03T18:00:17Z,159.60.146.81:443,159.60.146.81,443,true,284.683,,,,,,0.1.2
-2026-10-03T18:00:18Z,45.63.67.144:443,45.63.67.144,443,false,,timeout,dial tcp4 45.63.67.144:443: i/o timeout,,,,0.1.2
+2026-10-03T18:00:17Z,159.60.146.81:443,159.60.146.81,443,true,284.683,,,,,,0.1.3
+2026-10-03T18:00:18Z,45.63.67.144:443,45.63.67.144,443,false,,timeout,dial tcp4 45.63.67.144:443: i/o timeout,,,,0.1.3
 ```
 
 **失败时 `latency_ms` 是空单元格，不是 `0`。** 这一点很重要：
@@ -1333,7 +1348,7 @@ IDENTICAL — export is reproducible
 {
   "schema_version": 1,
   "kind": "measurement",
-  "client_version": "0.1.2",
+  "client_version": "0.1.3",
   "target_id": "159.60.146.81:443",
   "ip": "159.60.146.81",
   "port": 443,
@@ -2082,7 +2097,7 @@ cf-route-tester/
 
 | 文件 | 作用 |
 | --- | --- |
-| `version.go` | 程序版本（`0.1.2`）、公开数据 schema 版本（`1`）、构建期注入的 commit 与构建时间。`SchemaVersion` 独立于程序版本：程序可以频繁升级，公开数据结构不变它就不变。 |
+| `version.go` | 程序版本（`0.1.3`）、公开数据 schema 版本（`1`）、构建期注入的 commit 与构建时间。`SchemaVersion` 独立于程序版本：程序可以频繁升级，公开数据结构不变它就不变。 |
 | `version_test.go` | 保证版本字段永不为空（公开数据里不能出现空字符串版本号）。 |
 
 ### `internal/model/` — 核心数据模型
