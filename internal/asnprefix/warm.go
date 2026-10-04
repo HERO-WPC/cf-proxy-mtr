@@ -26,6 +26,9 @@ type Warmer struct {
 	done     chan struct{}
 	resolver *Resolver
 	once     sync.Once
+
+	// cancel 停掉后台抓取，供 Cancel 使用。
+	cancel context.CancelFunc
 }
 
 // Warm 在后台开始加载前缀，立即返回。
@@ -33,14 +36,40 @@ type Warmer struct {
 // 返回的 Warmer 在需要时用 Get 取值。ctx 取消会让抓取尽快停止，
 // Get 仍然能拿到"已经抓到的部分"——半份前缀比没有强。
 func Warm(ctx context.Context, opts Options) *Warmer {
-	w := &Warmer{done: make(chan struct{})}
+	// 派生一个子 context：调用方因此可以在"发现根本不需要前缀"时
+	// 立刻停掉抓取，而不是让它把整张表下完。
+	fetchCtx, cancel := context.WithCancel(ctx)
+
+	w := &Warmer{done: make(chan struct{}), cancel: cancel}
 
 	go func() {
 		defer close(w.done)
-		w.resolver = Load(ctx, opts)
+		w.resolver = Load(fetchCtx, opts)
 	}()
 
 	return w
+}
+
+// Cancel 停止后台抓取，并**等待协程真正退出**。
+//
+// 两件事都要，缺一不可：
+//
+//  1. **取消**：不然"不需要前缀"的那条路径（例如跟踪引擎不可用）
+//     会白白把整张 iptoasn 表下完，使用者为此白等几十秒。
+//  2. **等待退出**：抓取过程中会往调用方给的日志回调里写字。协程还
+//     活着就返回，等于让它在**调用方已经返回之后**继续写输出——
+//     实测这是一个真实的数据竞争（`-race` 报 bytes.Buffer 读写冲突），
+//     而且那次写入可能落在一个已经被丢弃的缓冲区上。
+//
+// 幂等，nil 安全。
+func (w *Warmer) Cancel() {
+	if w == nil {
+		return
+	}
+	if w.cancel != nil {
+		w.cancel()
+	}
+	<-w.done
 }
 
 // Get 等待加载完成并返回 Resolver。

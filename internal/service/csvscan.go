@@ -370,12 +370,26 @@ func (s *Service) RunCSVScan(ctx context.Context, opts CSVScanOptions) (*CSVScan
 			// 如实记录，让调用方展示原因。
 			s.log("scan: trace engine unavailable: %v", engineErr)
 			result.TraceUnavailable = engineErr.Error()
+
+			// 不会用到前缀了，**停掉后台抓取并等它退出**。
+			//
+			// 不停的话：使用者会白等一次整表下载（约 8.6 MB），
+			// 而且那个协程会在本函数返回之后继续往调用方的日志
+			// 回调里写字——实测 `-race` 报的就是这个（bytes.Buffer
+			// 的读写冲突），写入甚至可能落在一个已经被丢弃的缓冲区上。
+			warmer.Cancel()
 		} else {
 			// 取预热结果。通常此时已经就绪（探测阶段用掉了更多时间），
 			// 因此这里不会阻塞；只有极小规模的扫描才可能真等一会儿。
 			prefixes := awaitPrefixWarmup(warmer, opts, s.log)
 			s.runTracePhase(ctx, store, engine, prefixes, targets, successful, opts, result)
 		}
+	} else {
+		// 其它不跟踪的情况（没开跟踪、被中断、没有成功目标）：
+		// 预热当时确实启动了（它是无条件提前启动以与探测并行的），
+		// 这里同样要收干净，否则同一个"返回后还有协程在写日志"的问题
+		// 会以另一种方式出现。
+		warmer.Cancel()
 	}
 
 	result.FinishedAt = time.Now().UTC()
