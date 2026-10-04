@@ -256,6 +256,13 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/events/log", s.handleEventsLog)
 	mux.HandleFunc("/api/log", s.handleLog)
 
+	// "选国家 -> 测 TCP -> 挑一批 -> 跟踪"这条流程的接口。
+	// 见 results.go 的说明：跟踪是单独一次请求，且只收筛选条件。
+	mux.HandleFunc("/api/countries", s.handleCountries)
+	mux.HandleFunc("/api/results", s.handleResults)
+	mux.HandleFunc("/api/trace", s.handleTrace)
+	mux.HandleFunc("/api/trace/preview", s.handleTracePreview)
+
 	s.httpServer = &http.Server{
 		Handler:           s.withSecurityHeaders(mux),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -537,6 +544,12 @@ type scanRequest struct {
 	// NoAutoDownload 为真时不在缺 nexttrace 时自动下载。
 	NoAutoDownload bool `json:"no_auto_download"`
 
+	// Countries 只测这些国家的目标（空表示不筛选）。
+	//
+	// 口径是目标的 Location.CCA2，与 /api/countries 报的是同一个字段
+	// ——否则界面上的数字会和实际测出来的对不上。
+	Countries []string `json:"countries"`
+
 	// OutputPath 是结果 CSV 的路径（留空用默认值）。
 	//
 	// 结果只进 CSV：没有会话、没有数据库、没有续测。
@@ -617,6 +630,7 @@ func (s *Server) runScan(ctx context.Context, req scanRequest, cancel context.Ca
 		Workers:    req.Workers,
 		Timeout:    durationMS(req.TimeoutMS),
 		Limit:      req.Limit,
+		Countries:  req.Countries,
 		Trace:      req.Trace,
 		TraceConfig: service.TraceOptions{
 			Binary:       strings.TrimSpace(req.TraceBinary),

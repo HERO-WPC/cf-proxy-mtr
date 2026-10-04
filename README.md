@@ -531,6 +531,10 @@ cf-route-tester scan                       # 全部目标测一遍，写入 data
 cf-route-tester scan --limit 300           # 只扫前 300 个（先验证链路是否通）
 cf-route-tester scan --out my.csv          # 换一个结果文件
 cf-route-tester scan --append              # 追加到已有文件（默认每次覆盖）
+
+# 先按国家测 TCP，再按延迟挑一批跟踪——不必一次跟几千个。
+cf-route-tester scan  --target-country DE --out de.csv   # 只测德国
+cf-route-tester trace --from de.csv --max-latency 200ms --limit 10
 cf-route-tester scan --trace               # 对**探测成功**的目标做线路跟踪
 cf-route-tester scan --country cn --province Sample Province --city Sample City \
                     --isp "China Mobile" --asn 9808
@@ -596,14 +600,24 @@ $ wc -l data/results.csv
 
 ```text
 timestamp_utc, target, ip, port, success, latency_ms,
-error_type, error_message, hop_count, as_path, hops, client_version
+error_type, error_message, hop_count, as_path, hops, client_version, cca2
 ```
+
+`cca2` 是**目标**的国家两位码（ISO 3166-1 alpha-2，来自目标列表的
+`location.cca2`）。它放在 CSV 里而不是事后去目标列表里查：CSV 是这个
+项目唯一的数据源，界面按国家筛选/分组时不能依赖"目标列表此刻是否还在、
+内容是否已经变了"。新列一律追加在末尾——列名与列序是契约。
+
+上游数据里 `location.country` 与 `location.cca2` 有约 18% 的条目
+**互相矛盾**（例如 `country=FI` 而 `cca2=SE`）。本项目**只认 `cca2`**：
+界面上的国家数字、`--target-country` 的筛选、CSV 里的这一列，
+三者用同一个字段，因此"下拉框说 3670 个"与"筛出来 3670 个"必然一致。
 
 真实数据行：
 
 ```csv
-2026-10-03T18:00:17Z,159.60.146.81:443,159.60.146.81,443,true,284.683,,,,,,0.1.3
-2026-10-03T18:00:18Z,45.63.67.144:443,45.63.67.144,443,false,,timeout,dial tcp4 45.63.67.144:443: i/o timeout,,,,0.1.3
+2026-10-03T18:00:17Z,159.60.146.81:443,159.60.146.81,443,true,284.683,,,,,,0.1.3,US
+2026-10-03T18:00:18Z,45.63.67.144:443,45.63.67.144,443,false,,timeout,dial tcp4 45.63.67.144:443: i/o timeout,,,,0.1.3,US
 ```
 
 **失败时 `latency_ms` 是空单元格，不是 `0`。** 这一点很重要：
@@ -2064,6 +2078,9 @@ cf-route-tester/
 | 文件 | 作用 |
 | --- | --- |
 | `service.go` | `ProgressHub` / `CSVProgressHub` / `Stats` 与共用的错误分类。`ProgressHub` 保留供历史数据库路径使用；`CSVProgressHub` 服务 CSV 扫描（事件多带 `CurrentTarget`，且 `Publish` 永不阻塞、慢订阅者丢自己的事件）。 |
+| `country.go` | 「按国家挑目标」的实现。**只认 `location.cca2`**：上游两个国家字段有约 18% 互相矛盾，退回读另一个会让同一个国家的目标时而被选中时而不被选中，且没有任何提示。`targetsByCountry` 与 `filterByCountries` 共用同一字段与归一化，因此界面上的数字必然等于筛出来的条数。 |
+| `trace_selection.go` | 「先测 TCP、再挑一批跟踪」的第二步：`SelectForTrace` （按国家/延迟上限/条数挑，同一目标取最快那行，重建 `model.Target` 时**必须填 `IPVersion`** ——实测漏填会让每一步都看着正常而跟踪全部 `invalid_target`）、`PreviewTraceSelection`（与实际执行共用选取逻辑，所以「预览 N 个」就是真会跑的个数）、`RunTraceSelection`。 |
+| `trace_selection_test.go` | 国家筛选只认 `CCA2`、大小写与空列表、无国家的目标不被算进任何国家、统计与筛选口径一致；选取时填对 `IPVersion`（并**直接过一遍引擎用的同一套校验**）、延迟上限、跳过没测到的行、去重取最快、条数上限、按国家挑、国家从行里带过来、坏 IP 跳过、预览与实际选取一致。 |
 | `csvscan.go` | **结果只进 CSV 的扫描实现**：加载目标 → 开 CSV → 逐个探测并**立即写入一行** → 只对探测成功的目标跟踪并再写一行。没有会话、没有续测、没有去重。`CSVScanOptions.Progress` / `OnTarget` / `OnTrace` 供界面显示进度与线路信息。 |
 | `service_test.go` | 历史数据库路径的测试：真实本机监听 + 真实 SQLite、参数校验发生在任何副作用之前、进度回调、引擎不可用时仍完成 TCP 测量。 |
 | `csvscan_test.go` | CSV 路径的测试：真实写入、**不创建数据库**、参数校验先于副作用、limit、进度与当前目标、追加不覆盖、以及**取消后已测行仍在文件里**（不调用任何 Close 直接读文件，并断言行数只增不减、没有半行残留）。 |
@@ -2076,6 +2093,8 @@ cf-route-tester/
 | 文件 | 作用 |
 | --- | --- |
 | `csvstore.go` | 结果文件的追加写入器。三条约定：**每行写完立即 `Flush`**（中断不丢已完成结果）、**表头只在文件为空时写一次**（追加模式不重复写，否则表头会落在文件中间）、**不做会话与恢复**。未测到的延迟写空单元格而不是 `0`（0ms 与"没测到"在表格里含义不同）。`SanitizeErrorMessage` 在写入前去掉本机文件路径，但保留目标地址。 |
+| `read.go` | CSV 的**读取**侧：`ReadAll`（按列名定位，因此老文件缺 `cca2` 也能读；坏行跳过而不是让整份结果打不开）、`Sort`（延迟/线路/目标，没测到的一律排最后）、`Countries`（按国家统计）、`CollapseByTarget`（把同一目标的探测行与跟踪行合并成一行，否则表格里同一目标会出现两次、其中一次「线路是空的」）。 |
+| `read_test.go` | 写出去再读回来一致、**老文件少一列也不错位**、末行被写坏时前面的行完好、未闭合引号的行为（CSV 语义会吞掉余下内容，这里固定住事实）、排序把「没测到」排最后且顺序稳定、国家统计、合并规则（取最快延迟、保留线路、成功过就不留失败原因）。 |
 | `csvstore_test.go` | 表头与列数、**不调用 Close 也不丢数据**（模拟进程被杀）、追加不重复表头、未测延迟为空、并发写入不丢行不串行、特殊字符转义、路径清洗（含 `i/o` 不被误判为路径）、超长信息按 rune 边界截断、父目录自动创建、重复 Close 幂等。 |
 
 ### `internal/webui/` — 图形界面
@@ -2083,6 +2102,7 @@ cf-route-tester/
 | 文件 | 作用 |
 | --- | --- |
 | `server.go` | HTTP 服务：路由、内嵌页面、SSE 进度推送、单次扫描约束、优雅关闭。安全默认开启且**不提供关闭开关**：进程级随机令牌（常数时间比较）、`Host` 回环校验（防 DNS rebinding）、变更请求的 `Origin` 校验（防 CSRF）。 |
+| `results.go` | 两段式流程的接口：`/api/countries`（目标列表的国家分布）、`/api/results`（读 CSV 返回排好序的行，**排序在截断之前做**，否则「最快的那个」会取决于文件顺序）、`/api/trace/preview`、`/api/trace`。跟踪只收**筛选条件**而不收目标列表：CSV 是唯一数据源，让界面回传目标等于承认「界面手里那份」才是真相。 |
 | `assets/index.html` | 界面本体，原生 HTML/CSS/JS（不用框架，因此不需要 Node 工具链），通过 `go:embed` 打进二进制。 |
 | `browser_windows.go` | 用默认浏览器打开地址（`cmd /c start` 需要一个空标题参数，否则 URL 会被当成窗口标题而不打开）。 |
 | `browser_darwin.go` | 用 `open` 打开。 |
@@ -2288,6 +2308,11 @@ cf-route-tester/
 | --- | --- | --- |
 | `cmd_probe.go` | `probe` | TCP 探测，支持 `--db` 落库、`--json` 输出 JSONL、失败分类汇总。 |
 | `cmd_scan.go` | `scan` | 全量扫描：结果实时写入 CSV（`--out` / `--append`）、进度、两级测量汇总、`--verbose` 逐条输出、`--trace-data-provider` / `--trace-pow-provider`。上线前先校验用法类参数（模式、数据源、PoW 源），确保写错时**一个字节都不测**。 |
+| `countrylist.go` | `--target-country` 的参数类型。会拆分逗号并归一化大小写——现有的 `stringList` 不拆逗号，`--target-country US,DE` 会变成一个匹配不上任何东西的值，而且不报错，表现只是「筛完一个目标都没有」。 |
+| `console_windows.go` | `OwnsConsole()`：用 `GetConsoleProcessList` 判断控制台是不是专为本进程新建的（双击时只有自己，在已有终端里运行时终端也在同一控制台上）。 |
+| `console_other.go` | 非 Windows 上恒为 false：这些平台双击不会凭空造出一个「退出即消失」的终端。 |
+| `console_test.go` | 真的调用一次 `OwnsConsole`。看着单薄，挡的是一类真实事故：`syscall.NewLazyDLL` 取函数时名字写错会在**第一次调用**时 panic，而不是编译期报错（本项目踩过 `GetStockObject` 找错 DLL）。 |
+| `cmd_trace_selection.go` | `trace --from` 的实现：从结果 CSV 里按国家/延迟上限/条数挑一批目标再跟踪。与图形界面走**同一个** `service.RunTraceSelection`，避免两边在「什么算符合条件的行」上分歧。 |
 | `cmd_trace.go` | `trace` | 单个/批量线路跟踪，`--hops` 逐跳表、`--json` JSONL、`--data-provider` / `--pow-provider`。 |
 | `providers.go` | 从 `trace.DataProviders()` / `PowProviders()` 生成 `--help` 里的可选值列表。手工维护的列表迟早与真正接受的值漂移，而「帮助里列了但用不了」最烦人。 |
 | `cmd_detect.go` | `detect` | 检测本机地区/运营商，写入标识文件；发起请求**之前**打印"谁会看到你的 IP"。 |
@@ -2343,6 +2368,7 @@ cf-route-tester/
 六平台交叉编译 / CGO 检查 / 端到端冒烟 / 发布工具自检）。
 
 `.github/workflows/release.yml` 管发布：打一个 `v*` tag 即构建并创建
+| `.github/release-notes.md` | 发布说明的模板，由工作流读入并在末尾追加「完整变更」链接。开头就是「该下哪个文件」——四个 Windows exe 名字很像，实测有人下成命令行版然后双击，只看到一个闪过的黑框。 |
 GitHub Release。它用工作流自己的临时 `GITHUB_TOKEN`，因此**不需要任何
 长期密钥**——本地脚本则要在某台机器上放一个长期有效的 PAT，既容易泄露
 也容易在换机器时失效。产物由干净 checkout 从 tag 指向的提交构建，而且

@@ -55,6 +55,16 @@ type traceParams struct {
 	noDownload  bool
 	downloadDir string
 
+	// from / countries / maxLatency 用于"先测 TCP、再挑一批跟踪"：
+	//
+	//	--from results.csv --country US,DE --max-latency 200ms --limit 10
+	//
+	// 设了 --from 就从那份 CSV 里挑目标，不再从数据源取列表，
+	// 也不再重新测 TCP（延迟数据已经在文件里了）。
+	from       string
+	countries  countryList
+	maxLatency durationFlag
+
 	jsonOut bool
 	verbose bool
 	quiet   bool
@@ -110,6 +120,13 @@ func traceFlagSet(p *traceParams) *flag.FlagSet {
 	fs.Var(&p.timeout, "timeout", "单个跟踪超时（默认 "+trace.DefaultTimeout.String()+"）")
 	fs.IntVar(&p.limit, "limit", 0, "取目标列表的前 N 个（0 表示全部）")
 
+	fs.StringVar(&p.from, "from", "",
+		"从这份结果 CSV 里挑目标（配合 --country / --max-latency / --limit），只跟踪、不重测 TCP")
+	fs.Var(&p.countries, "target-country",
+		"只挑这些国家的目标（可重复，或逗号分隔；留空=不限）")
+	fs.Var(&p.maxLatency, "max-latency",
+		"只挑延迟不超过它的目标，例如 200ms（留空=不限）")
+
 	fs.BoolVar(&p.jsonOut, "json", false, "把每条结果作为一行 JSON 写到 stdout")
 	fs.BoolVar(&p.verbose, "verbose", false, "为每个目标打印路径跳表")
 	fs.BoolVar(&p.quiet, "quiet", false, "只输出汇总")
@@ -136,6 +153,15 @@ func runTrace(env *Env, args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+
+	// 0) 从已有结果里挑目标：先测 TCP、再挑一批跟踪的那条流程。
+	//
+	// 走 service.RunTraceSelection 而不是本文件里的跟踪循环，
+	// 是为了让命令行与图形界面**是同一条实现**——两边各写一套
+	// 选取与跟踪逻辑，迟早会在"什么算符合条件的行"上分歧。
+	if strings.TrimSpace(p.from) != "" {
+		return runTraceFromSelection(ctx, env, p)
+	}
 
 	// 1) 目标列表。
 	targets, err := resolveTraceTargets(ctx, p, env)

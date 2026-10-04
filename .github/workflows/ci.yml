@@ -115,7 +115,7 @@ jobs:
             --workers 2 --timeout 1s --quiet
 
           test -s "$csv"
-          head -1 "$csv" | grep -q '^timestamp_utc,target,ip,port,success,latency_ms,error_type,error_message,hop_count,as_path,hops,client_version$'
+          head -1 "$csv" | grep -q '^timestamp_utc,target,ip,port,success,latency_ms,error_type,error_message,hop_count,as_path,hops,client_version,cca2$'
           # 两个目标 + 表头 = 3 行。
           test "$(wc -l < "$csv")" -eq 3
 

@@ -409,11 +409,16 @@ func TestRunCSVScanTraceRespectsInterrupt(t *testing.T) {
 //
 // 上面几个测试都按列名取下标，因此如果有人重排 Header，
 // 它们会一起去读错的列。这里把顺序钉住，让那种改动必须是有意的。
+//
+// 新增列**只能追加在末尾**（见 csvstore.Header 的说明）：中间插一列
+// 会让所有已经做好表格的人整体错位。cca2 就是这样加进来的——
+// 它是目标的国家两位码，供界面按国家筛选/分组，而 CSV 是本项目
+// 唯一的数据源，所以必须随行落盘。
 func TestCSVColumnIndexesAreStable(t *testing.T) {
 	want := []string{
 		"timestamp_utc", "target", "ip", "port", "success", "latency_ms",
 		"error_type", "error_message", "hop_count", "as_path", "hops",
-		"client_version",
+		"client_version", "cca2",
 	}
 	if len(csvstore.Header) != len(want) {
 		t.Fatalf("header has %d columns, want %d: %v", len(csvstore.Header), len(want), csvstore.Header)

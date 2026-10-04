@@ -34,7 +34,17 @@ type CSVScanOptions struct {
 	// Timeout 是单个连接超时（<=0 用默认值）。
 	Timeout time.Duration
 
+	// Countries 只测这些国家的目标（空表示不筛选）。
+	//
+	// 口径是目标的 Location.CCA2（ISO 两位码），与界面下拉框用的是
+	// 同一个字段——两边口径不同会出现"下拉框说 1388 个、实际筛出
+	// 1580 个"这类没有报错的错误（上游两个国家字段有 18% 互相矛盾，
+	// 见 country.go 的说明）。
+	Countries []string
+
 	// Limit 只测前 N 个目标（<=0 表示全部）。
+	//
+	// 在 Countries 之后生效：说"美国前 100 个"就是美国里取 100 个。
 	Limit int
 
 	// Trace 为真时对**探测成功**的目标做线路跟踪。
@@ -198,6 +208,25 @@ func (s *Service) RunCSVScan(ctx context.Context, opts CSVScanOptions) (*CSVScan
 	if err != nil {
 		return nil, err
 	}
+
+	// 国家筛选在 Limit 之前：使用者说"测美国的前 100 个"，
+	// 意思是美国里按顺序取 100 个，而不是"全部目标的前 100 个里
+	// 恰好是美国的那些"——后者可能只剩几个，看起来像没生效。
+	if len(opts.Countries) > 0 {
+		before := len(targets)
+		// 保留原列表用于报错：筛没了的时候，使用者最需要知道的是
+		// "这份数据里到底有哪些国家可选"。
+		available := targetsByCountry(targets)
+
+		targets = filterByCountries(targets, opts.Countries)
+		if len(targets) == 0 {
+			return nil, fmt.Errorf(
+				"%w: none of the %d target(s) are in %v; available countries: %s",
+				ErrNoTargets, before, opts.Countries, summarizeCountries(available))
+		}
+		s.log("scan: 国家筛选 %v -> %d/%d 个目标", opts.Countries, len(targets), before)
+	}
+
 	if opts.Limit > 0 && opts.Limit < len(targets) {
 		targets = targets[:opts.Limit]
 	}
@@ -721,7 +750,20 @@ func probeRow(target model.Target, result probe.ProbeResult) csvstore.Row {
 		ErrorType:     string(result.ErrorType),
 		ErrorMessage:  result.ErrorMessage,
 		ClientVersion: version.Version,
+		CCA2:          targetLocationCCA2(target),
 	}
+}
+
+// targetLocationCCA2 取目标的国家两位码。
+//
+// 只认 Location.CCA2，**不退回 Location.Country**：这两个字段在
+// 上游数据里有约 18% 的条目互相矛盾（例如 country=FI 而 cca2=SE）。
+// 退回会让"用哪个字段"变成一个看数据的随机行为——同一个国家的
+// 目标有时被选中、有时不被选中，而且没有任何提示。
+//
+// 空值就让它空着：界面按"未知"处理，比猜一个错的国家好。
+func targetLocationCCA2(target model.Target) string {
+	return strings.ToUpper(strings.TrimSpace(target.Location.CCA2))
 }
 
 // traceRow 把跟踪结果转成 CSV 行。
@@ -740,6 +782,7 @@ func traceRow(target model.Target, result *trace.TraceResult, prefixes *asnprefi
 			ErrorType:     string(trace.ErrorTypeOther),
 			ErrorMessage:  "trace returned no result",
 			ClientVersion: version.Version,
+			CCA2:          targetLocationCCA2(target),
 		}
 	}
 
@@ -757,6 +800,7 @@ func traceRow(target model.Target, result *trace.TraceResult, prefixes *asnprefi
 		ASPath:        asnmap.ShortPath(resolveRoute(result, prefixes)),
 		Hops:          formatHops(result.Hops),
 		ClientVersion: version.Version,
+		CCA2:          targetLocationCCA2(target),
 	}
 }
 

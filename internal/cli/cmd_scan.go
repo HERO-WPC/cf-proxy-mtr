@@ -59,6 +59,14 @@ type scanParams struct {
 	traceNoDownload  bool
 	traceDownloadDir string
 
+	// targetCountries 按**目标**的国家筛选（留空=全部）。
+	//
+	// 与下面的 collectorCountry 是两回事，因此旗标名也不同：
+	// --target-country 筛目标，--country 描述采集者自己。
+	// 共用一个名字会让"我只想测美国"变成"我声明自己是美国采集者"，
+	// 而两者都不会报错——只是结果完全不同。
+	targetCountries countryList
+
 	// 采集者画像覆盖项。
 	collectorCountry   string
 	collectorProvince  string
@@ -124,6 +132,9 @@ func scanFlagSet(p *scanParams) *flag.FlagSet {
 		"不要在 nexttrace 缺失时自动下载（默认会自动下载到程序目录的 data/bin）")
 	fs.StringVar(&p.traceDownloadDir, "trace-download-dir", "",
 		"自动下载 nexttrace 的落点（留空=程序目录下的 data/bin）")
+	fs.Var(&p.targetCountries, "target-country",
+		"只测这些国家的目标（可重复，或逗号分隔；留空=全部）。注意与 --country 不同："+
+			"那个是**采集者自己**的国家，这个筛的是**目标**的国家")
 	fs.StringVar(&p.traceASNBulkURL, "trace-asn-bulk-url", "",
 		"ASN 前缀全量表的地址（留空=用内置默认；可指向镜像或本地文件）")
 	fs.BoolVar(&p.traceRefreshASNPrefix, "trace-refresh-asn-prefix", false,
@@ -298,6 +309,7 @@ func runScan(env *Env, args []string) error {
 			AutoDownload: !p.traceNoDownload,
 			DownloadDir:  p.traceDownloadDir,
 		},
+		Countries:   p.targetCountries,
 		NoASNPrefix: p.traceNoASNPrefix,
 		ASNPrefixOptions: asnprefix.Options{
 			Dir:     p.traceASNPrefixDir,

@@ -46,6 +46,7 @@ var Header = []string{
 	"as_path",
 	"hops",
 	"client_version",
+	"cca2",
 }
 
 // Row 是一条待写入的结果。
@@ -90,6 +91,15 @@ type Row struct {
 
 	// ClientVersion 是产生这条数据的程序版本。
 	ClientVersion string
+
+	// CCA2 是目标的国家两位码（来自目标列表的 location.cca2）。
+	//
+	// 放进 CSV 而不是事后去目标列表里查：CSV 是这个项目**唯一**的
+	// 数据源，界面要按国家筛选/分组时不能依赖"目标列表此刻是否还在、
+	// 内容是否已经变了"。目标会随上游数据变动，落盘的国家不会。
+	//
+	// 追加在末尾：列名与列序是契约，插在中间会打乱别人已经做好的表。
+	CCA2 string
 }
 
 // Store 是一个 CSV 追加写入器。
@@ -248,6 +258,7 @@ func toRecord(row Row) []string {
 		row.ASPath,
 		row.Hops,
 		row.ClientVersion,
+		row.CCA2,
 	}
 }
 

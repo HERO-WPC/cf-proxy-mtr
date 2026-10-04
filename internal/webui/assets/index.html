@@ -123,6 +123,38 @@
   .logline.warn  .m { color: #ffcf70; }
   .logline.error .m { color: #ff8f95; }
   #logBox .empty { color: #5b6377; }
+
+  /* ---- 三段式流程：选国家 → 看逐条结果 → 确认后跟踪线路 ---- */
+
+  /* 结果表格的行数最多几百行，滚动容器把它限制在固定高度内，
+     免得整页被一个长表格撑得找不着下面的确认区。 */
+  .tablewrap { max-height: 420px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+  .tablewrap thead th {
+    position: sticky; top: 0; z-index: 1;
+    background: var(--panel);
+  }
+  table.rows th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+  table.rows th.sortable:hover { color: var(--text); }
+  /* 当前排序列的视觉标记：颜色 + 箭头，不依赖颜色单一线索。 */
+  table.rows th.sorted { color: var(--accent); }
+  table.rows th .arrow { font-size: 10px; }
+  table.rows td.ip { font-family: ui-monospace, Consolas, monospace; word-break: break-all; }
+  /* 失败的整行淡红底：扫一眼就能看出哪几条没测通。 */
+  table.rows tr.bad td { background: rgba(242,84,91,.07); }
+  .reason { color: var(--muted); font-size: 12px; }
+  .path { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; }
+
+  /* 确认区用 accent 描边＋渐隐底色区分：它是"下一步"，
+     视觉上不能和上面的展示性表格混在一起。 */
+  .confirm {
+    margin-top: 16px; padding: 14px 16px; border-radius: 8px;
+    border: 1px solid var(--accent);
+    background: linear-gradient(180deg, rgba(76,141,255,.10), rgba(76,141,255,.03));
+  }
+  .confirm .headline { font-size: 14px; margin-bottom: 12px; }
+  .confirm .headline b { color: #bcd4ff; font-variant-numeric: tabular-nums; }
+  .confirm button.primary { min-width: 210px; }
+  select[multiple] { min-height: 130px; }
 </style>
 </head>
 <body>
@@ -263,6 +295,88 @@
   <section id="resultSection" style="display:none">
     <h2>最近一次扫描</h2>
     <div class="panel" id="resultBody"></div>
+  </section>
+
+  <!-- ① 选国家后做 TCP 测量 -->
+  <section>
+    <h2>选择目标国家</h2>
+    <div class="panel">
+      <div class="fields">
+        <div>
+          <label for="measureCountries" id="countrySelectLabel">国家（可多选）</label>
+          <select id="measureCountries" multiple size="8">
+            <option disabled>正在加载国家列表…</option>
+          </select>
+        </div>
+        <div>
+          <div class="hint" id="countryInfo" style="margin-top:0">
+            正在加载国家列表…（首次需要下载／解析目标列表，可能要几秒）
+          </div>
+          <div class="hint">
+            不选 = 全部国家。多选用 Ctrl / Shift 点击，或按住 Cmd 点击（macOS）。
+          </div>
+          <div class="hint">
+            测量使用上面「开始扫描」里的 TCP 并发、超时、只测前 N 个、结果文件与追加设置，
+            所以这里不用再填一遍。测完的结果会出现在下面的「测量结果」里。
+          </div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <button class="primary" id="measureBtn">开始测量（TCP）</button>
+        <span class="stats-line" id="measureStatus">—</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ② 逐条结果 + ③ 跟踪确认区 -->
+  <section>
+    <h2>测量结果</h2>
+    <div class="panel">
+      <div class="stats-line" id="resultsSummary">还没有结果。先在上面选国家并点「开始测量」。</div>
+      <div class="tablewrap" style="margin-top:10px">
+        <table class="rows">
+          <thead>
+            <tr>
+              <th class="sortable" id="thTarget" data-sort="target">目标</th>
+              <th>国家</th>
+              <th class="sortable num" id="thLatency" data-sort="latency" style="text-align:right">延迟(ms)</th>
+              <th>状态</th>
+              <th class="sortable" id="thRoute" data-sort="route">线路</th>
+            </tr>
+          </thead>
+          <tbody id="resultsBody">
+            <tr><td colspan="5" class="hint" style="padding:14px 10px">等待结果…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="hint" id="resultsNote" style="display:none"></div>
+
+      <!-- ③ 确认区：这里的条件就是 ④ 实际跟踪时用的条件，
+           两边由同一个对象渲染，不存在"看到的和跑的不一致"。 -->
+      <div class="confirm">
+        <div class="headline" id="previewLine">正在读取可跟踪的目标…</div>
+        <div class="fields">
+          <div>
+            <label for="maxLatency">延迟上限（毫秒）</label>
+            <input type="number" id="maxLatency" min="1" step="1" placeholder="不限">
+          </div>
+          <div>
+            <label for="traceLimit">条数上限</label>
+            <input type="number" id="traceLimit" min="1" step="1" value="10">
+          </div>
+          <div>
+            <label for="traceCountries">国家（可多选，不选 = 全部）</label>
+            <select id="traceCountries" multiple size="5"></select>
+          </div>
+        </div>
+        <div class="row" style="margin-top:14px">
+          <button class="primary" id="traceStartBtn" disabled>开始跟踪线路</button>
+          <span class="hint" id="traceHint" style="margin-top:0">
+            跟踪使用上面「同时做线路跟踪」里的 NextTrace 路径、跟踪模式、数据源与自动下载设置。
+          </span>
+        </div>
+      </div>
+    </div>
   </section>
 
   <section>
@@ -430,10 +544,16 @@ function setBusy(busy) {
   startBtn.disabled = busy;
   stopBtn.disabled = !busy;
   document.getElementById('progressSection').style.display = busy ? 'block' : 'none';
+  setMeasureBusy(busy);
 }
 
-startBtn.addEventListener('click', async () => {
-  const body = {
+// buildScanBody 组装 /api/scan 的请求体。
+//
+// 「开始扫描」与三步流程里的「开始测量」共用它：两边必须用同一份设置，
+// 否则用户先在一处改了并发、又在另一处点了按钮，就会得到他没预期的结果。
+// countries 只为三步流程服务；不选国家时传空数组，等价于"全部国家"。
+function buildScanBody(countries) {
+  return {
     workers: parseInt(document.getElementById('workers').value, 10) || 0,
     timeout_ms: parseInt(document.getElementById('timeout').value, 10) || 0,
     limit: parseInt(document.getElementById('limit').value, 10) || 0,
@@ -447,8 +567,15 @@ startBtn.addEventListener('click', async () => {
     pow_provider: document.getElementById('powProvider').value,
     no_asn_prefix: !document.getElementById('useASNPrefix').checked,
     no_auto_download: !document.getElementById('autoDownload').checked,
+    countries: countries || [],
   };
+}
 
+// startScan 发起一次测量。
+//
+// 失败文案按 status 区分：409 是"已经有一个在跑"，不是配置错误，
+// 把它当成配置错误会让用户去改根本没问题的设置。
+async function startScan(kind, countries) {
   banner('', '');
   setBusy(true);
   resetProgress();
@@ -457,17 +584,19 @@ startBtn.addEventListener('click', async () => {
     await api('/api/scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify(buildScanBody(countries)),
     });
   } catch (e) {
     setBusy(false);
     if (e.status === 409) {
       banner('warn', '已经有一个扫描在跑了。');
     } else {
-      banner('err', '无法启动扫描：' + e.message);
+      banner('err', '无法启动' + (kind === 'measure' ? '测量' : '扫描') + '：' + e.message);
     }
   }
-});
+}
+
+startBtn.addEventListener('click', () => startScan('scan', []));
 
 stopBtn.addEventListener('click', async () => {
   stopBtn.disabled = true;
@@ -505,6 +634,27 @@ function renderProgress(p) {
     p.completed + ' / ' + (p.total || '?') + '  （' + pct.toFixed(0) + '%）';
   document.getElementById('progressDetail').textContent =
     '成功 ' + p.success + ' · 失败 ' + p.failed;
+
+  // 跟踪阶段的 SSE 进度跑满时立刻刷新表格与预览。
+  //
+  // 为什么不只依赖 pollStatus 的轮询：轮询间隔 2 秒，而跟踪往往在
+  // 最后一次进度事件后马上结束；用进度事件兜底能让"跟踪中…"少挂一会儿，
+  // 也让用户更快看到按线路重排后的表格。真正兜底仍然是轮询。
+  if (p.phase === 'trace' && p.total > 0 && p.completed >= p.total) {
+    markTraceApiFinished();
+  }
+}
+
+// markTraceApiFinished 让"跟踪完成"这件事在两条路径（SSE 进度 / 轮询）上只做一次。
+let traceFinishDebounce = null;
+function markTraceApiFinished() {
+  if (traceFinishDebounce) return;
+  traceFinishDebounce = setTimeout(() => {
+    traceFinishDebounce = null;
+    refreshResults();
+    refreshPreviewNow();
+    finishTraceFlow();
+  }, 400);
 }
 
 function connectEvents() {
@@ -547,6 +697,12 @@ async function pollStatus() {
         wasScanning = false;
         renderOutcome(s.last);
         loadStats();
+        // 这一轮无论是"测量"还是"跟踪"，结束后都要重读 CSV：
+        // 跟踪完成后表格要按线路重排，靠的就是这次刷新。
+        refreshResults();
+        refreshPreviewNow();
+        finishTraceFlow();
+        finishMeasureFlow();
       } else {
         renderOutcome(s.last);
       }
@@ -640,6 +796,509 @@ function renderOutcome(last) {
       '失败的行不会出现在结果文件里，但测量本身已经完成。';
     body.appendChild(div);
   }
+}
+
+// ---------------------------------------------------------------------------
+// 三段式流程：① 选国家测量 → ② 看逐条结果 → ③ 确认筛选后跟踪线路
+// ---------------------------------------------------------------------------
+// 为什么要有这三段：TCP 测量很便宜（几万个目标几十秒），线路跟踪很贵
+// （每个目标要跑一次 NextTrace，还可能触发上游限流）。所以先让用户花小代价
+// 拿到全局延迟分布，再根据"延迟上限 / 国家 / 条数上限"挑出真正值得跟踪的少量目标。
+
+// MAX_RENDER_ROWS 是表格一次渲染的行数上限。
+//
+// 接口最多会返回 2000 行，如果全部变成 DOM，就是一万多个节点；
+// 在低配机器上滚动与排序会明显卡顿，而且用户几乎不会真的去读第 800 行。
+// 所以只把前 500 行做进 DOM，剩下的靠"共 N 行，显示前 500 行"这句话交代清楚——
+// 数据没有少，只是没全部画出来。
+const MAX_RENDER_ROWS = 500;
+
+// SORT_LABELS 同时喂给表头排序标记与筛选条件摘要，
+// 保证"点的是哪个排序"和"确认区说的排序"永远一致。
+const SORT_LABELS = { latency: '延迟', route: '线路', target: '目标' };
+
+// filterState 是**唯一**的筛选条件来源。
+//
+// 预览接口与跟踪接口都从这个对象取参数（见 traceBody()），
+// 所以"会跟踪 N 个"这句话和真正提交的条件不可能对不上。
+const filterState = { sort: 'latency', maxLatency: null, limit: 10, countries: [] };
+
+// resultsTotal 保存「测量结果」当前读到的行数，用于提示"是不是真的还没测过"。
+let resultsTotal = 0;
+// resultsStale 表示"这一轮刚产生的新数据还没读回来"。
+let resultsStale = false;
+
+const resultsBody = document.getElementById('resultsBody');
+const resultsSummary = document.getElementById('resultsSummary');
+const resultsNote = document.getElementById('resultsNote');
+const measureBtn = document.getElementById('measureBtn');
+const measureStatus = document.getElementById('measureStatus');
+const measureCountries = document.getElementById('measureCountries');
+const traceCountries = document.getElementById('traceCountries');
+const countryInfo = document.getElementById('countryInfo');
+const maxLatencyInput = document.getElementById('maxLatency');
+const traceLimitInput = document.getElementById('traceLimit');
+const traceStartBtn = document.getElementById('traceStartBtn');
+const traceHint = document.getElementById('traceHint');
+const previewLine = document.getElementById('previewLine');
+
+let previewCount = 0;    // 最近一次预览算出来的"会跟踪多少个"
+let previewLoaded = false;
+let traceRunning = false; // 跟踪请求已发出、还没等到扫描结束
+let measureRunning = false;
+
+// ---------------------------------------------------------------------------
+// 国家列表（①的下拉框，两处共用同一份数据）
+// ---------------------------------------------------------------------------
+// 国家列表只取一次就复用：/api/countries 首次要下载并解析整个目标列表，
+// 每切一次筛选就重取一遍既慢又浪费。
+let countryListCache = [];
+
+function setCountryOptions(selectEl, countries, available) {
+  // 先快照已选国家，再清空 select。
+  //
+  // 顺序不能反：innerHTML='' 会让 selectedOptions 立刻变空，
+  // 清空后再读就等于每次都把用户的勾选丢掉，而勾选又决定了
+  // 表格与预览的筛选条件——丢一次勾选，后面整条链路都会错。
+  const previous = new Set(Array.from(selectEl.selectedOptions).map((o) => o.value));
+
+  selectEl.innerHTML = '';
+
+  if (!available) {
+    // 加载失败或还没回来时保持可解释的状态，而不是留一个空白下拉框。
+    const opt = document.createElement('option');
+    opt.disabled = true;
+    opt.textContent = countries;
+    selectEl.appendChild(opt);
+    return;
+  }
+
+  if (!countries.length) {
+    const opt = document.createElement('option');
+    opt.disabled = true;
+    opt.textContent = '（目标列表里没有国家信息）';
+    selectEl.appendChild(opt);
+    return;
+  }
+
+  countries.forEach((c) => {
+    const cc = (c.cca2 || '').toUpperCase();
+    if (!cc) return;
+    const opt = document.createElement('option');
+    opt.value = cc;
+    // 选项文本带上数量：用户能一眼看出哪个国家样本多，值得优先测。
+    opt.textContent = cc + '（' + (c.count || 0) + ' 个）';
+    opt.selected = previous.has(cc);
+    selectEl.appendChild(opt);
+  });
+}
+
+async function loadCountries() {
+  try {
+    const data = await api('/api/countries');
+    if (data && data.error) throw new Error(data.error);
+
+    countryListCache = (data && data.countries) || [];
+    setCountryOptions(measureCountries, countryListCache, true);
+    setCountryOptions(traceCountries, countryListCache, true);
+
+    countryInfo.textContent = countryListCache.length
+      ? '共 ' + countryListCache.length + ' 个国家 · 目标列表 ' + (data.total || 0) + ' 个目标'
+      : '目标列表里没有可用的国家信息。';
+  } catch (e) {
+    const message = '国家列表加载失败：' + e.message;
+    setCountryOptions(measureCountries, message, false);
+    setCountryOptions(traceCountries, message, false);
+    countryInfo.textContent = message;
+  }
+}
+
+// onCountryChange 在任一国家多选框变化时调用：读 DOM，写 filterState，再刷新预览。
+function onCountryChange() {
+  const picked = Array.from(measureCountries.selectedOptions)
+    .map((o) => o.value)
+    .filter(Boolean);
+
+  // 两个多选框互为镜像（布局需要两份，语义是一份）。
+  // 回写时按"选中的集合"逐个判断，而不是照抄 option.selected——
+  // 后者在选项被重建过（重新加载国家列表）时会留下不一致的残留状态。
+  const picks = new Set(picked);
+  Array.from(traceCountries.options).forEach((o) => { o.selected = picks.has(o.value); });
+
+  filterState.countries = picked;
+  // 国家换了，表格也要跟着换：表格展示的就是"当前筛选下的结果"。
+  refreshResults();
+  schedulePreview();
+}
+
+measureCountries.addEventListener('change', onCountryChange);
+
+traceCountries.addEventListener('change', () => {
+  const picked = Array.from(traceCountries.selectedOptions)
+    .map((o) => o.value)
+    .filter(Boolean);
+  const picks = new Set(picked);
+  Array.from(measureCountries.options).forEach((o) => { o.selected = picks.has(o.value); });
+  filterState.countries = picked;
+  refreshResults();
+  schedulePreview();
+});
+
+// ---------------------------------------------------------------------------
+// ② 结果表格
+// ---------------------------------------------------------------------------
+function fmtLatency(v) {
+  // 没测到的延迟显示「—」而不是 0。
+  //
+  // 0 在这里是"没测到"的哨兵值，不是一次真实测量：结果文件只在探测成功时
+  // 才写延迟（失败的行写 0），后端的排序也把 <= 0 当作"排最后"。
+  // 如果表格把 0 原样印出来，一行超时的记录就会看起来像"延迟 0 ms 的超快节点"，
+  // 而"很快"和"根本没通"对下一步该不该跟踪的判断是相反的。
+  // 负数只可能来自异常数据，同样按"没测到"处理。
+  return typeof v === 'number' && isFinite(v) && v > 0 ? v.toFixed(1) : '—';
+}
+
+// shortReason 把错误信息压成一行摘要：表格是给人扫的，完整原因在 CSV 里。
+function shortReason(row) {
+  const text = (row.error_message || row.error_type || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  return text.length > 42 ? text.slice(0, 42) + '…' : text;
+}
+
+// routeText 返回"线路"列的文本：优先 AS 路径，退化到跳数，都没有就是「—」。
+function routeText(row) {
+  const path = (row.as_path || '').trim();
+  if (path) return path;
+  const hops = Number(row.hop_count);
+  if (isFinite(hops) && hops > 0) return '跳数 ' + hops;
+  return '—';
+}
+
+// paintSortMarks 给当前排序列加视觉标记。
+//
+// 标记不能只靠颜色：所以除了变蓝，还在列名后加一个箭头符号。
+function paintSortMarks() {
+  [document.getElementById('thTarget'),
+   document.getElementById('thLatency'),
+   document.getElementById('thRoute')].forEach((th) => {
+    th.classList.remove('sorted');
+    const old = th.querySelector('.arrow');
+    if (old) old.remove();
+  });
+
+  const active = document.querySelector('th[data-sort="' + filterState.sort + '"]');
+  if (!active) return;
+  active.classList.add('sorted');
+  const mark = document.createElement('span');
+  mark.className = 'arrow';
+  // 只实现按键升序：降序对"找一个能用的低延迟目标"这个目的没有帮助。
+  mark.textContent = ' ↑';
+  active.appendChild(mark);
+}
+
+function renderRows(rows) {
+  resultsBody.innerHTML = '';
+
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 5;
+    td.className = 'hint';
+    td.style.padding = '14px 10px';
+    td.textContent = resultsTotal > 0
+      ? '当前筛选条件下没有结果。'
+      : '还没有结果。先在上面选国家并点「开始测量」。';
+    tr.appendChild(td);
+    resultsBody.appendChild(tr);
+    return;
+  }
+
+  rows.forEach((row) => {
+    const ok = row.success === true;
+    const tr = document.createElement('tr');
+    if (!ok) tr.className = 'bad';
+
+    const tdTarget = document.createElement('td');
+    tdTarget.className = 'ip';
+    tdTarget.textContent = row.target || (row.ip ? row.ip + ':' + (row.port || '') : '—');
+
+    const tdCountry = document.createElement('td');
+    tdCountry.textContent = (row.cca2 || '').toUpperCase() || '—';
+
+    const tdLatency = document.createElement('td');
+    tdLatency.className = 'num';
+    tdLatency.textContent = fmtLatency(row.latency_ms);
+
+    const tdStatus = document.createElement('td');
+    const pill = document.createElement('span');
+    pill.className = 'pill' + (ok ? ' live' : '');
+    pill.textContent = ok ? '成功' : '失败';
+    tdStatus.appendChild(pill);
+    const reason = shortReason(row);
+    if (!ok && reason) {
+      const span = document.createElement('span');
+      span.className = 'reason';
+      span.style.marginLeft = '8px';
+      span.textContent = reason;
+      tdStatus.appendChild(span);
+    }
+
+    const tdRoute = document.createElement('td');
+    const route = routeText(row);
+    if (route !== '—') tdRoute.className = 'path';
+    tdRoute.textContent = route;
+
+    tr.appendChild(tdTarget);
+    tr.appendChild(tdCountry);
+    tr.appendChild(tdLatency);
+    tr.appendChild(tdStatus);
+    tr.appendChild(tdRoute);
+    resultsBody.appendChild(tr);
+  });
+}
+
+function renderResults(data) {
+  const all = (data && data.rows) || [];
+  // 接口返回的是"筛选后的行"，所以总数取 total 而不是 rows.length：
+  // 大 CSV 时接口最多给 2000 行，用 rows.length 会少报。
+  const total = (data && typeof data.total === 'number') ? data.total : all.length;
+  resultsTotal = total;
+
+  const summaryOk = all.filter((r) => r.success === true).length;
+  const summaryNote = all.length < total ? '（已加载 ' + all.length + ' 行用于统计与显示）' : '';
+  resultsSummary.textContent = '共 ' + total + ' 行，其中成功 ' + summaryOk + ' 行' + summaryNote +
+    ' · 按' + (SORT_LABELS[filterState.sort] || filterState.sort) + '升序';
+
+  const shown = all.slice(0, MAX_RENDER_ROWS);
+  renderRows(shown);
+  paintSortMarks();
+
+  if (total > MAX_RENDER_ROWS) {
+    resultsNote.style.display = 'block';
+    resultsNote.textContent = '共 ' + total + ' 行，显示前 ' + MAX_RENDER_ROWS +
+      ' 行（表格只画这么多，避免浏览器卡死；完整数据在 CSV 里）。';
+  } else {
+    resultsNote.style.display = 'none';
+  }
+}
+
+async function refreshResults() {
+  const params = new URLSearchParams();
+  params.set('sort', filterState.sort);
+  if (filterState.countries.length) params.set('countries', filterState.countries.join(','));
+
+  try {
+    const data = await api('/api/results?' + params.toString());
+    // 后端契约：CSV 还不存在时 exists=false、rows 为空，这不是错误。
+    renderResults(data || { rows: [], total: 0 });
+    resultsStale = false;
+  } catch (e) {
+    resultsSummary.textContent = '读取结果失败：' + e.message;
+  }
+}
+
+// 「线路」表头点击 → sort=route；「延迟」→ sort=latency。
+// 之所以把"按线路分组"做成一种排序而不是一个单独的视图：分组之后
+// 同一线路的目标会相邻，用户想知道"这条线路下有几个可用目标"时只需要看相邻行。
+document.querySelectorAll('th[data-sort]').forEach((th) => {
+  th.addEventListener('click', () => {
+    filterState.sort = th.getAttribute('data-sort') || 'latency';
+    paintSortMarks();
+    refreshResults();
+  });
+});
+
+// 「开始测量」= 用当前国家筛选跑一次 TCP 测量。
+measureBtn.addEventListener('click', () => {
+  measureRunning = true;
+  measureBtn.disabled = true;
+  measureStatus.textContent = '测量中…（进度见下方「进度」与「实时日志」）';
+  startScan('measure', filterState.countries);
+});
+
+function finishMeasureFlow() {
+  if (!measureRunning) return;
+  measureRunning = false;
+  measureBtn.disabled = false;
+  measureStatus.textContent = resultsTotal > 0 ? '测量结束，共 ' + resultsTotal + ' 行结果。' : '测量结束。';
+}
+
+// setMeasureBusy 只在"扫描区自己的按钮在跑"时改动测量按钮的文案。
+//
+// 为什么要分这么细：跟踪也走 /api/scan（同一套 busy 状态），
+// 如果测量按钮跟着 setBusy 走，跟踪期间它就会显示成"测量中…"，那是假信息。
+function setMeasureBusy(scanBusy) {
+  if (scanBusy) {
+    measureBtn.disabled = true;
+    measureStatus.textContent = '有测量／跟踪正在运行…';
+    return;
+  }
+  if (!measureRunning) {
+    measureBtn.disabled = false;
+    if (resultsStale) {
+      measureStatus.textContent = '测量结束，正在读取结果…';
+    } else if (resultsTotal > 0) {
+      measureStatus.textContent = '共 ' + resultsTotal + ' 行结果。';
+    } else {
+      measureStatus.textContent = '—';
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ③⑤ 跟踪确认区：预览 + 发起跟踪
+// ---------------------------------------------------------------------------
+// 预览与实际跟踪必须共用条件（这里是 traceParams() 一个出口）。
+// 否则用户会看到"会跟踪 12 个"，实际却跟踪了另一个集合——
+// 在"每次跟踪都可能被上游限流"的前提下，这种偏差的代价是真金白银的时间。
+
+// parseBound 把输入框读成正整数；空、非法、<=0 都当作"不限"。
+function parseBound(input) {
+  const raw = input.value.trim();
+  if (!raw) return null;
+  const n = parseInt(raw, 10);
+  if (!isFinite(n) || n <= 0) return null;
+  return n;
+}
+
+function traceLimitValue() {
+  const n = parseInt(traceLimitInput.value, 10);
+  if (!isFinite(n) || n <= 0) return 10;
+  return n;
+}
+
+// syncFilterStateFromInputs 把输入框读进 filterState。
+//
+// 每次输入都重新读，不做"只在 blur 时读"的优化：用户改完数字之后
+// 常常直接去点按钮，blur 时机在点击路径上并不可靠。
+function syncFilterStateFromInputs() {
+  filterState.maxLatency = parseBound(maxLatencyInput);
+  filterState.limit = traceLimitValue();
+}
+
+function traceParams() {
+  syncFilterStateFromInputs();
+  const params = new URLSearchParams();
+  // path 让预览去读"和跟踪同一个 CSV"。
+  // 留空时后端用默认路径，和跟踪请求体里 output_path 留空的含义一致。
+  const path = document.getElementById('output').value.trim();
+  if (path) params.set('path', path);
+  if (filterState.countries.length) params.set('countries', filterState.countries.join(','));
+  if (filterState.maxLatency) params.set('max_latency_ms', String(filterState.maxLatency));
+  params.set('limit', String(filterState.limit));
+  return params;
+}
+
+function traceBody() {
+  return {
+    output_path: document.getElementById('output').value.trim(),
+    countries: filterState.countries,
+    max_latency_ms: filterState.maxLatency || 0,
+    limit: filterState.limit,
+    trace_mode: document.getElementById('traceMode').value,
+    trace_workers: parseInt(document.getElementById('workers').value, 10) || 0,
+    data_provider: document.getElementById('dataProvider').value,
+    pow_provider: document.getElementById('powProvider').value,
+    no_asn_prefix: !document.getElementById('useASNPrefix').checked,
+    no_auto_download: !document.getElementById('autoDownload').checked,
+  };
+}
+
+function setTraceButtonState(disabled) {
+  // 按钮上直接写数量：用户点之前就能看到这一下会花多少时间。
+  traceStartBtn.textContent = previewLoaded && previewCount > 0
+    ? '开始跟踪线路（' + previewCount + ' 个）'
+    : '开始跟踪线路';
+  traceStartBtn.disabled = disabled;
+}
+
+function renderPreview(data) {
+  previewCount = (data && data.count) || 0;
+  previewLoaded = true;
+
+  const total = (data && typeof data.total === 'number') ? data.total : 0;
+  let line = '已测 ' + total + ' 个目标，筛选后有 ' + previewCount + ' 个可跟踪';
+
+  if (previewCount > 0 && typeof data.fastest_ms === 'number' && typeof data.slowest_ms === 'number') {
+    line += '（' + data.fastest_ms.toFixed(1) + ' ~ ' + data.slowest_ms.toFixed(1) + ' ms）';
+  }
+  previewLine.textContent = line + '。';
+
+  if (previewCount <= 0) {
+    traceHint.textContent = '当前条件没有可跟踪的目标：要么放宽延迟上限，要么先跑一次测量。';
+    setTraceButtonState(true);
+    return;
+  }
+
+  const targets = (data && data.targets) || [];
+  traceHint.textContent = (targets.length
+    ? '会跟踪：' + targets.join('、') +
+      (previewCount > targets.length ? ' 等 ' + previewCount + ' 个' : '')
+    : '将跟踪 ' + previewCount + ' 个目标（目标名未返回）') +
+    '。参数来自下方控件与「同时做线路跟踪」里的设置。';
+  setTraceButtonState(traceRunning);
+}
+
+let previewTimer = null;
+// schedulePreview 给"输入中"做 300ms 防抖。
+//
+// 原因：延迟上限是数字输入框，用户敲 "200" 会产生三次 change，
+// 不防抖就是三次 /api/trace/preview 请求，而且中间那两次的结果
+// （上限 2ms、20ms）还会闪一下，看起来像界面在乱跳。
+function schedulePreview() {
+  if (previewTimer) clearTimeout(previewTimer);
+  previewTimer = setTimeout(refreshPreviewNow, 300);
+}
+
+async function refreshPreviewNow() {
+  if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
+  syncFilterStateFromInputs();
+
+  try {
+    const data = await api('/api/trace/preview?' + traceParams().toString());
+    renderPreview(data || {});
+  } catch (e) {
+    previewLoaded = false;
+    previewCount = 0;
+    previewLine.textContent = '无法读取可跟踪目标：' + e.message;
+    setTraceButtonState(true);
+  }
+}
+
+maxLatencyInput.addEventListener('input', schedulePreview);
+traceLimitInput.addEventListener('input', schedulePreview);
+
+traceStartBtn.addEventListener('click', () => {
+  if (traceRunning) return;
+  traceRunning = true;
+  traceStartBtn.textContent = '跟踪中…';
+  traceStartBtn.disabled = true;
+  traceHint.textContent = '已提交。进度见「进度」与「实时日志」。跟踪完成后表格会自动按线路重排。';
+
+  const body = traceBody();
+  api('/api/trace', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).catch((e) => {
+    // 只有"根本没起来"才把按钮放回去；已经跑起来的跟踪等扫描结束再恢复。
+    finishTraceFlow();
+    banner('err', '无法开始跟踪：' + e.message);
+  });
+});
+
+// finishTraceFlow 在收到"扫描／跟踪结束"后恢复按钮。
+//
+// 跟踪结束后按 route 排序：这一步不只是好看的排序——同一线路的目标相邻之后，
+// 用户才能判断"这条线路有多少个可用目标"，而这正是选线路的依据。
+async function finishTraceFlow() {
+  if (!traceRunning) return;
+  traceRunning = false;
+  filterState.sort = 'route';
+  paintSortMarks();
+  await refreshResults();
+  refreshPreviewNow();
+  setTraceButtonState(previewCount <= 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -757,6 +1416,11 @@ if (!token) {
   connectLog();
   loadStats();
   pollStatus();
+  // 页面一打开就把三段式流程的状态摆出来：国家下拉框有选项、
+  // 表格显示上次留下的结果、确认区给出当前条件下的可跟踪数量。
+  loadCountries();
+  refreshResults();
+  refreshPreviewNow();
   setInterval(pollStatus, 2000);
 }
 </script>
