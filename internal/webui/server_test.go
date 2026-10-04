@@ -37,6 +37,10 @@ func newTestServer(t *testing.T, cachePath string) *Server {
 	svc := service.New(service.Options{
 		DBPath:       filepath.Join(dir, "results.db"),
 		IdentityPath: filepath.Join(dir, "collector.json"),
+		// 这个夹具给的是固定缓存、断言的是固定目标，因此必须**离线**。
+		// 默认的"网络优先"会去下载真实列表：测试既依赖外网，
+		// 又会卡在下载上（实测卡到 180 秒超时）。
+		SourceCacheFirst: true,
 		Source: source.Config{
 			URL:         source.DefaultURL,
 			FallbackURL: "",

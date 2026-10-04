@@ -109,7 +109,13 @@ func TestLoadFromNetworkParsesAndWritesCache(t *testing.T) {
 	}
 }
 
-func TestLoadUsesFreshCacheWithoutNetwork(t *testing.T) {
+// TestLoadCacheFirstSkipsNetwork 验证**显式打开**缓存优先时不联网。
+//
+// 缓存优先现在是选项而不是默认（见 CacheFirst 的说明）：默认要每次
+// 试着下载最新列表，否则使用者测的是一份最多 6 小时前的快照，
+// 而且无从察觉。但"离线可复现"是真实需求（CI 用固定缓存跑固定目标），
+// 因此这个开关必须仍然有效。
+func TestLoadCacheFirstSkipsNetwork(t *testing.T) {
 	var requests int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&requests, 1)
@@ -124,13 +130,13 @@ func TestLoadUsesFreshCacheWithoutNetwork(t *testing.T) {
 	}
 
 	l := testLoader(t, Config{URL: srv.URL, FallbackURL: "", CachePath: cachePath})
-	res, err := l.Load(context.Background(), LoadOptions{})
+	res, err := l.Load(context.Background(), LoadOptions{CacheFirst: true})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 
 	if got := atomic.LoadInt32(&requests); got != 0 {
-		t.Errorf("network requests = %d, want 0 (fresh cache must be used)", got)
+		t.Errorf("network requests = %d, want 0 (cache-first must not touch the network)", got)
 	}
 	if !res.FromCache {
 		t.Error("FromCache = false, want true")
@@ -140,6 +146,104 @@ func TestLoadUsesFreshCacheWithoutNetwork(t *testing.T) {
 	}
 	if len(res.Targets) != 3 {
 		t.Errorf("targets = %d, want 3", len(res.Targets))
+	}
+}
+
+// TestLoadPrefersNetworkOverFreshCache 验证**默认**是网络优先。
+//
+// 这是本轮改动的核心：以前"缓存新鲜就直接返回"是默认行为，于是每次
+// 运行拿到的都是最多 6 小时前的目标列表，而上游随时会增删目标。
+// 新增的目标一个都测不到，且没有任何提示。
+func TestLoadPrefersNetworkOverFreshCache(t *testing.T) {
+	const freshTarget = "9.9.9.9"
+	srv := jsonServer(t, testJSONBody(t, freshTarget))
+
+	cachePath := filepath.Join(t.TempDir(), "all.json")
+	// 刚写好的缓存，内容与服务器不同——如果它被用了，目标就是旧的。
+	if err := WriteCache(cachePath, SourceMeta{URL: srv.URL, Format: "json"},
+		ParseStats{}, sampleTargets(t)); err != nil {
+		t.Fatalf("WriteCache: %v", err)
+	}
+
+	l := testLoader(t, Config{URL: srv.URL, FallbackURL: "", CachePath: cachePath})
+	res, err := l.Load(context.Background(), LoadOptions{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if res.FromCache {
+		t.Fatal("FromCache = true with a fresh cache present; the default must be network-first")
+	}
+
+	found := false
+	for _, target := range res.Targets {
+		if target.IP == freshTarget {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("downloaded targets do not contain the server's %s: %v", freshTarget, res.Targets)
+	}
+
+	// 下载成功后应当刷新缓存，让下一次失败时有更新的兜底。
+	if !res.CacheWritten {
+		t.Error("CacheWritten = false; a successful download should refresh the cache")
+	}
+}
+
+// TestLoadFallsBackToCacheWhenNetworkFails 验证下载失败时退回缓存
+// **不需要任何开关**。
+//
+// 断网、被墙、上游临时挂掉时，手上那份缓存仍然有用。这个兜底是
+// 默认行为，因此零值 LoadOptions 就必须生效——用"否定式"字段
+// （NoStaleFallback）的理由就在这里：新增调用方什么都不写也对。
+func TestLoadFallsBackToCacheWhenNetworkFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	cachePath := filepath.Join(t.TempDir(), "all.json")
+	// 故意写一份很旧的缓存：兜底不看新鲜度，"能不能下到"才是问题。
+	if err := writeCacheAt(t, cachePath, srv.URL, time.Now().Add(-72*time.Hour), sampleTargets(t)); err != nil {
+		t.Fatalf("writeCacheAt: %v", err)
+	}
+
+	l := testLoader(t, Config{URL: srv.URL, FallbackURL: "", CachePath: cachePath, Retries: 0})
+	res, err := l.Load(context.Background(), LoadOptions{})
+	if err != nil {
+		t.Fatalf("Load with a usable cache should not fail: %v", err)
+	}
+
+	if !res.FromCache {
+		t.Error("FromCache = false, want true (fell back to cache)")
+	}
+	if len(res.Targets) != 3 {
+		t.Errorf("targets = %d, want 3 from the cache", len(res.Targets))
+	}
+	// 必须把下载失败的原因带上，否则上层无法告诉使用者
+	// "你看到的可能是旧数据"。
+	if len(res.FetchErrors) == 0 {
+		t.Error("FetchErrors is empty; the download failure reason must be preserved")
+	}
+}
+
+// TestLoadNoStaleFallbackReportsFailure 验证可以显式要求"不兜底"。
+func TestLoadNoStaleFallbackReportsFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	cachePath := filepath.Join(t.TempDir(), "all.json")
+	if err := WriteCache(cachePath, SourceMeta{URL: srv.URL, Format: "json"},
+		ParseStats{}, sampleTargets(t)); err != nil {
+		t.Fatalf("WriteCache: %v", err)
+	}
+
+	l := testLoader(t, Config{URL: srv.URL, FallbackURL: "", CachePath: cachePath, Retries: 0})
+	if _, err := l.Load(context.Background(), LoadOptions{NoStaleFallback: true}); err == nil {
+		t.Fatal("Load succeeded although the cache fallback was disabled and the download failed")
 	}
 }
 
@@ -213,7 +317,9 @@ func TestLoadHonorsEmptyCache(t *testing.T) {
 	}
 
 	l := testLoader(t, Config{URL: srv.URL, FallbackURL: "", CachePath: cachePath})
-	res, err := l.Load(context.Background(), LoadOptions{})
+	// CacheFirst：这条测的是"空缓存算不算有效缓存"，
+	// 因此必须显式走缓存那条路（默认已经是网络优先）。
+	res, err := l.Load(context.Background(), LoadOptions{CacheFirst: true})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -413,7 +519,7 @@ func TestLoadAllowsStaleCacheWhenNetworkFails(t *testing.T) {
 	}
 
 	l := testLoader(t, Config{URL: srv.URL, FallbackURL: "", CachePath: cachePath, Retries: 0})
-	res, err := l.Load(context.Background(), LoadOptions{AllowStale: true})
+	res, err := l.Load(context.Background(), LoadOptions{})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -445,7 +551,7 @@ func TestLoadRejectsStaleCacheWhenNotAllowed(t *testing.T) {
 	}
 
 	l := testLoader(t, Config{URL: srv.URL, FallbackURL: "", CachePath: cachePath, Retries: 0})
-	if _, err := l.Load(context.Background(), LoadOptions{AllowStale: false, Refresh: true}); err == nil {
+	if _, err := l.Load(context.Background(), LoadOptions{NoStaleFallback: true, Refresh: true}); err == nil {
 		t.Fatal("Load succeeded, want error when network fails and stale cache is disallowed")
 	}
 }
@@ -459,7 +565,7 @@ func TestLoadFailsWhenNetworkAndCacheUnavailable(t *testing.T) {
 	cachePath := filepath.Join(t.TempDir(), "missing.json")
 	l := testLoader(t, Config{URL: srv.URL, FallbackURL: "", CachePath: cachePath, Retries: 0})
 
-	_, err := l.Load(context.Background(), LoadOptions{AllowStale: true})
+	_, err := l.Load(context.Background(), LoadOptions{})
 	if err == nil {
 		t.Fatal("Load succeeded, want error")
 	}
@@ -486,7 +592,7 @@ func TestLoadMalformedResponseReportsFormatIssue(t *testing.T) {
 	}
 
 	l := testLoader(t, Config{URL: srv.URL, FallbackURL: "", CachePath: cachePath, Retries: 0})
-	if _, err := l.Load(context.Background(), LoadOptions{Refresh: true, AllowStale: false}); err == nil {
+	if _, err := l.Load(context.Background(), LoadOptions{Refresh: true, NoStaleFallback: true}); err == nil {
 		t.Fatal("Load succeeded, want parse error")
 	}
 

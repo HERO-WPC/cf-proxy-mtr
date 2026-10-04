@@ -63,10 +63,17 @@ func (d *countingDialer) dial() probe.DialContextFunc {
 // 它守的是一个真实出现过的 bug：探测被写成 `for targets` 串行循环，
 // 60 个目标跑了 32 秒，而 `--workers 100` 照样被打印出来——
 // 使用者以为并发生效，实际上完全没有。这类"声明了并发却串行执行"
-// 的缺陷不会报错、不会有日志，只能靠时间断言抓出来。
+// 的缺陷不会报错、不会有日志。
 //
-// 判定方式是"并行耗时显著小于串行耗时"，而不是一个绝对秒数：
-// 绝对阈值会随机器快慢而失效。
+// 判据是**直接观测到的并发峰值**，而不是墙钟时间。
+//
+// 以前这里比对"并行耗时 < 串行耗时的一半"，那在单跑时没问题，
+// 但整个测试套件并行跑二十多个包时会被资源争抢拖慢：实测在
+// `go test ./...` 里偶发失败，单独跑却只用 317ms。用墙钟时间证明
+// "是否并发"本身就是绕路——失败时也说不清是没并发还是机器忙。
+//
+// 拨号器直接数在飞的探测个数：串行实现永远只有 1，真并发必然 >1。
+// 这个判据与机器快慢、负载都无关。
 func TestRunCSVScanProbesInParallel(t *testing.T) {
 	const (
 		targets   = 8
@@ -84,10 +91,12 @@ func TestRunCSVScanProbesInParallel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	dialer := &countingDialer{}
+
 	cfg := probe.DefaultConfig()
 	cfg.Workers = targets // 每个目标一个 worker
 	cfg.Timeout = timeoutMS * time.Millisecond
-	cfg.Dialer = blockingDialer()
+	cfg.Dialer = dialer.dial()
 
 	start := time.Now()
 	result, err := svc.RunCSVScan(ctx, CSVScanOptions{
@@ -103,16 +112,20 @@ func TestRunCSVScanProbesInParallel(t *testing.T) {
 		t.Fatalf("probed = %d, want %d", result.Probed, targets)
 	}
 
-	// 串行至少要 targets × timeout。留足余量：只要明显快于串行的一半，
-	// 就说明确实在并发（真实实现是 ~1×timeout）。
-	serialFloor := time.Duration(targets) * cfg.Timeout
-	if elapsed > serialFloor/2 {
-		t.Errorf("scan of %d targets with %d workers took %s; serial would be ~%s, "+
-			"so the probes are not running concurrently",
-			targets, cfg.Workers, elapsed.Round(time.Millisecond), serialFloor)
+	// 判据是**观测到的并发峰值**：串行实现永远只有 1 个探测在飞，
+	// 真并发必然大于 1。这与机器快慢、当前负载都无关，
+	// 而墙钟断言在整套测试并行跑时会被拖慢而误报。
+	peak := dialer.maxSeen.Load()
+	if peak < 2 {
+		t.Errorf("peak concurrent probes = %d, want >1: the probes are not running concurrently "+
+			"(workers=%d, targets=%d)", peak, cfg.Workers, targets)
 	}
-	t.Logf("%d 个目标 / %d 并发 / 每个 %.0fms：耗时 %s（串行约 %s）",
-		targets, cfg.Workers, cfg.Timeout.Seconds()*1000, elapsed.Round(time.Millisecond), serialFloor)
+
+	// 时间只作为信息记录，不再作为判据。
+	serialFloor := time.Duration(targets) * cfg.Timeout
+	t.Logf("%d 个目标 / %d 并发 / 每个 %.0fms：耗时 %s（串行约 %s），并发峰值 %d",
+		targets, cfg.Workers, cfg.Timeout.Seconds()*1000,
+		elapsed.Round(time.Millisecond), serialFloor, peak)
 }
 
 // TestRunCSVScanRespectsWorkerLimit 验证并发数**不会超过**配置值。

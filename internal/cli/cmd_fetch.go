@@ -22,11 +22,17 @@ type fetchParams struct {
 	cachePath   string
 	noCache     bool
 	refresh     bool
-	allowStale  bool
-	timeout     time.Duration
-	retries     int
-	proxy       string
-	verbose     bool
+
+	// cacheFirst 要回"新鲜缓存直接生效、不联网"的行为。
+	//
+	// fetch 的语义是"去把目标列表下载下来"，因此默认每次都下载；
+	// 需要"只是确保本地有一份"时（脚本里反复调用）打开它。
+	cacheFirst bool
+	allowStale bool
+	timeout    time.Duration
+	retries    int
+	proxy      string
+	verbose    bool
 }
 
 // newFetchCommand 构造 fetch 子命令。
@@ -81,10 +87,11 @@ func runFetch(env *Env, args []string) error {
 		res, err = loader.FetchOnly(ctx)
 	} else {
 		res, err = loader.Load(ctx, source.LoadOptions{
-			Refresh:    p.refresh,
-			ForceFetch: p.refresh,
-			CachePath:  p.cachePath,
-			AllowStale: p.allowStale,
+			Refresh:         p.refresh,
+			ForceFetch:      p.refresh,
+			CachePath:       p.cachePath,
+			CacheFirst:      p.cacheFirst,
+			NoStaleFallback: !p.allowStale,
 		})
 	}
 	if err != nil {
@@ -106,6 +113,8 @@ func fetchFlagSet(p *fetchParams) *flag.FlagSet {
 	fs.StringVar(&p.cachePath, "cache", source.DefaultCachePath, "本地缓存路径")
 	fs.BoolVar(&p.noCache, "no-cache", false, "只下载并解析，不读取也不写入缓存")
 	fs.BoolVar(&p.refresh, "refresh", false, "忽略缓存，强制重新下载")
+	fs.BoolVar(&p.cacheFirst, "source-cache-first", false,
+		"本地已有新鲜缓存时不联网（默认是网络优先：每次都先下载）")
 	fs.BoolVar(&p.allowStale, "allow-stale", true, "网络失败时允许回退使用过期缓存")
 	fs.DurationVar(&p.timeout, "timeout", source.DefaultTimeout, "单次 HTTP 请求超时")
 	fs.IntVar(&p.retries, "retries", source.DefaultRetries, "每个数据源地址的重试次数")

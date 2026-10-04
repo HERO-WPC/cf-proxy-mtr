@@ -33,10 +33,32 @@ type LoadOptions struct {
 	CachePath string
 
 	// CacheTTL 覆盖默认缓存有效期（<=0 表示使用 DefaultCacheTTL）。
+	//
+	// 只在 CacheFirst 为真时有意义：默认策略下缓存是**兜底**而不是
+	// 首选，因此不看新鲜度（能下到就用新的，下不到就用手上这份）。
 	CacheTTL time.Duration
 
-	// AllowStale 为真时，网络失败后允许使用过期缓存。
-	AllowStale bool
+	// CacheFirst 为真时，新鲜缓存直接生效，不联网。
+	//
+	// **默认（零值）是网络优先**：每次运行都先试着下载最新的目标列表，
+	// 只有下载失败才退回缓存。理由：目标列表是这份工具的全部输入，
+	// 上游随时会增删目标。用一份 6 小时前的列表意味着这 6 小时里
+	// 新增的目标一个都测不到，而且**不会有任何提示**——使用者以为
+	// 自己测的是"全部"，实际测的是一份旧快照。
+	//
+	// 需要离线可复现的场景（CI 用固定缓存跑固定目标）显式打开它。
+	CacheFirst bool
+
+	// NoStaleFallback 为真时，下载失败后**不**退回缓存，直接报错。
+	//
+	// 默认（零值）是退回：断网、被墙、上游临时挂掉时，手上那份
+	// 缓存仍然有用，不该整个功能不可用。退回时会明确说出用的是
+	// 哪份缓存、它有多旧。
+	//
+	// 用"否定式"而不是 AllowStale 那种肯定式，是为了让**零值就是
+	// 想要的默认**：新增调用方什么都不写也能拿到正确行为，
+	// 而不是要记得设一个 true。
+	NoStaleFallback bool
 
 	// WantConfig 为真时额外返回缓存中记录的"原始配置内容"。
 	//
@@ -132,7 +154,7 @@ func debugf(format string, args ...any) {
 //	新鲜缓存 ──────────────► 直接使用
 //	    │ 未命中 / 过期 / --refresh
 //	    ▼
-//	下载主源 ── 失败 ──► 下载备用源 ── 失败 ──► 回退过期缓存（AllowStale）
+//	下载主源 ── 失败 ──► 下载备用源 ── 失败 ──► 回退缓存（默认）
 //	    │ 成功
 //	    ▼
 //	解析（容错）──► 写缓存（原子）──► 返回
@@ -209,8 +231,12 @@ func (l *Loader) Load(ctx context.Context, opts LoadOptions) (*Result, error) {
 
 	wantNetwork := opts.Refresh || opts.ForceFetch
 
-	// 1) 尝试命中新鲜缓存。
-	if !wantNetwork {
+	// 1) 只有**明确要求**时才优先用缓存。
+	//
+	// 默认是网络优先：见 CacheFirst 的说明。以前这里的条件是
+	// "!wantNetwork"，于是"缓存新鲜就直接返回"成了默认行为——
+	// 使用者拿到的是最多 6 小时前的目标列表，而且无从察觉。
+	if opts.CacheFirst && !wantNetwork {
 		if res, ok := l.tryCache(cachePath, ttl, now()); ok {
 			return res, nil
 		}
@@ -255,8 +281,12 @@ func (l *Loader) Load(ctx context.Context, opts LoadOptions) (*Result, error) {
 			fr.URL, format, ContentLengthHint(len(fr.Body)), perr)
 	}
 
-	// 3) 网络失败：在允许时回退到过期缓存。
-	if opts.AllowStale {
+	// 3) 网络失败：退回缓存（默认行为，不看新鲜度）。
+	//
+	// 不看新鲜度是刻意的："能不能下到"才是这里的问题，而不是
+	// "手上这份够不够新"。退回时会记录下载失败的原因，
+	// 让上层能如实告诉使用者"你看到的可能是旧数据"。
+	if !opts.NoStaleFallback {
 		if res, ok := l.tryStaleCache(cachePath); ok {
 			res.FetchErrors = append(res.FetchErrors, fetchErr.Error())
 			return res, nil

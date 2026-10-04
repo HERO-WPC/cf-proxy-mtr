@@ -64,6 +64,7 @@ func TestTraceRequiresTargets(t *testing.T) {
 	code, _, stderr := runCLI("trace",
 		"--cache", emptyCachePath(t),
 		"--url", sourceDefaultURL(),
+		"--source-cache-first",
 		"--fallback-url", "",
 		"--source-retries", "0",
 		"--quiet")
@@ -194,6 +195,10 @@ func TestScanTraceRejectsBadMode(t *testing.T) {
 	code, _, stderr := runCLI("scan",
 		"--cache", emptyCachePath(t),
 		"--url", sourceDefaultURL(),
+		// 显式离线：这条测的是"非法跟踪模式"的用法错误，校验发生在
+		// 加载目标之前。加上这个开关是为了万一以后校验顺序变了，
+		// 测试也不会悄悄变成真实网络请求。
+		"--source-cache-first",
 		"--fallback-url", "",
 		"--source-retries", "0",
 		"--out", filepath.Join(dir, "results.csv"),

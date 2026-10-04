@@ -52,6 +52,7 @@ func offlineProbeArgs(cachePath string, extra ...string) []string {
 	args := []string{
 		"probe",
 		"--url", source.DefaultURL,
+		"--source-cache-first",
 		"--fallback-url", "",
 		"--cache", cachePath,
 		"--source-retries", "0",

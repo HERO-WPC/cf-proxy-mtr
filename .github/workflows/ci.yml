@@ -103,8 +103,11 @@ jobs:
             -target 1.1.1.1:80 \
             -target 8.8.8.8:53
 
+          # --source-cache-first：这份缓存与目标都是固定的，断言也是固定的。
+          # 默认是"网络优先"，会去下载真实列表，断言随之失去意义。
           source_flags=(--url https://zip.cm.edu.kg/all.json
-                        --fallback-url "" --cache "$work/all.json" --source-retries 0)
+                        --fallback-url "" --cache "$work/all.json" --source-retries 0
+                        --source-cache-first)
 
           # scan 只写 CSV：没有数据库、没有会话、没有续测。
           #

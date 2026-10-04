@@ -33,6 +33,9 @@ func scanCSVArgs(cachePath, outPath, identityPath string, extra ...string) []str
 		// 拉 32 MB、依赖外网、并且把测试拖到超时。
 		// 下载路径由 internal/trace 的单元测试用假服务端覆盖。
 		"--trace-no-download",
+		// 同理：夹具给的是固定缓存、断言的是固定目标，
+		// 默认的"网络优先"会去下载真实列表，测试就变成依赖外网了。
+		"--source-cache-first",
 	}
 	return append(args, extra...)
 }

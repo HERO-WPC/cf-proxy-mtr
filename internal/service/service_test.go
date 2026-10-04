@@ -56,6 +56,9 @@ func testService(t *testing.T, cachePath string) *Service {
 	return New(Options{
 		DBPath:       filepath.Join(dir, "results.db"),
 		IdentityPath: filepath.Join(dir, "collector.json"),
+		// 这个夹具是**完全离线**的：它给一份固定缓存、并断言固定目标。
+		// 默认的"网络优先"会去下载真实列表，于是测试变成依赖外网。
+		SourceCacheFirst: true,
 		Source: source.Config{
 			URL:         source.DefaultURL,
 			FallbackURL: "",

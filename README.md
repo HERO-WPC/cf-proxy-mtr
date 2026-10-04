@@ -311,7 +311,7 @@ platform:       windows/amd64
 ### fetch：下载并解析目标列表
 
 ```bash
-cf-route-tester fetch                 # 缓存新鲜则直接用缓存，否则联网下载并写缓存
+cf-route-tester fetch                 # 下载并写缓存（默认每次都会去下载最新的一份）
 cf-route-tester fetch --refresh       # 忽略缓存，强制重新下载
 cf-route-tester fetch --no-cache      # 只下载解析，不读也不写缓存
 cf-route-tester fetch --verbose       # 输出解析统计、跳过原因与全部告警
@@ -347,8 +347,14 @@ cache:        data/all.json (written)
 - **缓存是原子写入**：先写临时文件再 rename，进程被中断不会留下半个文件。
 - **缓存只与当前主数据源匹配**：若缓存是由备用源写入的（例如 all.txt），
   用 `--url all.json` 运行时不会复用该缓存，避免两类元数据不同的源互相污染。
-- **网络失败可回退过期缓存**：默认 `--allow-stale=true`，
-  但会在输出中用 `origin: cache (stale)` 与 `warning: using STALE cache` 明确提示。
+- **默认网络优先，缓存只作兜底**：每次运行都先试着下载最新的目标列表，
+  **下载失败才退回缓存**（不看新鲜度）。想反过来——"本地有新鲜缓存就不联网"——
+  用 `--source-cache-first`（`fetch` 上是同一个旗标）。
+
+  为什么默认这样：目标列表是这份工具的全部输入，上游随时会增删目标。
+  以前"缓存 6 小时内就直接用"意味着这 6 小时里新增的目标一个都测不到，
+  而且**没有任何提示**——使用者以为自己测的是全部，实际测的是一份旧快照。
+  缓存兜底仍然默认开启：断网、被墙、上游临时挂掉时手上那份仍然有用。
 - **代理**：`--proxy` 显式指定时优先；未指定则沿用环境变量 `HTTP_PROXY` / `HTTPS_PROXY`。
 
 ### detect：测量者所在地区与运营商

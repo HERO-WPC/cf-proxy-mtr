@@ -86,8 +86,11 @@ func TestFetchReusesCacheFromSamePrimary(t *testing.T) {
 	defer srv.Close()
 
 	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	// --source-cache-first：这条测的就是"缓存能被复用"。
+	// 默认已经是网络优先（fetch 的语义就是去下载），
+	// 因此要验缓存复用必须显式要求。
 	args := []string{"fetch", "--url", srv.URL, "--fallback-url", "", "--cache", cachePath,
-		"--retries", "0", "--timeout", "5s"}
+		"--retries", "0", "--timeout", "5s", "--source-cache-first"}
 
 	if code, _, stderr := runCLI(args...); code != ExitCodeOK {
 		t.Fatalf("first run exit code = %d, want 0 (stderr=%q)", code, stderr)

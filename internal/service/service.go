@@ -51,6 +51,12 @@ type Options struct {
 	// Source 是目标列表的来源配置。
 	Source source.Config
 
+	// SourceCacheFirst 为真时优先用本地缓存的目标列表，不去联网。
+	//
+	// 默认（false）是网络优先：先下载，下载不到才退回缓存。
+	// 需要离线可复现的场景（CI 用固定缓存跑固定目标）显式打开它。
+	SourceCacheFirst bool
+
 	// Logf 是可选的日志回调（nil 表示不记录）。
 	Logf func(format string, args ...any)
 }
@@ -373,7 +379,9 @@ func (s *Service) loadTargets(ctx context.Context) ([]model.Target, source.Sourc
 		return nil, source.SourceMeta{}, false, err
 	}
 
-	result, err := loader.Load(ctx, source.LoadOptions{})
+	result, err := loader.Load(ctx, source.LoadOptions{
+		CacheFirst: s.opts.SourceCacheFirst,
+	})
 	if err != nil {
 		return nil, source.SourceMeta{}, false, err
 	}

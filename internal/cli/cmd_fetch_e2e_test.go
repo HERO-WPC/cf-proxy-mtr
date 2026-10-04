@@ -109,11 +109,13 @@ func TestFetchEndToEndAgainstLocalServer(t *testing.T) {
 		t.Fatalf("cache file not written: %v", err)
 	}
 
+	// --source-cache-first：这里要验的是"第二次能命中缓存"。
 	code2, stdout2, _ := runCLI("fetch",
 		"--url", srv.URL+"/all.json",
 		"--fallback-url", "",
 		"--cache", cachePath,
-		"--timeout", "5s")
+		"--timeout", "5s",
+		"--source-cache-first")
 	if code2 != ExitCodeOK {
 		t.Fatalf("second run exit code = %d, want 0", code2)
 	}

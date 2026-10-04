@@ -285,6 +285,8 @@ func runScan(env *Env, args []string) error {
 	svc := service.New(service.Options{
 		IdentityPath: p.identityPath,
 		Source:       p.source.toConfig(),
+		// 默认网络优先；--source-cache-first 要回旧的缓存优先行为。
+		SourceCacheFirst: p.source.cacheFirst,
 		Logf: func(format string, args ...any) {
 			// 跟踪阶段的 worker 会**并发**调用，不加锁会让
 			// 两行日志交错成一行乱码。
