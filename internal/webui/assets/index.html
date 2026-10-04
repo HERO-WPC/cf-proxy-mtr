@@ -155,12 +155,14 @@
   .confirm .headline b { color: #bcd4ff; font-variant-numeric: tabular-nums; }
   .confirm button.primary { min-width: 210px; }
   select[multiple] { min-height: 130px; }
-  /* 确认区里「跟踪开关＋参数」与下面的筛选条件是两码事，用一条细线分开。
-     不再加小标题：确认区本身已经有 headline，再加一层标题只会更乱。 */
+  /* 确认区里「跟踪参数」与下面的筛选条件是两码事，用一条细线分开。
+     这里给一个小标题：原先靠"有没有勾选「同时做线路跟踪」"来判断
+     这一块是什么，勾选框去掉之后需要一句话说明它是跟踪设置。 */
   .confirm .traceblock {
     padding-bottom: 12px; margin-bottom: 12px;
     border-bottom: 1px dashed var(--border);
   }
+  .blocktitle { color: var(--text); font-size: 13px; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -284,21 +286,18 @@
            筛选条件（延迟上限 / 条数上限 / 国家）是预览与实际跟踪共用的同一份状态，
            所以"会跟踪 N 个"这句话和真正提交的条件不可能对不上。 -->
       <div class="confirm">
-        <!-- 线路跟踪的开关与参数。这些设置同时服务两条路径：
-             ① 勾上后点「开始测量」时顺带跟踪（请求体字段 trace）；
-             ② 点本区最下面的「开始跟踪线路」单独跟踪。
-             id 一律保持原样（#trace / #traceFields），JS 与后端都按 id 取。 -->
+        <!-- 线路跟踪的参数。直接摊开，不再藏在一个「同时做线路跟踪」的
+             开关后面：跟踪现在是独立的一步（先测出延迟、再挑一批跟踪），
+             那个开关唯一的作用是"测量时顺带跟踪"，而它带来的只是
+             "同一次运行里做两件慢事"，参数还要多点一下才看得见。
+             id 一律保持原样（#traceFields 等），JS 按 id 取。 -->
         <div class="traceblock">
-          <div class="check">
-            <input type="checkbox" id="trace">
-            <label for="trace" style="margin:0">同时做线路跟踪（需要 NextTrace）</label>
-          </div>
+          <div class="blocktitle">线路跟踪设置</div>
           <div class="hint" style="margin-top:6px">
-            勾上它再点「选择目标国家」里的「开始测量」，TCP 测量跑完就会顺带跟踪一批目标，
-            跟踪条件用的就是本区下面的延迟上限 / 条数上限 / 国家。
-            不勾也能单独跟踪：先测出结果，再点本区最下面的「开始跟踪线路」。
+            跟踪是<b>独立的一步</b>：先在上面测出延迟，再用下面的条件挑一批，点「开始跟踪线路」。
+            这些参数只影响跟踪，不影响 TCP 测量。
           </div>
-          <div class="fields" id="traceFields" style="margin-top:10px; display:none">
+          <div class="fields" id="traceFields" style="margin-top:10px">
             <div>
               <label for="traceBinary">NextTrace 路径（留空=从 PATH 查找）</label>
               <input type="text" id="traceBinary" placeholder="nexttrace">
@@ -546,12 +545,6 @@ async function loadStats() {
 // 不选国家时等价于"全部国家"，因此原先那个无筛选的 #startBtn 是重复的，
 // 已随测量设置一起并入「选择目标国家」区。
 const stopBtn = document.getElementById('stopBtn');
-const traceBox = document.getElementById('trace');
-const traceFields = document.getElementById('traceFields');
-
-traceBox.addEventListener('change', () => {
-  traceFields.style.display = traceBox.checked ? 'grid' : 'none';
-});
 
 function setBusy(busy) {
   stopBtn.disabled = !busy;
@@ -572,7 +565,9 @@ function buildScanBody(countries) {
     output_path: document.getElementById('output').value.trim(),
     append: document.getElementById('append').checked,
     resume: false,
-    trace: traceBox.checked,
+    // 测量不再顺带跟踪：跟踪是独立的一步（按延迟挑一批再点「开始跟踪线路」）。
+    // 原先这里读「同时做线路跟踪」的勾选，那个开关已经去掉了。
+    trace: false,
     trace_binary: document.getElementById('traceBinary').value.trim(),
     trace_mode: document.getElementById('traceMode').value,
     data_provider: document.getElementById('dataProvider').value,
