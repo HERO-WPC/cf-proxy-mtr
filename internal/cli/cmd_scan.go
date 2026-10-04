@@ -55,6 +55,10 @@ type scanParams struct {
 	traceRefreshASNPrefix bool
 	traceASNBulkURL       string
 
+	// nexttrace 缺失时是否自动下载。
+	traceNoDownload  bool
+	traceDownloadDir string
+
 	// 采集者画像覆盖项。
 	collectorCountry   string
 	collectorProvince  string
@@ -116,6 +120,10 @@ func scanFlagSet(p *scanParams) *flag.FlagSet {
 		"不用本地 ASN 前缀识别线路（默认开启；它是无限、不限流、无需账号的线路识别方式）")
 	fs.StringVar(&p.traceASNPrefixDir, "trace-asn-prefix-dir", asnprefix.DefaultDir,
 		"ASN 前缀缓存目录")
+	fs.BoolVar(&p.traceNoDownload, "trace-no-download", false,
+		"不要在 nexttrace 缺失时自动下载（默认会自动下载到程序目录的 data/bin）")
+	fs.StringVar(&p.traceDownloadDir, "trace-download-dir", "",
+		"自动下载 nexttrace 的落点（留空=程序目录下的 data/bin）")
 	fs.StringVar(&p.traceASNBulkURL, "trace-asn-bulk-url", "",
 		"ASN 前缀全量表的地址（留空=用内置默认；可指向镜像或本地文件）")
 	fs.BoolVar(&p.traceRefreshASNPrefix, "trace-refresh-asn-prefix", false,
@@ -282,10 +290,12 @@ func runScan(env *Env, args []string) error {
 		Limit:      p.limit,
 		Trace:      p.trace,
 		TraceConfig: service.TraceOptions{
-			Binary:       p.traceBinary,
-			Mode:         p.traceMode,
-			DataProvider: p.traceDataProvider,
-			PowProvider:  p.tracePowProvider,
+			Binary:         p.traceBinary,
+			Mode:           p.traceMode,
+			DataProvider:   p.traceDataProvider,
+			PowProvider:    p.tracePowProvider,
+			NoAutoDownload: p.traceNoDownload,
+			DownloadDir:    p.traceDownloadDir,
 		},
 		NoASNPrefix: p.traceNoASNPrefix,
 		ASNPrefixOptions: asnprefix.Options{

@@ -220,7 +220,18 @@
             <div class="hint" style="margin-top:6px">
               按"线路的 IP 段"（来自 RouteViews BGP 数据）判断路径走了 CN2 / 163 / CMI 等哪几条线路。
               首次使用会抓取约 1.7&nbsp;MB 前缀并缓存 7 天，之后完全离线。
-              勾上它就可以把上面的数据源设成 <code>disable-geoip</code>，彻底不依赖任何限流的 GeoIP 服务。
+              勾上它就可以把上面的数据源设成 <code>disable-geoip</code>，彻底不依赖任何限流的 GeoIP 服务。</div>
+            <div class="check" style="margin-top:8px">
+              <input type="checkbox" id="autoDownload" checked>
+              <label for="autoDownload" style="margin:0">
+                缺 NextTrace 时自动下载（约 32 MB，落到程序目录的 data/bin）
+              </label>
+            </div>
+            <div class="hint" style="margin-top:6px">
+              与程序<b>同目录</b>、或放在 <code>data/bin</code> 下的 nexttrace 会被优先使用；
+              自定义路径（上面的「NextTrace 路径」）优先级最高，<b>不会被自动下载覆盖</b>。
+              自动下载取固定版本 <code>v1.7.3</code>，且只提供 nexttrace 本体——
+              Windows 上 TCP/UDP 模式还需要 WinDivert（发布物里不含）。
             </div>
           </div>
         </div>
@@ -435,6 +446,7 @@ startBtn.addEventListener('click', async () => {
     data_provider: document.getElementById('dataProvider').value,
     pow_provider: document.getElementById('powProvider').value,
     no_asn_prefix: !document.getElementById('useASNPrefix').checked,
+    no_auto_download: !document.getElementById('autoDownload').checked,
   };
 
   banner('', '');

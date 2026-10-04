@@ -534,6 +534,9 @@ type scanRequest struct {
 	// NoASNPrefix 为真时不用本地 ASN 前缀识别线路。
 	NoASNPrefix bool `json:"no_asn_prefix"`
 
+	// NoAutoDownload 为真时不在缺 nexttrace 时自动下载。
+	NoAutoDownload bool `json:"no_auto_download"`
+
 	// OutputPath 是结果 CSV 的路径（留空用默认值）。
 	//
 	// 结果只进 CSV：没有会话、没有数据库、没有续测。
@@ -616,12 +619,13 @@ func (s *Server) runScan(ctx context.Context, req scanRequest, cancel context.Ca
 		Limit:      req.Limit,
 		Trace:      req.Trace,
 		TraceConfig: service.TraceOptions{
-			Binary:       strings.TrimSpace(req.TraceBinary),
-			Mode:         strings.TrimSpace(req.TraceMode),
-			DataProvider: strings.TrimSpace(req.DataProvider),
-			PowProvider:  strings.TrimSpace(req.PowProvider),
-			Workers:      req.TraceWorkers,
-			Timeout:      durationSeconds(req.TraceTimeoutS),
+			Binary:         strings.TrimSpace(req.TraceBinary),
+			Mode:           strings.TrimSpace(req.TraceMode),
+			DataProvider:   strings.TrimSpace(req.DataProvider),
+			PowProvider:    strings.TrimSpace(req.PowProvider),
+			NoAutoDownload: req.NoAutoDownload,
+			Workers:        req.TraceWorkers,
+			Timeout:        durationSeconds(req.TraceTimeoutS),
 		},
 		// Progress 既推给进度条，也翻译成日志行（阶段完成时才写一条）。
 		Progress: s.emitCSVProgress,

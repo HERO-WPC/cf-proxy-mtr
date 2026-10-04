@@ -52,6 +52,9 @@ type traceParams struct {
 	dataProvider string
 	powProvider  string
 
+	noDownload  bool
+	downloadDir string
+
 	jsonOut bool
 	verbose bool
 	quiet   bool
@@ -96,6 +99,10 @@ func traceFlagSet(p *traceParams) *flag.FlagSet {
 	fs.StringVar(&p.mode, "mode", string(trace.ModeTCP), "跟踪模式：tcp / icmp / udp")
 	fs.StringVar(&p.dataProvider, "data-provider", "",
 		"GeoIP 数据源。留空=用 NextTrace 默认。可选："+providerList())
+	fs.BoolVar(&p.noDownload, "no-download", false,
+		"不要在 nexttrace 缺失时自动下载（默认会自动下载到程序目录的 data/bin）")
+	fs.StringVar(&p.downloadDir, "download-dir", "",
+		"自动下载 nexttrace 的落点（留空=程序目录下的 data/bin）")
 	fs.StringVar(&p.powProvider, "pow-provider", "",
 		"NextTrace API v3 的 PoW 令牌源（仅 --data-provider NextTrace-API 时生效），可选："+powProviderList())
 	fs.IntVar(&p.workers, "workers", trace.DefaultWorkers,
@@ -233,6 +240,10 @@ func buildTraceEngine(ctx context.Context, p traceParams) (*trace.NextTraceEngin
 	opts := trace.EngineOptions{
 		BinaryPath: p.binary,
 		Mode:       mode,
+		// 找不到就自动下载；显式指定了路径或加了 --no-download 则不下载
+		// （引擎自己会判断"显式路径"这件事）。
+		AutoDownload: !p.noDownload,
+		DownloadDir:  p.downloadDir,
 		// 数据源与 PoW 源在这里原样传下去，由引擎构造时校验。
 		// 非法值必须变成**用法错误**（而不是让 nexttrace 悄悄换源）。
 		DataProvider: trace.DataProvider(p.dataProvider),

@@ -813,6 +813,59 @@ nexttrace --json --icmp-mode 0 <IP>
 `1.2.3.4:2053` 一定用 `--port 2053`，绝不固定成 443。
 这条由 `TestBuildArgsUsesActualTargetPort` 逐端口覆盖。
 
+#### nexttrace 从哪儿来：查找顺序与自动下载
+
+线路跟踪依赖一个外部程序。此前"没装"就等于"跟踪不可用"，而使用者
+要自己搜平台、挑架构、下对一个 32 MB 的文件、再放到对的位置——
+这一步劝退的人比任何技术问题都多。现在它会自己解决。
+
+**查找顺序（越靠前优先级越高）**：
+
+| 顺序 | 位置 | 说明 |
+| --- | --- | --- |
+| 1 | 显式路径（`--binary` / `--trace-binary`） | **最高优先级，且不会被自动下载覆盖** |
+| 2 | 与本程序**同目录**的 `nexttrace[.exe]` | 绿色版把两个文件放一起即可 |
+| 3 | 程序目录下的 `data/bin/` | 自动下载的落点 |
+| 4 | 当前工作目录下的 `data/bin/` | 从终端在别处运行时 |
+| 5 | `PATH` | |
+| 6 | 都没有 → **自动下载**（默认开） | 落到程序目录的 `data/bin/` |
+
+第 2 项优先于 `PATH` 是刻意的：使用者把 nexttrace 放在程序旁边时，
+那份就是他想要的，而 `PATH` 里可能另有版本。
+
+**自动下载**取固定版本 `v1.7.3`（与测试里锁定的 JSON 结构、
+参数行为一致），落到程序目录的 `data/bin/`：
+
+```text
+trace: 正在下载 nexttrace v1.7.3（nexttrace_windows_amd64.exe）
+      来源：https://github.com/nxtrace/NTrace-core/releases/download/v1.7.3/...
+      已下载到 .../data/bin/nexttrace_windows_amd64.exe（32.1 MB）
+```
+
+下载后**会真的执行一次 `--version`**才认账。体积检查只能挡住
+"上游返回了 HTML 错误页"这类情况；"下到了别的架构的二进制"只有
+执行一次才知道。校验失败会把文件删掉——留一个永远跑不起来的残骸
+比什么都不留更糟，因为下次启动会以为"已经装好了"。
+
+关掉自动下载：
+
+```bash
+cf-route-tester scan --trace --trace-no-download
+cf-route-tester trace --target 1.1.1.1:443 --no-download
+cf-route-tester scan --trace --trace-download-dir /opt/nt   # 换落点
+```
+
+图形界面里是跟踪选项下的一个勾选框。
+
+**两个边界**：
+
+- **显式路径不会被自动下载顶掉。** 使用者写了 `--binary /path/to/nt`，
+  那即使那个文件不可用也只报"不可用"，不会换成别的东西——否则他会
+  以为自己配的生效了。
+- **自动下载默认只在生产路径打开**（CLI / 图形界面）。`EngineOptions`
+  的零值是**不下载**，因此单元测试里构造一个不存在的引擎时绝不会
+  偷偷联网下 32 MB、把测试变成依赖外网。
+
 #### Windows 上 TCP/UDP 模式需要管理员权限
 
 NextTrace 在 Windows 上的 TCP/UDP 探测依赖 **WinDivert**：
@@ -2047,6 +2100,8 @@ cf-route-tester/
 | --- | --- |
 | `engine.go` | `TraceEngine` 接口、`Hop` / `TraceResult`、失败分类（含"引擎不存在""权限不足"这类**环境问题**，它们不算线路质量）。 |
 | `ntrace.go` | 外部进程调用：路径解析（PATH / 绝对路径 / 补 `.exe`）、参数构造（含数据源与 PoW 源）、超时、版本查询。 |
+| `fetch.go` | nexttrace 的查找与自动下载。`SearchDirs`（同目录 → `data/bin` → cwd/data/bin）、`AssetName`（上游命名 `nexttrace_<os>_<arch>[.exe]`）、`Download`（原子落盘、体积下限挡住错误页、下载后真的跑一次 `--version`、失败则删掉残骸）。固定版本 `v1.7.3`：跟随 latest 意味着上游某天改了 JSON 结构，使用者的线路名会在毫无征兆的情况下变成空。 |
+| `fetch_test.go` | 资源名与上游一致、不支持的平台在联网前就被拒绝、同目录优先于 `PATH`、`data/bin` 也在查找范围、`PATH` 兜底仍在、**找不到时的错误列出全部搜索位置**、显式路径判定、下载成功路径、**拒绝 HTML 错误页且不留残骸**、非 200 报错、跑不起来的二进制被清理、以及两条边界：未启用时**一次网络请求都不发**、显式路径失败时不下载别的。 |
 | `provider.go` | 两个「源」选项：`DataProvider`（9 个 GeoIP 源）与 `PowProvider`（NextTrace API v3 的令牌源）。做成受校验类型而不是透传字符串，因为 **nexttrace 拿到不认识的源名不报错、而是换一个源继续跑**——那会让人以为在用 IPInfo 而实际不是，从结果上看不出来。含大小写不敏感与常见简写（`ipinfo` / `ipapi` / `leomoeapi` / `none` …）。 |
 | `parser.go` | NextTrace JSON → `TraceResult` 的归一化。**含纳秒→毫秒换算**、二维 `Hops` 聚合、乱码 `*_en` 字段优先。 |
 | `testdata/nexttrace_v1.7.3_icmp.json` | **真实** NextTrace v1.7.3 输出夹具。解析契约的依据；有测试断言它没被手工改过。 |
@@ -2228,7 +2283,18 @@ cf-route-tester/
 | `data/.gitignore` | 忽略 `data/` 下的一切（数据与第三方二进制都不上传）。 |
 | `data/README.md` | 说明 `data/` 目录里各文件是什么、为什么不上传。 |
 
-### CI
+### CI 与发布
+
+`.github/workflows/ci.yml` 管每次推送的验证（gofmt / vet / `-race` /
+六平台交叉编译 / CGO 检查 / 端到端冒烟 / 发布工具自检）。
+
+`.github/workflows/release.yml` 管发布：打一个 `v*` tag 即构建并创建
+GitHub Release。它用工作流自己的临时 `GITHUB_TOKEN`，因此**不需要任何
+长期密钥**——本地脚本则要在某台机器上放一个长期有效的 PAT，既容易泄露
+也容易在换机器时失效。产物由干净 checkout 从 tag 指向的提交构建，而且
+"打 tag"与"发布"之间没有人工步骤，不会出现 tag 打了却忘了传。
+发布前会重跑完整测试，并用 `sha256sum -c` 校验刚构建的产物：清单与文件
+对不上会让所有认真校验的人以为下载被篡改。
 
 | 文件 | 作用 |
 | --- | --- |

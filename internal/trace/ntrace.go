@@ -129,7 +129,15 @@ type Availability struct {
 // 因此这个函数只返回状态，不做任何全局副作用，
 // 调用方（CLI）决定是提示还是报错。
 func CheckAvailability(ctx context.Context, binaryPath string) Availability {
-	path, err := resolveBinary(binaryPath)
+	return checkAvailabilityIn(ctx, binaryPath, nil)
+}
+
+// checkAvailabilityIn 与 CheckAvailability 相同，但允许指定搜索目录。
+//
+// 单独一个内部函数是为了让测试能把自己的临时目录当成"同目录"，
+// 而不必去动真实可执行文件所在的目录。
+func checkAvailabilityIn(ctx context.Context, binaryPath string, searchDirs []string) Availability {
+	path, err := resolveBinary(binaryPath, searchDirs)
 	if err != nil {
 		return Availability{Err: err}
 	}
@@ -169,10 +177,15 @@ const NotFoundMessage = "NextTrace not found.\n" +
 // 支持两种配置：
 //   - 只写文件名（"nexttrace"）：从 PATH 查找；
 //   - 绝对/相对路径：直接使用（Windows 上允许省略 .exe）。
-func resolveBinary(binaryPath string) (string, error) {
+func resolveBinary(binaryPath string, searchDirs []string) (string, error) {
 	binaryPath = strings.TrimSpace(binaryPath)
 	if binaryPath == "" {
 		binaryPath = DefaultBinary
+	}
+
+	// 未显式指定搜索目录时用默认顺序（同目录 -> data/bin -> cwd/data/bin）。
+	if searchDirs == nil {
+		searchDirs = SearchDirs()
 	}
 
 	// 含路径分隔符：当作文件路径处理。
@@ -190,7 +203,17 @@ func resolveBinary(binaryPath string) (string, error) {
 		return filepath.Abs(candidate)
 	}
 
-	// 只有文件名：从 PATH 查找。
+	// 只有文件名：先在同目录与 data/bin 里找，最后才查 PATH。
+	//
+	// 顺序是刻意的：绿色版把 nexttrace 与本程序放在一起时，
+	// 那个文件就是"使用者自己的那份"，比 PATH 里可能存在的
+	// 另一个版本更该被选中。
+	for _, dir := range searchDirs {
+		if candidate, ok := lookInDir(dir, binaryPath); ok {
+			return candidate, nil
+		}
+	}
+
 	if found, err := exec.LookPath(binaryPath); err == nil {
 		return found, nil
 	}
@@ -203,7 +226,38 @@ func resolveBinary(binaryPath string) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("%w: %q not found in PATH", fs.ErrNotExist, binaryPath)
+	return "", fmt.Errorf("%w: %q not found in the program directory, data/bin, or PATH",
+		fs.ErrNotExist, binaryPath)
+}
+
+// lookInDir 在指定目录里找一个可执行文件。
+//
+// 会补 `.exe`：使用者把文件命名为 nexttrace.exe 而配置写 "nexttrace"
+// 是最常见的写法，不该因此找不到。
+func lookInDir(dir, name string) (string, bool) {
+	if strings.TrimSpace(dir) == "" {
+		return "", false
+	}
+
+	candidate := filepath.Join(dir, name)
+	if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+		if absolute, absErr := filepath.Abs(candidate); absErr == nil {
+			return absolute, true
+		}
+		return candidate, true
+	}
+
+	if runtime.GOOS == "windows" && !strings.HasSuffix(strings.ToLower(name), ".exe") {
+		withExe := candidate + ".exe"
+		if info, err := os.Stat(withExe); err == nil && !info.IsDir() {
+			if absolute, absErr := filepath.Abs(withExe); absErr == nil {
+				return absolute, true
+			}
+			return withExe, true
+		}
+	}
+
+	return "", false
 }
 
 // versionPattern 从 --version 输出里提取版本号。
@@ -295,6 +349,25 @@ type EngineOptions struct {
 
 	// SkipVersionCheck 为真时不查询版本（测试用）。
 	SkipVersionCheck bool
+
+	// AutoDownload 为真时，**完全没有找到** nexttrace 就自动下载一份。
+	//
+	// 默认关闭（零值），由生产路径显式打开：
+	// 测试里构造一个不存在的引擎时**绝不能**偷偷联网下载
+	// 32 MB 的东西——那会让单元测试依赖外网，还会拖慢 CI。
+	AutoDownload bool
+
+	// SearchDirs 覆盖查找目录（空表示用 SearchDirs()；测试用）。
+	SearchDirs []string
+
+	// DownloadVersion 是自动下载的版本（空表示 DefaultVersion）。
+	DownloadVersion string
+
+	// DownloadDir 是自动下载的落点（空表示 InstallDir()）。
+	DownloadDir string
+
+	// Logf 接收"正在下载"这类进度说明（可为 nil）。
+	Logf func(format string, args ...any)
 }
 
 // NewNextTraceEngine 构造引擎。
@@ -346,20 +419,48 @@ func NewNextTraceEngine(ctx context.Context, opts EngineOptions) (*NextTraceEngi
 		return engine, nil
 	}
 
-	path, err := resolveBinary(opts.BinaryPath)
+	path, err := resolveBinary(opts.BinaryPath, opts.SearchDirs)
 	if err != nil {
-		return nil, fmt.Errorf("%w\n%s", err, NotFoundMessage)
+		// 找不到就**自动下载**（默认开启）。
+		//
+		// 只在"完全没找到"时下载，而且只在**没有显式指定路径**时：
+		// 使用者明确说了用哪个文件，那就不该被一个自动下载顶掉——
+		// 那会让人以为自己配的路径生效了，实际用的是别的。
+		if !opts.AutoDownload || explicitPath(opts.BinaryPath) {
+			return nil, fmt.Errorf("%w\n%s", err, NotFoundMessage)
+		}
+
+		downloaded, downloadErr := Download(ctx, DownloadOptions{
+			Version: opts.DownloadVersion,
+			Dir:     opts.DownloadDir,
+			Logf:    opts.Logf,
+		})
+		if downloadErr != nil {
+			// 下载失败时把两条信息都给出来：为什么没找到、
+			// 以及为什么下载也没成功。只报一条会让人往复排查。
+			return nil, fmt.Errorf("%w\n%s\n\ntrace: 自动下载也失败了: %v",
+				err, NotFoundMessage, downloadErr)
+		}
+		path = downloaded
 	}
 	engine.resolvedPath = path
 
 	if !opts.SkipVersionCheck {
-		if avail := CheckAvailability(ctx, path); avail.Found {
+		if avail := checkAvailabilityIn(ctx, path, opts.SearchDirs); avail.Found {
 			engine.version = avail.Version
 		}
 		// 版本查不到不报错：有些构建的 --version 行为不同。
 	}
 
 	return engine, nil
+}
+
+// explicitPath 报告使用者是否**显式指定了文件路径**。
+//
+// 判据是"含路径分隔符"：写 "C:/Tools/nexttrace" 或 "./nt" 是明确
+// 指向某个文件；写 "nexttrace" 只是给了一个名字，让程序去搜。
+func explicitPath(binaryPath string) bool {
+	return strings.ContainsAny(strings.TrimSpace(binaryPath), `/\`)
 }
 
 // Name 实现 TraceEngine。

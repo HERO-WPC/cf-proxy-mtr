@@ -157,6 +157,22 @@ type TraceOptions struct {
 	// 常用 sakura 避开默认源的限流。
 	PowProvider string
 
+	// AutoDownload 为真时，找不到 nexttrace 就自动下载一份。
+	//
+	// 生产路径默认打开：让使用者不必自己去搜平台、挑架构、
+	// 下对一个几十 MB 的文件再放到对的位置——那一步劝退的人
+	// 比任何技术问题都多。
+	AutoDownload bool
+
+	// NoAutoDownload 显式关闭自动下载（对应 --trace-no-download）。
+	//
+	// 与 AutoDownload 分开是为了区分"没指定"与"明确关掉"：
+	// 命令行默认要下载，但 .env / 配置里可能想关掉。
+	NoAutoDownload bool
+
+	// DownloadDir 是自动下载的落点（空表示程序目录下的 data/bin）。
+	DownloadDir string
+
 	// Workers 是跟踪并发数（<=0 用默认值）。
 	Workers int
 
@@ -438,6 +454,10 @@ func (s *Service) buildTraceEngine(ctx context.Context, opts TraceOptions) (*tra
 	// 这里刻意不做二次判断，避免两处校验规则漂移。
 	engineOpts.DataProvider = trace.DataProvider(strings.TrimSpace(opts.DataProvider))
 	engineOpts.PowProvider = trace.PowProvider(strings.TrimSpace(opts.PowProvider))
+
+	// 找不到 nexttrace 就自动下载：默认开，除非显式关掉。
+	engineOpts.AutoDownload = !opts.NoAutoDownload
+	engineOpts.DownloadDir = opts.DownloadDir
 
 	return trace.NewNextTraceEngine(ctx, engineOpts)
 }
