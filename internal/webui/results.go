@@ -104,6 +104,16 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 	// CSV 文件里一行不少。
 	rows = csvstore.CollapseByTarget(rows)
 
+	// 国家分布必须**在应用筛选之前**统计。
+	//
+	// 它是一份"可选项清单"：界面用它画下拉框，让人从里面挑国家。
+	// 若先按 countries 过滤再统计，勾了美国之后清单里就只剩美国——
+	// 想换一个国家也无从选起（那个国家还在数据里，只是被筛掉了）。
+	//
+	// 实测后果：前端为了拿到完整清单，不得不额外再发一次不带筛选的
+	// 请求，把后端的问题绕过去。接口给出的"可选项"就该是完整的。
+	facet := csvstore.Countries(rows)
+
 	filtered := make([]csvstore.Row, 0, len(rows))
 	for _, row := range rows {
 		if len(countries) > 0 && !containsFold(countries, row.CCA2) {
@@ -123,7 +133,7 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 		Path:      path,
 		Exists:    true,
 		Total:     len(filtered),
-		Countries: csvstore.Countries(filtered),
+		Countries: facet,
 		Rows:      make([]resultRow, 0, min(len(filtered), maxResultRows)),
 	}
 	for i, row := range filtered {

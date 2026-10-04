@@ -321,6 +321,133 @@ func TestPreviewTraceSelectionMatchesActualSelection(t *testing.T) {
 	}
 }
 
+// TestPreviewCountsEachTargetOnce 验证一个国家里的目标只被算一次。
+//
+// 这是"界面上的数量必须来自延迟结果"这条要求的护栏，而且挡的是一个
+// 真实会发生的重复计数：一个目标跟踪过之后在 CSV 里**有两行**
+// （探测一行、跟踪一行）。按原始行统计就会把它算成两条，于是
+// 界面显示"美国 20 个"而结果表格只有 12 行——使用者一眼就看出对不上，
+// 却不知道哪个是对的。
+//
+// 界面上的表格用的是合并后的数据，因此统计也必须在合并之后做。
+func TestPreviewCountsEachTargetOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "results.csv")
+	store, err := csvstore.Open(csvstore.Options{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw := []csvstore.Row{
+		// 两个美国目标，各探测一行。
+		rowFor("a:443", "US", 20),
+		rowFor("b:443", "US", 30),
+		// 其中 a 跟踪过，因此又有一行（带线路、没有延迟）。
+		{Target: "a:443", IP: "1.2.3.4", Port: 443, Success: true, ASPath: "CMNET > CMI", CCA2: "US"},
+		// 一个德国目标。
+		rowFor("c:443", "DE", 40),
+	}
+	for _, row := range raw {
+		if err := store.Append(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	preview, err := PreviewTraceSelection(path, nil, 0, 0)
+	if err != nil {
+		t.Fatalf("PreviewTraceSelection: %v", err)
+	}
+
+	counts := make(map[string]int, len(preview.Countries))
+	for _, c := range preview.Countries {
+		counts[c.CCA2] = c.Count
+	}
+	if counts["US"] != 2 {
+		t.Errorf("US counted %d times, want 2 (the traced target appears twice in the file)", counts["US"])
+	}
+	if counts["DE"] != 1 {
+		t.Errorf("DE counted %d times, want 1", counts["DE"])
+	}
+
+	// Total 同理：它是"有几个目标可选"，不是一个文件里有多少行。
+	if preview.Total != 3 {
+		t.Errorf("total = %d, want 3 measured targets (not 4 raw rows)", preview.Total)
+	}
+
+	// 而且必须与结果表格的口径一致——两者都用合并后的数据。
+	rows, err := csvstore.ReadAll(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tableCounts := csvstore.Countries(csvstore.CollapseByTarget(rows))
+	for _, c := range tableCounts {
+		if counts[c.CCA2] != c.Count {
+			t.Errorf("country %s: preview says %d, the results table says %d",
+				c.CCA2, counts[c.CCA2], c.Count)
+		}
+	}
+}
+
+// TestPreviewFacetExcludesCountriesWithoutLatency 验证只有失败行的国家
+// **不出现**在跟踪区的可选项里。
+//
+// 跟踪的前提是测出过延迟（SelectForTrace 只挑 LatencyMS > 0）。把一个
+// 只有失败行的国家列出来，使用者勾了它却一个都跟踪不了——那是列表在
+// 骗人，而这类"选了没反应"的体验最难自查。
+//
+// 注意这与 /api/results 的 countries 分工不同：那边给结果表格做筛选，
+// 需要包含失败行（否则筛不出"这个国家的失败情况"）。
+func TestPreviewFacetExcludesCountriesWithoutLatency(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "results.csv")
+	store, err := csvstore.Open(csvstore.Options{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rows := []csvstore.Row{
+		rowFor("ok:443", "US", 25),
+		// 日本：全部超时，没有任何延迟。
+		{Target: "jp1:443", IP: "2.2.2.2", Port: 443, Success: false, ErrorType: "timeout", CCA2: "JP"},
+		{Target: "jp2:443", IP: "2.2.2.3", Port: 443, Success: false, ErrorType: "timeout", CCA2: "JP"},
+	}
+	for _, row := range rows {
+		if err := store.Append(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	preview, err := PreviewTraceSelection(path, nil, 0, 0)
+	if err != nil {
+		t.Fatalf("PreviewTraceSelection: %v", err)
+	}
+
+	for _, c := range preview.Countries {
+		if c.CCA2 == "JP" {
+			t.Error("JP is listed as traceable although every one of its rows failed to measure")
+		}
+	}
+	if len(preview.Countries) != 1 || preview.Countries[0].CCA2 != "US" {
+		t.Errorf("countries = %+v, want only US", preview.Countries)
+	}
+
+	// 结果表格那一侧仍然要能筛出日本，否则就没法看它的失败情况。
+	tableCounts := csvstore.Countries(csvstore.CollapseByTarget(rows))
+	found := false
+	for _, c := range tableCounts {
+		if c.CCA2 == "JP" && c.Count == 2 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the results facet lost JP: %+v", tableCounts)
+	}
+}
+
 func ids(targets []model.Target) []string {
 	out := make([]string, 0, len(targets))
 	for _, target := range targets {

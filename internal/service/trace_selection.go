@@ -196,15 +196,31 @@ func PreviewTraceSelection(path string, countries []string, maxLatencyMS float64
 		return SelectionPreview{}, err
 	}
 
+	// 先合并同一目标的探测行与跟踪行，再做任何统计。
+	//
+	// 不合并会**重复计数**：一个目标跟踪过之后在文件里有两行，
+	// 于是一个目标被算成两条。界面上的国家数量必须与结果表格里的
+	// 行数对得上（表格用的就是合并后的数据），否则使用者会看到
+	// "美国 20 个"而表格里只有 12 行。
+	rows = csvstore.CollapseByTarget(rows)
+
 	selected := SelectForTrace(rows, countries, maxLatencyMS, limit)
 
 	preview := SelectionPreview{
-		Count:     len(selected),
-		Countries: csvstore.Countries(rows),
+		Count: len(selected),
+		// 国家清单只统计**有延迟的行**。
+		//
+		// 这是跟踪区的可选项：能跟踪的前提是测出过延迟
+		// （SelectForTrace 只挑 LatencyMS > 0）。把只有失败行的国家
+		// 也列出来，使用者勾了它却一个都跟踪不了——那是列表在骗人。
+		//
+		// 与 /api/results 的 countries 分工不同：那边给表格做筛选，
+		// 需要包含失败行（否则筛不出"这个国家的失败情况"）。
+		Countries: csvstore.Countries(measuredOnly(rows)),
 	}
 
-	// Total 是"可参与挑选的行数"，让界面能说清
-	// "文件里 200 行，符合条件的有 12 行"。
+	// Total 是"可参与挑选的目标数"（有延迟的那些），让界面能说清
+	// "结果里 200 个，符合条件的有 12 个"。
 	for _, row := range rows {
 		if row.LatencyMS > 0 {
 			preview.Total++
@@ -244,6 +260,20 @@ func PreviewTraceSelection(path string, countries []string, maxLatencyMS float64
 	}
 
 	return preview, nil
+}
+
+// measuredOnly 只保留测出过延迟的行。
+//
+// 跟踪区的可选项来自它：没有延迟就无从判断"要跟踪谁"，
+// 因此那些行不该出现在可跟踪的国家清单里。
+func measuredOnly(rows []csvstore.Row) []csvstore.Row {
+	out := make([]csvstore.Row, 0, len(rows))
+	for _, row := range rows {
+		if row.LatencyMS > 0 {
+			out = append(out, row)
+		}
+	}
+	return out
 }
 
 // RunTraceSelection 从 CSV 里挑一批目标做线路跟踪，结果追加回同一个文件。

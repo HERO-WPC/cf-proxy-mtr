@@ -23,7 +23,7 @@ import (
 // 一旦发布过携带某个版本号的公开数据，就不要复用同一个版本号。
 const (
 	// Version 是 cf-route-tester 的语义化版本号。
-	Version = "0.1.6"
+	Version = "0.1.7"
 
 	// SchemaVersion 是公开数据（导出 / 上传 JSONL）的 Schema 版本。
 	//

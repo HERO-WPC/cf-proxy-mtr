@@ -155,6 +155,12 @@
   .confirm .headline b { color: #bcd4ff; font-variant-numeric: tabular-nums; }
   .confirm button.primary { min-width: 210px; }
   select[multiple] { min-height: 130px; }
+  /* 确认区里「跟踪开关＋参数」与下面的筛选条件是两码事，用一条细线分开。
+     不再加小标题：确认区本身已经有 headline，再加一层标题只会更乱。 */
+  .confirm .traceblock {
+    padding-bottom: 12px; margin-bottom: 12px;
+    border-bottom: 1px dashed var(--border);
+  }
 </style>
 </head>
 <body>
@@ -198,74 +204,6 @@
         <div class="check">
           <input type="checkbox" id="append">
           <label for="append" style="margin:0">追加到已有文件（不选则覆盖）</label>
-        </div>
-      </div>
-
-      <div style="margin-top:14px">
-        <div class="check">
-          <input type="checkbox" id="trace">
-          <label for="trace" style="margin:0">同时做线路跟踪（需要 NextTrace）</label>
-        </div>
-        <div class="fields" id="traceFields" style="margin-top:10px; display:none">
-          <div>
-            <label for="traceBinary">NextTrace 路径（留空=从 PATH 查找）</label>
-            <input type="text" id="traceBinary" placeholder="nexttrace">
-          </div>
-          <div>
-            <label for="traceMode">跟踪模式</label>
-            <select id="traceMode">
-              <option value="tcp">tcp</option>
-              <option value="icmp">icmp（无需管理员权限）</option>
-              <option value="udp">udp</option>
-            </select>
-          </div>
-          <div>
-            <label for="dataProvider">数据源（ASN / 运营商 / 地区）</label>
-            <select id="dataProvider">
-              <option value="">自动（推荐：本地前缀识别时用 disable-geoip，不碰限流服务）</option>
-              <option value="NextTrace-API">NextTrace-API（走 PoW 令牌，可能被限流）</option>
-              <option value="IPInfo">IPInfo</option>
-              <option value="IP.SB">IP.SB</option>
-              <option value="IPInsight">IPInsight</option>
-              <option value="IP-API.com">IP-API.com</option>
-              <option value="IPInfoLocal">IPInfoLocal（本地库，不联网）</option>
-              <option value="ipdb.one">ipdb.one</option>
-              <option value="chunzhen">chunzhen（纯真库）</option>
-              <option value="disable-geoip">disable-geoip（不查地区，最快；as_path 与落地地区为空）</option>
-            </select>
-          </div>
-          <div>
-            <label for="powProvider">PoW 令牌源（仅 NextTrace-API 有效）</label>
-            <select id="powProvider">
-              <option value="">不指定（用 NextTrace 默认）</option>
-              <option value="sakura">sakura（中国大陆用户建议）</option>
-              <option value="api.nxtrace.org">api.nxtrace.org</option>
-            </select>
-          </div>
-          <div style="grid-column: 1 / -1">
-            <div class="check" style="margin:0">
-              <input type="checkbox" id="useASNPrefix" checked>
-              <label for="useASNPrefix" style="margin:0">
-                用本地 ASN 前缀识别线路（<b>无限、不限流、无需账号</b>）
-              </label>
-            </div>
-            <div class="hint" style="margin-top:6px">
-              按"线路的 IP 段"（来自 RouteViews BGP 数据）判断路径走了 CN2 / 163 / CMI 等哪几条线路。
-              首次使用会抓取约 1.7&nbsp;MB 前缀并缓存 7 天，之后完全离线。
-              勾上它就可以把上面的数据源设成 <code>disable-geoip</code>，彻底不依赖任何限流的 GeoIP 服务。</div>
-            <div class="check" style="margin-top:8px">
-              <input type="checkbox" id="autoDownload" checked>
-              <label for="autoDownload" style="margin:0">
-                缺 NextTrace 时自动下载（约 32 MB，落到程序目录的 data/bin）
-              </label>
-            </div>
-            <div class="hint" style="margin-top:6px">
-              与程序<b>同目录</b>、或放在 <code>data/bin</code> 下的 nexttrace 会被优先使用；
-              自定义路径（上面的「NextTrace 路径」）优先级最高，<b>不会被自动下载覆盖</b>。
-              自动下载取固定版本 <code>v1.7.3</code>，且只提供 nexttrace 本体——
-              Windows 上 TCP/UDP 模式还需要 WinDivert（发布物里不含）。
-            </div>
-          </div>
         </div>
       </div>
 
@@ -351,9 +289,88 @@
       </div>
       <div class="hint" id="resultsNote" style="display:none"></div>
 
-      <!-- ③ 确认区：这里的条件就是 ④ 实际跟踪时用的条件，
-           两边由同一个对象渲染，不存在"看到的和跑的不一致"。 -->
+      <!-- ③ 确认区：线路跟踪的开关、参数、筛选条件与按钮全在这一块里，
+           使用者不必在页面上下来回找「跟踪到底用哪套设置」。
+           筛选条件（延迟上限 / 条数上限 / 国家）是预览与实际跟踪共用的同一份状态，
+           所以"会跟踪 N 个"这句话和真正提交的条件不可能对不上。 -->
       <div class="confirm">
+        <!-- 线路跟踪的开关与参数。这些设置同时服务两条路径：
+             ① 勾上后点「开始测量」时顺带跟踪（请求体字段 trace）；
+             ② 点本区最下面的「开始跟踪线路」单独跟踪。
+             id 一律保持原样（#trace / #traceFields），JS 与后端都按 id 取。 -->
+        <div class="traceblock">
+          <div class="check">
+            <input type="checkbox" id="trace">
+            <label for="trace" style="margin:0">同时做线路跟踪（需要 NextTrace）</label>
+          </div>
+          <div class="hint" style="margin-top:6px">
+            勾上它再点「选择目标国家」里的「开始测量」，TCP 测量跑完就会顺带跟踪一批目标，
+            跟踪条件用的就是本区下面的延迟上限 / 条数上限 / 国家。
+            不勾也能单独跟踪：先测出结果，再点本区最下面的「开始跟踪线路」。
+          </div>
+          <div class="fields" id="traceFields" style="margin-top:10px; display:none">
+            <div>
+              <label for="traceBinary">NextTrace 路径（留空=从 PATH 查找）</label>
+              <input type="text" id="traceBinary" placeholder="nexttrace">
+            </div>
+            <div>
+              <label for="traceMode">跟踪模式</label>
+              <select id="traceMode">
+                <option value="tcp">tcp</option>
+                <option value="icmp">icmp（无需管理员权限）</option>
+                <option value="udp">udp</option>
+              </select>
+            </div>
+            <div>
+              <label for="dataProvider">数据源（ASN / 运营商 / 地区）</label>
+              <select id="dataProvider">
+                <option value="">自动（推荐：本地前缀识别时用 disable-geoip，不碰限流服务）</option>
+                <option value="NextTrace-API">NextTrace-API（走 PoW 令牌，可能被限流）</option>
+                <option value="IPInfo">IPInfo</option>
+                <option value="IP.SB">IP.SB</option>
+                <option value="IPInsight">IPInsight</option>
+                <option value="IP-API.com">IP-API.com</option>
+                <option value="IPInfoLocal">IPInfoLocal（本地库，不联网）</option>
+                <option value="ipdb.one">ipdb.one</option>
+                <option value="chunzhen">chunzhen（纯真库）</option>
+                <option value="disable-geoip">disable-geoip（不查地区，最快；as_path 与落地地区为空）</option>
+              </select>
+            </div>
+            <div>
+              <label for="powProvider">PoW 令牌源（仅 NextTrace-API 有效）</label>
+              <select id="powProvider">
+                <option value="">不指定（用 NextTrace 默认）</option>
+                <option value="sakura">sakura（中国大陆用户建议）</option>
+                <option value="api.nxtrace.org">api.nxtrace.org</option>
+              </select>
+            </div>
+            <div style="grid-column: 1 / -1">
+              <div class="check" style="margin:0">
+                <input type="checkbox" id="useASNPrefix" checked>
+                <label for="useASNPrefix" style="margin:0">
+                  用本地 ASN 前缀识别线路（<b>无限、不限流、无需账号</b>）
+                </label>
+              </div>
+              <div class="hint" style="margin-top:6px">
+                按"线路的 IP 段"（来自 RouteViews BGP 数据）判断路径走了 CN2 / 163 / CMI 等哪几条线路。
+                首次使用会抓取约 1.7&nbsp;MB 前缀并缓存 7 天，之后完全离线。
+                勾上它就可以把上面的数据源设成 <code>disable-geoip</code>，彻底不依赖任何限流的 GeoIP 服务。</div>
+              <div class="check" style="margin-top:8px">
+                <input type="checkbox" id="autoDownload" checked>
+                <label for="autoDownload" style="margin:0">
+                  缺 NextTrace 时自动下载（约 32 MB，落到程序目录的 data/bin）
+                </label>
+              </div>
+              <div class="hint" style="margin-top:6px">
+                与程序<b>同目录</b>、或放在 <code>data/bin</code> 下的 nexttrace 会被优先使用；
+                自定义路径（上面的「NextTrace 路径」）优先级最高，<b>不会被自动下载覆盖</b>。
+                自动下载取固定版本 <code>v1.7.3</code>，且只提供 nexttrace 本体——
+                Windows 上 TCP/UDP 模式还需要 WinDivert（发布物里不含）。
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div class="headline" id="previewLine">正在读取可跟踪的目标…</div>
         <div class="fields">
           <div>
@@ -365,14 +382,18 @@
             <input type="number" id="traceLimit" min="1" step="1" value="10">
           </div>
           <div>
-            <label for="traceCountries">国家（可多选，不选 = 全部）</label>
-            <select id="traceCountries" multiple size="5"></select>
+            <label for="traceCountries">国家（可多选，不选 = 全部；只列出有延迟结果、能跟踪的国家）</label>
+            <select id="traceCountries" multiple size="5">
+              <option disabled>正在读取可跟踪的结果…</option>
+            </select>
           </div>
         </div>
         <div class="row" style="margin-top:14px">
           <button class="primary" id="traceStartBtn" disabled>开始跟踪线路</button>
           <span class="hint" id="traceHint" style="margin-top:0">
-            跟踪使用上面「同时做线路跟踪」里的 NextTrace 路径、跟踪模式、数据源与自动下载设置。
+            本区的选择就是跟踪真正会用的条件。NextTrace 路径、跟踪模式、数据源（ASN / 运营商 / 地区）、
+            PoW 令牌源、本地 ASN 前缀识别与自动下载都在上面的「同时做线路跟踪」里设置——
+            那个复选框只决定「开始测量」时是否顺带跟踪，不影响本按钮。
           </span>
         </div>
       </div>
@@ -817,11 +838,19 @@ const MAX_RENDER_ROWS = 500;
 // 保证"点的是哪个排序"和"确认区说的排序"永远一致。
 const SORT_LABELS = { latency: '延迟', route: '线路', target: '目标' };
 
-// filterState 是**唯一**的筛选条件来源。
+// filterState 收集这一侧界面的输入，但里面的字段分属两侧，别混用：
+//   sort / countries → 测量侧：#measureCountries（目标列表里的国家）的勾选，
+//                      只用于「开始测量」要测哪些国家、以及结果表格按国家筛选；
+//   maxLatency / limit → 跟踪侧：#maxLatency 与 #traceLimit 是跟踪的筛选条件。
 //
-// 预览接口与跟踪接口都从这个对象取参数（见 traceBody()），
-// 所以"会跟踪 N 个"这句话和真正提交的条件不可能对不上。
+// 跟踪区的国家勾选**不在**这个对象里，它是独立的 traceCountriesState。
+// 原因：两者来源不同（目标列表 vs 结果 CSV）、语义也不同，
+// 共用一个字段就等于让"我在看哪个国家"去决定"我去跟踪哪个国家"。
 const filterState = { sort: 'latency', maxLatency: null, limit: 10, countries: [] };
+
+// traceCountriesState.countries 是 #traceCountries 的勾选，只影响跟踪预览与跟踪请求。
+// 单独存一份：跟踪的候选集是**结果 CSV**，不是目标列表（见 syncTraceCountries）。
+const traceCountriesState = { countries: [] };
 
 // resultsTotal 保存「测量结果」当前读到的行数，用于提示"是不是真的还没测过"。
 let resultsTotal = 0;
@@ -848,18 +877,26 @@ let traceRunning = false; // 跟踪请求已发出、还没等到扫描结束
 let measureRunning = false;
 
 // ---------------------------------------------------------------------------
-// 国家列表（①的下拉框，两处共用同一份数据）
+// 国家列表：测量区与跟踪区各有一份，互不镜像
 // ---------------------------------------------------------------------------
-// 国家列表只取一次就复用：/api/countries 首次要下载并解析整个目标列表，
-// 每切一次筛选就重取一遍既慢又浪费。
-let countryListCache = [];
+//   #measureCountries ← /api/countries（目标列表 all.json 的国家分布）
+//                        "我打算去测哪些国家"，顺带筛选结果表格。
+//   #traceCountries   ← /api/trace/preview 的 countries 字段
+//                        （结果里"测出过延迟、可跟踪"的国家分布）
+//                        "我要跟踪哪些已经测出来的目标"。
+// 两份不能互相回写：测量区勾 US 只是"表格只看 US"，不代表"只跟踪 US"；
+// 反过来，跟踪区勾了 US 也不该把表格筛成只剩 US。
 
-function setCountryOptions(selectEl, countries, available) {
+// setCountryOptions 重建一个多选框的选项。
+//
+// emptyText：列表为空时那句可解释的占位文案——两处的"空"含义不同：
+// 测量区是"目标列表没有国家信息"，跟踪区是"还没有可跟踪的结果"。
+function setCountryOptions(selectEl, countries, available, emptyText) {
   // 先快照已选国家，再清空 select。
   //
   // 顺序不能反：innerHTML='' 会让 selectedOptions 立刻变空，
-  // 清空后再读就等于每次都把用户的勾选丢掉，而勾选又决定了
-  // 表格与预览的筛选条件——丢一次勾选，后面整条链路都会错。
+  // 清空后再读就等于每次都把用户的勾选丢掉——而勾选决定了
+  // 表格筛选（测量区）与跟踪条件（跟踪区），丢一次整条链路都会错。
   const previous = new Set(Array.from(selectEl.selectedOptions).map((o) => o.value));
 
   selectEl.innerHTML = '';
@@ -876,7 +913,7 @@ function setCountryOptions(selectEl, countries, available) {
   if (!countries.length) {
     const opt = document.createElement('option');
     opt.disabled = true;
-    opt.textContent = '（目标列表里没有国家信息）';
+    opt.textContent = emptyText || '（目标列表里没有国家信息）';
     selectEl.appendChild(opt);
     return;
   }
@@ -886,11 +923,20 @@ function setCountryOptions(selectEl, countries, available) {
     if (!cc) return;
     const opt = document.createElement('option');
     opt.value = cc;
-    // 选项文本带上数量：用户能一眼看出哪个国家样本多，值得优先测。
+    // 选项文本带上数量：用户能一眼看出哪个国家样本多，值得优先测／优先跟踪。
+    // 两边的「个」口径不同但都指目标数：测量区是目标列表里的目标数，
+    // 跟踪区是结果里"有延迟、可跟踪"的目标数。
     opt.textContent = cc + '（' + (c.count || 0) + ' 个）';
     opt.selected = previous.has(cc);
     selectEl.appendChild(opt);
   });
+}
+
+// selectedValues 读一个多选框当前勾选的国家代码。
+function selectedValues(selectEl) {
+  return Array.from(selectEl.selectedOptions)
+    .map((o) => o.value)
+    .filter(Boolean);
 }
 
 async function loadCountries() {
@@ -898,49 +944,41 @@ async function loadCountries() {
     const data = await api('/api/countries');
     if (data && data.error) throw new Error(data.error);
 
-    countryListCache = (data && data.countries) || [];
-    setCountryOptions(measureCountries, countryListCache, true);
-    setCountryOptions(traceCountries, countryListCache, true);
+    const countries = (data && data.countries) || [];
+    // 只填测量区。跟踪区**不能**用这份目标列表：all.json 里的 70 个国家多数从没测过，
+    // 把它们列在跟踪区，使用者会勾一堆根本没有可跟踪目标的国家，预览永远是 0，
+    // 看起来像功能坏了——跟踪的输入只能是已测出延迟的结果行。
+    // 跟踪区的选项由 syncTraceCountries() 从 /api/trace/preview 填。
+    setCountryOptions(measureCountries, countries, true);
 
-    countryInfo.textContent = countryListCache.length
-      ? '共 ' + countryListCache.length + ' 个国家 · 目标列表 ' + (data.total || 0) + ' 个目标'
+    countryInfo.textContent = countries.length
+      ? '共 ' + countries.length + ' 个国家 · 目标列表 ' + (data.total || 0) + ' 个目标'
       : '目标列表里没有可用的国家信息。';
   } catch (e) {
     const message = '国家列表加载失败：' + e.message;
     setCountryOptions(measureCountries, message, false);
-    setCountryOptions(traceCountries, message, false);
     countryInfo.textContent = message;
   }
 }
 
-// onCountryChange 在任一国家多选框变化时调用：读 DOM，写 filterState，再刷新预览。
+// onCountryChange：测量区的勾选只做两件事——
+// ① 「开始测量」要测哪些国家；② 结果表格按国家筛选。
+//
+// 它**不再**回写跟踪区。两处的国家语义不同（"我打算测的" vs "已经测出来的"），
+// 互为镜像会让跟踪区凭空多出一堆没测过的国家，或者把已测出的国家勾掉。
 function onCountryChange() {
-  const picked = Array.from(measureCountries.selectedOptions)
-    .map((o) => o.value)
-    .filter(Boolean);
-
-  // 两个多选框互为镜像（布局需要两份，语义是一份）。
-  // 回写时按"选中的集合"逐个判断，而不是照抄 option.selected——
-  // 后者在选项被重建过（重新加载国家列表）时会留下不一致的残留状态。
-  const picks = new Set(picked);
-  Array.from(traceCountries.options).forEach((o) => { o.selected = picks.has(o.value); });
-
-  filterState.countries = picked;
-  // 国家换了，表格也要跟着换：表格展示的就是"当前筛选下的结果"。
+  filterState.countries = selectedValues(measureCountries);
+  // 国家换了表格也要跟着换：表格展示的就是"当前筛选下的结果"。
+  // 这次刷新会顺带按最新结果重填跟踪区的国家选项，
+  // 所以这里不必再单独刷预览——预览只认跟踪区那份勾选。
   refreshResults();
-  schedulePreview();
 }
 
 measureCountries.addEventListener('change', onCountryChange);
 
+// 跟踪区的勾选只影响跟踪（预览 + 「开始跟踪线路」），绝不回头去筛表格。
 traceCountries.addEventListener('change', () => {
-  const picked = Array.from(traceCountries.selectedOptions)
-    .map((o) => o.value)
-    .filter(Boolean);
-  const picks = new Set(picked);
-  Array.from(measureCountries.options).forEach((o) => { o.selected = picks.has(o.value); });
-  filterState.countries = picked;
-  refreshResults();
+  traceCountriesState.countries = selectedValues(traceCountries);
   schedulePreview();
 });
 
@@ -1082,10 +1120,75 @@ function renderResults(data) {
   }
 }
 
+// syncTraceCountries 用**跟踪预览**接口的国家分布重建跟踪区的国家多选框。
+//
+// 为什么跟踪区的清单来自 /api/trace/preview，而不是 /api/results？
+//
+// 因为"能跟踪"的前提是**测出过延迟**：后端的选取逻辑（SelectForTrace）
+// 只挑 LatencyMS > 0 的行，而预览接口的 countries 正是按这个口径统计的
+// （只统计有延迟的行），所以列出来的每个国家都至少有一个能跟踪的目标。
+//
+// /api/results 的 countries 是给**表格筛选**用的完整可选项，它包含只有失败行
+// 的国家——表格需要它，否则筛不出"这个国家的失败情况"。但拿它填跟踪区，
+// 使用者会勾上一个只有失败记录的国家，然后一个都跟不了：那份列表在骗人。
+// 目标列表（all.json）就更不行：那 70 个国家多数根本没测过。
+//
+// text 是"清单不可用/为空时要显示的那句话"（三种"空"含义不同，见调用处）。
+//
+// 返回"已选国家是否变了"：选中的国家从数据里消失时，勾选会被丢掉（这是对的），
+// 但刚渲染出来的预览数字是按**旧勾选**算的，调用方据此决定要不要再算一次。
+// 不会形成循环：后端返回的清单不受 countries 参数影响，
+// 第二次拿到的清单与第一次相同，于是第二次的返回值为 false。
+function syncTraceCountries(countries, available, text) {
+  const before = traceCountriesState.countries.slice().sort().join(',');
+
+  if (available) {
+    // 清单为空（还没测出任何延迟）时给一个禁用的占位选项：
+    // 空白下拉框会让人以为是加载失败。
+    setCountryOptions(traceCountries, countries, true, text);
+  } else {
+    // 读不到预览时说清是"读不到"，而不是显示成"没有可跟踪的目标"。
+    setCountryOptions(traceCountries, text, false);
+  }
+
+  // 这里重读 DOM 是安全的：setCountryOptions 先快照再重建，所以拿到的是
+  // 重建后真实的勾选——仍然在清单里的国家保持勾选，已消失的国家被丢掉。
+  traceCountriesState.countries = selectedValues(traceCountries);
+
+  const after = traceCountriesState.countries.slice().sort().join(',');
+  return before !== after;
+}
+
+// syncTraceCountriesFromPreview 从预览响应里取国家清单并同步多选框。
+//
+// 预览响应里的 countries 是在应用 countries 参数**之前**统计的，
+// 所以"带着当前勾选去请求预览"不会让清单越缩越小，也就不会来回抖动。
+function syncTraceCountriesFromPreview(data) {
+  const countries = (data && data.countries) || [];
+  const total = (data && typeof data.total === 'number') ? data.total : 0;
+  // 空清单有两种成因，文案分开：
+  //   total > 0 → 有测量行、却一行都带不出国家（地区数据没查到之类），
+  //               这时说"没有国家信息"比说"没有可跟踪的目标"准确；
+  //   total = 0 → 一个可跟踪的结果都没有。CSV 压根不存在也走这一支：
+  //               这两种情况光看预览响应区分不了（后端对"没有 CSV"返回空结构），
+  //               而"还没有可跟踪的结果"对两种情况都是实话。
+  const emptyText = total > 0 ? '（结果里没有国家信息）' : '（还没有可跟踪的结果）';
+  return syncTraceCountries(countries, true, emptyText);
+}
+
 async function refreshResults() {
   const params = new URLSearchParams();
   params.set('sort', filterState.sort);
+  // 表格按**测量区**的勾选筛选（现有行为，别弄丢）。
   if (filterState.countries.length) params.set('countries', filterState.countries.join(','));
+
+  // 结果刷新后，跟踪区的国家清单也要跟着变（它来自预览接口），
+  // 否则新测出来的国家不会出现、已经从结果里消失的国家也不会被丢掉。
+  //
+  // 用防抖的 schedulePreview 而不是立刻 refreshPreviewNow：
+  // 测量／跟踪结束之后，调用方本来就会紧接着刷一次预览，
+  // 那次 refreshPreviewNow 会清掉这里的定时器，两次合成一次请求。
+  schedulePreview();
 
   try {
     const data = await api('/api/results?' + params.toString());
@@ -1151,6 +1254,8 @@ function setMeasureBusy(scanBusy) {
 // 预览与实际跟踪必须共用条件（这里是 traceParams() 一个出口）。
 // 否则用户会看到"会跟踪 12 个"，实际却跟踪了另一个集合——
 // 在"每次跟踪都可能被上游限流"的前提下，这种偏差的代价是真金白银的时间。
+// 条件里的国家取 traceCountriesState（跟踪区的勾选），
+// 不是 filterState.countries（测量区的勾选）——后者只筛表格。
 
 // parseBound 把输入框读成正整数；空、非法、<=0 都当作"不限"。
 function parseBound(input) {
@@ -1183,7 +1288,10 @@ function traceParams() {
   // 留空时后端用默认路径，和跟踪请求体里 output_path 留空的含义一致。
   const path = document.getElementById('output').value.trim();
   if (path) params.set('path', path);
-  if (filterState.countries.length) params.set('countries', filterState.countries.join(','));
+  // 跟踪用的是**跟踪区**（#traceCountries）勾选的国家，不是测量区那份：
+  // 测量区的勾选是给「开始测量」和结果表格用的，
+  // 混用会把"我要跟踪哪些国家"变成"我正在看哪些国家"。
+  if (traceCountriesState.countries.length) params.set('countries', traceCountriesState.countries.join(','));
   if (filterState.maxLatency) params.set('max_latency_ms', String(filterState.maxLatency));
   params.set('limit', String(filterState.limit));
   return params;
@@ -1192,7 +1300,7 @@ function traceParams() {
 function traceBody() {
   return {
     output_path: document.getElementById('output').value.trim(),
-    countries: filterState.countries,
+    countries: traceCountriesState.countries,
     max_latency_ms: filterState.maxLatency || 0,
     limit: filterState.limit,
     trace_mode: document.getElementById('traceMode').value,
@@ -1235,11 +1343,18 @@ function renderPreview(data) {
     ? '会跟踪：' + targets.join('、') +
       (previewCount > targets.length ? ' 等 ' + previewCount + ' 个' : '')
     : '将跟踪 ' + previewCount + ' 个目标（目标名未返回）') +
-    '。参数来自下方控件与「同时做线路跟踪」里的设置。';
+    '。参数来自本区的控件与上面「同时做线路跟踪」里的设置。';
   setTraceButtonState(traceRunning);
 }
 
 let previewTimer = null;
+// previewSeq 给预览请求编号：只允许"最新那次"写界面。
+//
+// 为什么需要：测量／跟踪结束时会连着触发两次预览刷新（结果刷新顺带的那次
+// ＋ 流程自己那次），两个请求可能同时在飞。旧请求后到就会用**旧 CSV** 的
+// 国家清单覆盖新清单，把刚填好的勾选状态冲掉。序号一挡，旧响应直接丢弃。
+let previewSeq = 0;
+
 // schedulePreview 给"输入中"做 300ms 防抖。
 //
 // 原因：延迟上限是数字输入框，用户敲 "200" 会产生三次 change，
@@ -1254,14 +1369,28 @@ async function refreshPreviewNow() {
   if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
   syncFilterStateFromInputs();
 
+  const seq = ++previewSeq;
   try {
     const data = await api('/api/trace/preview?' + traceParams().toString());
+    // 有更新的预览请求已经在路上：这次的响应（可能来自旧 CSV）直接丢弃，
+    // 否则国家清单与"筛选后有 N 个"会回退成过期的样子。
+    if (seq !== previewSeq) return;
+
     renderPreview(data || {});
+    // 跟踪区的国家清单就来自这次预览响应（理由见 syncTraceCountries）。
+    // 顺序要紧：renderPreview 是按**旧勾选**报出"筛选后有 N 个"的，
+    // 若重建清单后勾选变了（选中的国家已不在结果里），那句数字就过期了，
+    // 必须按新勾选再算一次。
+    if (syncTraceCountriesFromPreview(data || {})) schedulePreview();
   } catch (e) {
+    if (seq !== previewSeq) return;
     previewLoaded = false;
     previewCount = 0;
     previewLine.textContent = '无法读取可跟踪目标：' + e.message;
     setTraceButtonState(true);
+    // 读不到预览时，清单也要说清"现在拿不到"，而不是留着上一轮那份
+    // 可能已经被覆盖的旧清单——那样使用者会勾到一个已经不存在的国家。
+    syncTraceCountries([], false, '（读取跟踪预览失败）');
   }
 }
 
@@ -1416,8 +1545,9 @@ if (!token) {
   connectLog();
   loadStats();
   pollStatus();
-  // 页面一打开就把三段式流程的状态摆出来：国家下拉框有选项、
-  // 表格显示上次留下的结果、确认区给出当前条件下的可跟踪数量。
+  // 页面一打开就把三段式流程的状态摆出来：测量区的国家下拉框有选项、
+  // 表格显示上次留下的结果（这一步顺带用结果里的国家填上跟踪区的多选框）、
+  // 确认区给出当前条件下的可跟踪数量。
   loadCountries();
   refreshResults();
   refreshPreviewNow();
