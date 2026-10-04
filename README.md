@@ -121,7 +121,7 @@ bin\cf-route-tester.exe version
 # 1) 同步源码里的版本号与文档里的产物清单
 #    （tools/release 会打印真实体积，README / docs/INSTALL.md 按它更新）
 # 2) 提交
-git tag -a v0.1.8 -m "v0.1.8" && git push origin v0.1.8
+git tag -a v0.1.9 -m "v0.1.9" && git push origin v0.1.9
 ```
 
 版本号必须与 tag 一致：工作流按 tag 注入版本，而源码里的常量用于
@@ -139,14 +139,14 @@ go run ./tools/release -version 0.2.0
 ```
 
 ```text
-cf-route-tester-0.1.8-windows-amd64.exe     12.63 MiB  # 命令行
-cf-route-tester-gui-0.1.8-windows-amd64.exe 12.64 MiB  # 图形界面（无控制台窗口）
-cf-route-tester-0.1.8-windows-arm64.exe     11.76 MiB
-cf-route-tester-gui-0.1.8-windows-arm64.exe 11.77 MiB
-cf-route-tester-0.1.8-linux-amd64           12.41 MiB
-cf-route-tester-0.1.8-linux-arm64           11.75 MiB
-cf-route-tester-0.1.8-darwin-amd64          12.42 MiB
-cf-route-tester-0.1.8-darwin-arm64          11.81 MiB
+cf-route-tester-0.1.9-windows-amd64.exe     12.63 MiB  # 命令行
+cf-route-tester-gui-0.1.9-windows-amd64.exe 12.64 MiB  # 图形界面（无控制台窗口）
+cf-route-tester-0.1.9-windows-arm64.exe     11.76 MiB
+cf-route-tester-gui-0.1.9-windows-arm64.exe 11.77 MiB
+cf-route-tester-0.1.9-linux-amd64           12.41 MiB
+cf-route-tester-0.1.9-linux-arm64           11.75 MiB
+cf-route-tester-0.1.9-darwin-amd64          12.42 MiB
+cf-route-tester-0.1.9-darwin-arm64          11.81 MiB
 SHA256SUMS      # 8 个产物，与 sha256sum -c 兼容
 release.json    # 版本 / commit / 每个产物的哈希与大小
 ```
@@ -235,7 +235,7 @@ Windows 上直接双击 `cf-route-tester-gui-*.exe` 也可以——那是用
 启动后终端会打印一个带令牌的地址：
 
 ```text
-time="..." level=INFO msg="web: starting" version=0.1.8 platform=windows/amd64 results=data/results.db
+time="..." level=INFO msg="web: starting" version=0.1.9 platform=windows/amd64 results=data/results.db
 time="..." level=INFO msg="webui: listening" url=http://127.0.0.1:8236
 
 请在浏览器中打开（地址里带有本次运行的访问令牌）：
@@ -300,14 +300,14 @@ cf-route-tester --version
 
 ```text
 cf-route-tester
-version: 0.1.8
+version: 0.1.9
 ```
 
 `version --verbose` 输出（含构建细节，便于排查“结果来自哪个版本”）：
 
 ```text
 client:         cf-route-tester
-version:        0.1.8
+version:        0.1.9
 schema_version: 1
 commit:         unknown
 build_date:     unknown
@@ -518,7 +518,7 @@ failures by type:
 `--json` 每条结果一行（自带 `schema_version` 与 `client_version`）：
 
 ```json
-{"schema_version":1,"client_version":"0.1.8","target_id":"45.63.67.144:443","ip":"45.63.67.144","port":443,"success":true,"latency_ms":252.3158,"timestamp":"2026-10-03T11:35:21.8611931Z"}
+{"schema_version":1,"client_version":"0.1.9","target_id":"45.63.67.144:443","ip":"45.63.67.144","port":443,"success":true,"latency_ms":252.3158,"timestamp":"2026-10-03T11:35:21.8611931Z"}
 ```
 
 失败分类（数据库与分析的价值就在于"分得清是哪一种失败"）：
@@ -637,8 +637,8 @@ error_type, error_message, hop_count, as_path, hops, client_version, cca2
 真实数据行：
 
 ```csv
-2026-10-03T18:00:17Z,159.60.146.81:443,159.60.146.81,443,true,284.683,,,,,,0.1.8,US
-2026-10-03T18:00:18Z,45.63.67.144:443,45.63.67.144,443,false,,timeout,dial tcp4 45.63.67.144:443: i/o timeout,,,,0.1.8,US
+2026-10-03T18:00:17Z,159.60.146.81:443,159.60.146.81,443,true,284.683,,,,,,0.1.9,US
+2026-10-03T18:00:18Z,45.63.67.144:443,45.63.67.144,443,false,,timeout,dial tcp4 45.63.67.144:443: i/o timeout,,,,0.1.9,US
 ```
 
 **失败时 `latency_ms` 是空单元格，不是 `0`。** 这一点很重要：
@@ -1383,7 +1383,7 @@ IDENTICAL — export is reproducible
 {
   "schema_version": 1,
   "kind": "measurement",
-  "client_version": "0.1.8",
+  "client_version": "0.1.9",
   "target_id": "159.60.146.81:443",
   "ip": "159.60.146.81",
   "port": 443,
@@ -2101,6 +2101,7 @@ cf-route-tester/
 | `service.go` | `ProgressHub` / `CSVProgressHub` / `Stats` 与共用的错误分类。`ProgressHub` 保留供历史数据库路径使用；`CSVProgressHub` 服务 CSV 扫描（事件多带 `CurrentTarget`，且 `Publish` 永不阻塞、慢订阅者丢自己的事件）。 |
 | `country.go` | 「按国家挑目标」的实现。**只认 `location.cca2`**：上游两个国家字段有约 18% 互相矛盾，退回读另一个会让同一个国家的目标时而被选中时而不被选中，且没有任何提示。`targetsByCountry` 与 `filterByCountries` 共用同一字段与归一化，因此界面上的数字必然等于筛出来的条数。 |
 | `trace_selection.go` | 「先测 TCP、再挑一批跟踪」的第二步：`SelectForTrace` （按国家/延迟上限/条数挑，同一目标取最快那行，重建 `model.Target` 时**必须填 `IPVersion`** ——实测漏填会让每一步都看着正常而跟踪全部 `invalid_target`）、`PreviewTraceSelection`（与实际执行共用选取逻辑，所以「预览 N 个」就是真会跑的个数）、`RunTraceSelection`。 |
+| `csvscan_goroutine_test.go` | 「后台协程不能比函数活得久」。判据是**对前缀源的请求次数**而不是日志条数——后者要等重试耗尽与 120 秒超时才会出现，窗口内根本看不见，实测写成那样时「把修复禁用」它照样通过，等于没有护栏。另有一条守相反的错误：Cancel 会等协程退出，若下载不理会取消，这个等待就变成白等整张表。 |
 | `trace_selection_test.go` | 国家筛选只认 `CCA2`、大小写与空列表、无国家的目标不被算进任何国家、统计与筛选口径一致；选取时填对 `IPVersion`（并**直接过一遍引擎用的同一套校验**）、延迟上限、跳过没测到的行、去重取最快、条数上限、按国家挑、国家从行里带过来、坏 IP 跳过、预览与实际选取一致。 |
 | `csvscan.go` | **结果只进 CSV 的扫描实现**：加载目标 → 开 CSV → 逐个探测并**立即写入一行** → 只对探测成功的目标跟踪并再写一行。没有会话、没有续测、没有去重。`CSVScanOptions.Progress` / `OnTarget` / `OnTrace` 供界面显示进度与线路信息。 |
 | `service_test.go` | 历史数据库路径的测试：真实本机监听 + 真实 SQLite、参数校验发生在任何副作用之前、进度回调、引擎不可用时仍完成 TCP 测量。 |
@@ -2124,6 +2125,7 @@ cf-route-tester/
 | --- | --- |
 | `server.go` | HTTP 服务：路由、内嵌页面、SSE 进度推送、单次扫描约束、优雅关闭。安全默认开启且**不提供关闭开关**：进程级随机令牌（常数时间比较）、`Host` 回环校验（防 DNS rebinding）、变更请求的 `Origin` 校验（防 CSRF）。 |
 | `results.go` | 两段式流程的接口：`/api/countries`（目标列表的国家分布）、`/api/results`（读 CSV 返回排好序的行，**排序在截断之前做**，否则「最快的那个」会取决于文件顺序）、`/api/trace/preview`、`/api/trace`。跟踪只收**筛选条件**而不收目标列表：CSV 是唯一数据源，让界面回传目标等于承认「界面手里那份」才是真相。 |
+| `results_test.go` | 结果表格与国家清单的口径：**可选项清单不随筛选收缩**（勾了美国之后清单里不能只剩美国，否则想换一个国家也无从选起——这正是前端曾被迫多发一次请求绕过去的原因）、同一目标的探测行与跟踪行合并成一行、结果文件不存在不算错误。请求走真实 HTTP，因此顺带覆盖 Host 必须是本机与 token 两道访问控制。 |
 | `assets/index.html` | 界面本体，原生 HTML/CSS/JS（不用框架，因此不需要 Node 工具链），通过 `go:embed` 打进二进制。 |
 | `browser_windows.go` | 用默认浏览器打开地址（`cmd /c start` 需要一个空标题参数，否则 URL 会被当成窗口标题而不打开）。 |
 | `browser_darwin.go` | 用 `open` 打开。 |
@@ -2138,7 +2140,7 @@ cf-route-tester/
 
 | 文件 | 作用 |
 | --- | --- |
-| `version.go` | 程序版本（`0.1.8`）、公开数据 schema 版本（`1`）、构建期注入的 commit 与构建时间。`SchemaVersion` 独立于程序版本：程序可以频繁升级，公开数据结构不变它就不变。 |
+| `version.go` | 程序版本（`0.1.9`）、公开数据 schema 版本（`1`）、构建期注入的 commit 与构建时间。`SchemaVersion` 独立于程序版本：程序可以频繁升级，公开数据结构不变它就不变。 |
 | `version_test.go` | 保证版本字段永不为空（公开数据里不能出现空字符串版本号）。 |
 
 ### `internal/model/` — 核心数据模型

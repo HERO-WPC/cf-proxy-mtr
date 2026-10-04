@@ -178,46 +178,6 @@
     <div class="grid" id="stats"></div>
   </section>
 
-  <section>
-    <h2>开始扫描</h2>
-    <div class="panel">
-      <div class="fields">
-        <div>
-          <label for="workers">TCP 并发数</label>
-          <input type="number" id="workers" value="100" min="1" max="1000">
-        </div>
-        <div>
-          <label for="timeout">连接超时（毫秒）</label>
-          <input type="number" id="timeout" value="3000" min="100" step="100">
-        </div>
-        <div>
-          <label for="limit">只测前 N 个（0 = 全部）</label>
-          <input type="number" id="limit" value="0" min="0">
-        </div>
-        <div>
-          <label for="output">结果文件（CSV）</label>
-          <input type="text" id="output" placeholder="data/results.csv">
-        </div>
-      </div>
-
-      <div style="margin-top:12px">
-        <div class="check">
-          <input type="checkbox" id="append">
-          <label for="append" style="margin:0">追加到已有文件（不选则覆盖）</label>
-        </div>
-      </div>
-
-      <div class="row" style="margin-top:16px">
-        <button class="primary" id="startBtn">开始扫描</button>
-        <button class="danger" id="stopBtn" disabled>停止</button>
-      </div>
-      <div class="hint">
-        每测完一个目标就立刻写入 CSV，所以中途停掉也不会丢已经测完的结果。结果<b>只</b>写 CSV，
-        不使用数据库。想保留上一轮结果就勾选「追加」。
-      </div>
-    </div>
-  </section>
-
   <section id="progressSection" style="display:none">
     <h2>进度</h2>
     <div class="panel">
@@ -253,15 +213,45 @@
           <div class="hint">
             不选 = 全部国家。多选用 Ctrl / Shift 点击，或按住 Cmd 点击（macOS）。
           </div>
-          <div class="hint">
-            测量使用上面「开始扫描」里的 TCP 并发、超时、只测前 N 个、结果文件与追加设置，
-            所以这里不用再填一遍。测完的结果会出现在下面的「测量结果」里。
-          </div>
         </div>
       </div>
-      <div class="row" style="margin-top:14px">
-        <button class="primary" id="measureBtn">开始测量（TCP）</button>
+
+      <!-- 测量设置：「怎么测」的参数与「测哪些」放在一起，
+           点「开始扫描」之前一眼能看全，不必上下两个区块来回对照。 -->
+      <div class="fields" style="margin-top:14px">
+        <div>
+          <label for="workers">TCP 并发数</label>
+          <input type="number" id="workers" value="100" min="1" max="1000">
+        </div>
+        <div>
+          <label for="timeout">连接超时（毫秒）</label>
+          <input type="number" id="timeout" value="3000" min="100" step="100">
+        </div>
+        <div>
+          <label for="limit">只测前 N 个（0 = 全部）</label>
+          <input type="number" id="limit" value="0" min="0">
+        </div>
+        <div>
+          <label for="output">结果文件（CSV）</label>
+          <input type="text" id="output" placeholder="data/results.csv">
+        </div>
+      </div>
+
+      <div style="margin-top:12px">
+        <div class="check">
+          <input type="checkbox" id="append">
+          <label for="append" style="margin:0">追加到已有文件（不选则覆盖）</label>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:16px">
+        <button class="primary" id="measureBtn">开始扫描</button>
+        <button class="danger" id="stopBtn" disabled>停止</button>
         <span class="stats-line" id="measureStatus">—</span>
+      </div>
+      <div class="hint">
+        每测完一个目标就立刻写入 CSV，所以中途停掉也不会丢已经测完的结果。结果<b>只</b>写 CSV，
+        不使用数据库。想保留上一轮结果就勾选「追加」。
       </div>
     </div>
   </section>
@@ -552,7 +542,9 @@ async function loadStats() {
 // ---------------------------------------------------------------------------
 // 扫描控制
 // ---------------------------------------------------------------------------
-const startBtn = document.getElementById('startBtn');
+// 只有一个"开始"按钮（#measureBtn）：它带着国家筛选，
+// 不选国家时等价于"全部国家"，因此原先那个无筛选的 #startBtn 是重复的，
+// 已随测量设置一起并入「选择目标国家」区。
 const stopBtn = document.getElementById('stopBtn');
 const traceBox = document.getElementById('trace');
 const traceFields = document.getElementById('traceFields');
@@ -562,7 +554,6 @@ traceBox.addEventListener('change', () => {
 });
 
 function setBusy(busy) {
-  startBtn.disabled = busy;
   stopBtn.disabled = !busy;
   document.getElementById('progressSection').style.display = busy ? 'block' : 'none';
   setMeasureBusy(busy);
@@ -616,8 +607,6 @@ async function startScan(kind, countries) {
     }
   }
 }
-
-startBtn.addEventListener('click', () => startScan('scan', []));
 
 stopBtn.addEventListener('click', async () => {
   stopBtn.disabled = true;
