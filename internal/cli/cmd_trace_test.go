@@ -123,6 +123,8 @@ func TestTraceMissingEnginePointsAtInstallation(t *testing.T) {
 	code, _, stderr := runCLI("trace",
 		"--target", "1.1.1.1:443",
 		"--binary", "definitely-not-installed-nexttrace-xyz",
+		// 同上：测试不下载。
+		"--no-download",
 		"--quiet")
 
 	if code == ExitCodeOK {
@@ -151,6 +153,8 @@ func TestTraceJSONOutputIsSuppressedOnFailure(t *testing.T) {
 	code, stdout, _ := runCLI("trace",
 		"--target", "1.1.1.1:443",
 		"--binary", "definitely-not-installed-nexttrace-xyz",
+		// 同上：测试不下载。
+		"--no-download",
 		"--json", "--quiet")
 
 	if code == ExitCodeOK {
@@ -170,6 +174,8 @@ func TestTraceAcceptsMultipleTargets(t *testing.T) {
 		"--target", "1.1.1.1:443",
 		"--target", "8.8.8.8:53",
 		"--binary", "definitely-not-installed-nexttrace-xyz",
+		// 同上：测试不下载。
+		"--no-download",
 		"--quiet")
 
 	if code == ExitCodeUsage {

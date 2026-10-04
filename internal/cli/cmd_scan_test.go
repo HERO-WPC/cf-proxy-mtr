@@ -29,6 +29,10 @@ func scanCSVArgs(cachePath, outPath, identityPath string, extra ...string) []str
 		"--source-retries", "0",
 		"--out", outPath,
 		"--identity", identityPath,
+		// 测试**绝不能**触发 nexttrace 自动下载：那会在单元测试里
+		// 拉 32 MB、依赖外网、并且把测试拖到超时。
+		// 下载路径由 internal/trace 的单元测试用假服务端覆盖。
+		"--trace-no-download",
 	}
 	return append(args, extra...)
 }
