@@ -45,9 +45,9 @@ Get-Content SHA256SUMS | ForEach-Object {
 
 ```text
 $ go run ./tools/release -skip-tests   # 第一次
-  cf-route-tester-0.1.0-linux-amd64   11.16 MiB  <hash>
+  cf-route-tester-0.1.1-linux-amd64   12.27 MiB  <hash>
 $ go run ./tools/release -skip-tests   # 第二次
-  cf-route-tester-0.1.0-linux-amd64   11.16 MiB  <hash>   <- 与上面完全相同
+  cf-route-tester-0.1.1-linux-amd64   12.27 MiB  <hash>   <- 与上面完全相同
 ```
 
 （这里不写死具体哈希：它随每次提交变化。实际使用时两次输出一致即可。）
@@ -127,7 +127,7 @@ go build -trimpath \
 
 ```text
 client:         cf-route-tester
-version:        0.1.0
+version:        0.1.1
 schema_version: 1
 commit:         <短 commit 号，由构建时的 git HEAD 决定>
 build_date:     <取自该 commit 的提交时间>
@@ -157,12 +157,12 @@ go run ./tools/release -version 0.2.0 -skip-tests
 产物落在 `dist/release/`：
 
 ```text
-cf-route-tester-0.1.0-windows-amd64.exe    11.26 MiB
-cf-route-tester-0.1.0-windows-arm64.exe    10.48 MiB
-cf-route-tester-0.1.0-linux-amd64          11.16 MiB
-cf-route-tester-0.1.0-linux-arm64          10.56 MiB
-cf-route-tester-0.1.0-darwin-amd64         11.16 MiB
-cf-route-tester-0.1.0-darwin-arm64         10.62 MiB
+cf-route-tester-0.1.1-windows-amd64.exe    12.40 MiB
+cf-route-tester-0.1.1-windows-arm64.exe    11.55 MiB
+cf-route-tester-0.1.1-linux-amd64          12.27 MiB
+cf-route-tester-0.1.1-linux-arm64          11.69 MiB
+cf-route-tester-0.1.1-darwin-amd64         12.28 MiB
+cf-route-tester-0.1.1-darwin-arm64         11.69 MiB
 SHA256SUMS
 release.json
 ```

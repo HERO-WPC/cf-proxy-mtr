@@ -159,16 +159,13 @@ type TraceOptions struct {
 
 	// AutoDownload 为真时，找不到 nexttrace 就自动下载一份。
 	//
-	// 生产路径默认打开：让使用者不必自己去搜平台、挑架构、
-	// 下对一个几十 MB 的文件再放到对的位置——那一步劝退的人
-	// 比任何技术问题都多。
-	AutoDownload bool
-
-	// NoAutoDownload 显式关闭自动下载（对应 --trace-no-download）。
+	// **零值是"不下载"**，与 trace.EngineOptions 保持一致。
+	// 这个默认值必须在每一层都成立：曾经这里写成"默认开启"，
+	// 结果所有经过 service 的单元测试都会联网下 32 MB，
+	// 有一条测试因此把 60 秒超时耗尽才失败。
 	//
-	// 与 AutoDownload 分开是为了区分"没指定"与"明确关掉"：
-	// 命令行默认要下载，但 .env / 配置里可能想关掉。
-	NoAutoDownload bool
+	// 生产路径（CLI / 图形界面）显式打开它，测试什么都不用写。
+	AutoDownload bool
 
 	// DownloadDir 是自动下载的落点（空表示程序目录下的 data/bin）。
 	DownloadDir string
@@ -455,8 +452,8 @@ func (s *Service) buildTraceEngine(ctx context.Context, opts TraceOptions) (*tra
 	engineOpts.DataProvider = trace.DataProvider(strings.TrimSpace(opts.DataProvider))
 	engineOpts.PowProvider = trace.PowProvider(strings.TrimSpace(opts.PowProvider))
 
-	// 找不到 nexttrace 就自动下载：默认开，除非显式关掉。
-	engineOpts.AutoDownload = !opts.NoAutoDownload
+	// 自动下载：由调用方决定（零值不下载，见 TraceOptions 的说明）。
+	engineOpts.AutoDownload = opts.AutoDownload
 	engineOpts.DownloadDir = opts.DownloadDir
 
 	return trace.NewNextTraceEngine(ctx, engineOpts)

@@ -290,12 +290,13 @@ func runScan(env *Env, args []string) error {
 		Limit:      p.limit,
 		Trace:      p.trace,
 		TraceConfig: service.TraceOptions{
-			Binary:         p.traceBinary,
-			Mode:           p.traceMode,
-			DataProvider:   p.traceDataProvider,
-			PowProvider:    p.tracePowProvider,
-			NoAutoDownload: p.traceNoDownload,
-			DownloadDir:    p.traceDownloadDir,
+			Binary:       p.traceBinary,
+			Mode:         p.traceMode,
+			DataProvider: p.traceDataProvider,
+			PowProvider:  p.tracePowProvider,
+			// 命令行默认自动下载；--trace-no-download 关掉。
+			AutoDownload: !p.traceNoDownload,
+			DownloadDir:  p.traceDownloadDir,
 		},
 		NoASNPrefix: p.traceNoASNPrefix,
 		ASNPrefixOptions: asnprefix.Options{

@@ -619,13 +619,14 @@ func (s *Server) runScan(ctx context.Context, req scanRequest, cancel context.Ca
 		Limit:      req.Limit,
 		Trace:      req.Trace,
 		TraceConfig: service.TraceOptions{
-			Binary:         strings.TrimSpace(req.TraceBinary),
-			Mode:           strings.TrimSpace(req.TraceMode),
-			DataProvider:   strings.TrimSpace(req.DataProvider),
-			PowProvider:    strings.TrimSpace(req.PowProvider),
-			NoAutoDownload: req.NoAutoDownload,
-			Workers:        req.TraceWorkers,
-			Timeout:        durationSeconds(req.TraceTimeoutS),
+			Binary:       strings.TrimSpace(req.TraceBinary),
+			Mode:         strings.TrimSpace(req.TraceMode),
+			DataProvider: strings.TrimSpace(req.DataProvider),
+			PowProvider:  strings.TrimSpace(req.PowProvider),
+			// 图形界面默认自动下载；勾选框可以关掉。
+			AutoDownload: !req.NoAutoDownload,
+			Workers:      req.TraceWorkers,
+			Timeout:      durationSeconds(req.TraceTimeoutS),
 		},
 		// Progress 既推给进度条，也翻译成日志行（阶段完成时才写一条）。
 		Progress: s.emitCSVProgress,
